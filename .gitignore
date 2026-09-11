@@ -4,3 +4,7 @@
 /.vscode/
 *.kate-swp
 *.exe
+/.env
+/local/
+/TurtleServer/
+**/__pycache__/

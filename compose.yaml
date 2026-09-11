@@ -1,0 +1,58 @@
+name: tortoise-local
+
+x-server: &server
+  image: tortoise-local:dev
+  build:
+    context: .
+    args:
+      BUILD_JOBS: ${BUILD_JOBS:-2}
+  environment:
+    DB_PASSWORD: ${DB_PASSWORD:?Run docker/setup.ps1 first}
+  depends_on:
+    db:
+      condition: service_healthy
+  stop_grace_period: 2m
+
+services:
+  db:
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Run docker/setup.ps1 first}
+      DB_PASSWORD: ${DB_PASSWORD:?Run docker/setup.ps1 first}
+    volumes:
+      - database:/var/lib/mysql
+      - ./sql:/bootstrap/sql:ro
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/10-tortoise.sh:ro
+      - ./docker:/ops:ro
+      - ./local/backups:/backups
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 5m
+    stop_grace_period: 2m
+
+  realmd:
+    <<: *server
+    command: [realm]
+    ports:
+      - "127.0.0.1:3724:3724"
+    volumes:
+      - realm-state:/state
+
+  world:
+    <<: *server
+    command: [world]
+    ports:
+      - "127.0.0.1:8085:8085"
+    stdin_open: true
+    tty: true
+    volumes:
+      - world-state:/state
+      - ./data:/data:ro
+
+volumes:
+  database:
+  realm-state:
+  world-state:

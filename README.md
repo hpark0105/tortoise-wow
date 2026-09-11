@@ -53,6 +53,9 @@ To build this project, follow any MaNGOS/MaNGOS Zero build guide, with the addit
 
 ## Database Setup
 
+For a personal Docker server with local character persistence, see
+[the Docker setup guide](docker/README.md).
+
 1. Manually import `sql/create_databases.sql`
 2. Manually import all SQL scripts in the `sql/base` folder
 3. Run `mangosd` to automatically import and track updates  

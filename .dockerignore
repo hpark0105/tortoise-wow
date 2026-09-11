@@ -1,0 +1,16 @@
+.git
+.idea
+.agents
+.codex
+.env
+.env.*
+build
+bin
+lib
+data
+local
+TurtleServer
+**/__pycache__
+**/*.log
+sql/base
+sql/create_databases.sql
