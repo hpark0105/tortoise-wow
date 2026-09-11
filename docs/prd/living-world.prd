@@ -1,7 +1,7 @@
 ---
 id: TW-BOTS-001
 title: Living World and Capable Companions
-version: 0.1
+version: 0.2
 status: draft-for-review
 created: 2026-09-11
 owner: hpark
@@ -18,7 +18,7 @@ Make the personal Turtle 1.18.1 server feel inhabited by persistent adventurers,
 
 Two distinct capabilities are required:
 
-1. **World population:** a configurable population of 500+ bot characters, distributed to create visible activity in towns, travel corridors and appropriate quest areas. Benchmark 500 simultaneously active bot sessions as a capacity target; do not claim that a database roster of 500 proves this capacity.
+1. **World population:** a configurable population of 500+ persistent bot characters combining substantial simultaneous gameplay with adaptive simulation detail. While the server runs, bots independently travel, fight, quest and visit towns across the world, including regions with no human present. Benchmark 500 simultaneously active bot sessions as a capacity target; do not claim that a database roster of 500 proves this capacity. Player proximity changes simulation priority, not whether the rest of the world exists or progresses.
 2. **Capable companions:** 2–5 persistent, individually named smart bots with roles, continuity and useful decision-making. Their skill is measured by successful gameplay, not chat volume or randomness. LLM assistance adds planning, coordination and understanding of requests to a reliable gameplay controller.
 
 This document plans implementation. It does not enable bots, change the live realm, select a replacement core, or establish that the desktop can already run 500 bots.
@@ -28,8 +28,8 @@ This document plans implementation. It does not enable bots, change the live rea
 | Topic | Draft decision | Status |
 |---|---|---|
 | Host | Existing Windows desktop and Docker game server; local persistent data | Confirmed existing setup |
-| Population target | 500+ persistent characters; separately qualify 500 concurrently active sessions | User target, concurrency interpretation pending |
-| Density | Concentrate activity around the player and selected hubs, while retaining wider-world routines | Proposed default |
+| Population target | Combine 500+ persistent identities, substantial concurrent activity and adaptive simulation detail; retain the 500-concurrent capacity benchmark | User-confirmed combined approach; capacity still unmeasured |
+| Density | Independent activity across populated regions, including places without the human; higher detail near humans without abandoning distant activity | User-confirmed world-wide behavior; exact regional budgets proposed |
 | Smart bots | Persistent companions first, later independent adventuring | Proposed default; preference pending |
 | Party composition | With one human in a normal five-player party, at most four bots accompany them; a fifth smart bot is a substitute | Required party constraint |
 | Initial role coverage | Tank, healer and two damage dealers for the player's current warlock; selectable replacements | Proposed starting lineup, not a permanent class restriction |
@@ -38,7 +38,7 @@ This document plans implementation. It does not enable bots, change the live rea
 | Hardware limits | No container CPU/RAM caps initially; measure and adapt bot work before setting limits | Existing user preference |
 | Progression | Normal persisted quests/items/XP for companions after initial provisioning; background roster can be seeded across levels | Proposed default |
 
-If measured capacity is below 500 simultaneous sessions, report the achieved count and limiting resource. Offer a clearly labeled adaptive-population mode; never silently redefine the concurrent target as offline identities or decorative NPCs.
+If measured capacity is below 500 simultaneous sessions, report the achieved count and limiting resource. Adaptive activity is part of the intended design, not permission to make only the player's surroundings active. Preserve a measured distant-world activity budget and never silently redefine the concurrent target as offline identities or decorative NPCs.
 
 ## 3. Current evidence and limits
 
@@ -59,9 +59,9 @@ Verified against the baseline commit and current source:
 
 **POP-01 — Population controls.** Expose configured roster size, desired active count, actual online count, actively simulating count, loading/failed sessions and parked/offline count separately. Smart bots are a subset of the total population, not an additional ambiguous counter. Counts must reflect real session state.
 
-**POP-02 — A visibly occupied world.** Use a population director with per-zone, per-hub and per-level budgets. Give bots routines such as travel, combat/quest activity, training/vendor visits and rest. Avoid making all 500 follow the human or stand in one capital. The director changes schedules gradually and provides a reason when an area cannot be populated.
+**POP-02 — A visibly occupied world.** Use a population director with per-zone, per-hub and per-level budgets that exist independently of the human's location. Give bots persistent goals and routines such as travel, combat/quest activity, training/vendor visits and rest. Maintain a minimum distant-world activity budget instead of allocating all capacity to the human's current zone. Bots should finish or deliberately revise their goals when the player leaves, not freeze or migrate to follow the player. The director changes schedules gradually and provides a reason when an area cannot be populated. A finite population need not occupy every zone uniformly.
 
-**POP-03 — Activity levels.** Full gameplay simulation applies near humans, in combat and for active companions. Distant bots may run lower-frequency decisions or be parked/offline through normal save/logout paths. Parked bots do not receive invented quest rewards, items or XP. Never skip necessary session, combat or persistence updates merely to improve performance numbers.
+**POP-03 — Activity levels.** Full gameplay simulation applies near humans, in combat and for active companions. Distant active bots continue real server-authoritative actions, with lower-frequency high-level decisions where safe. Combat, movement, interactions and rewards still follow normal game rules; remote quest progress comes from actual completed actions, not fabricated offline rewards. Some roster members can be parked/offline through normal save/logout paths, but that must not replace the required activity in human-free regions. Track full-detail active, reduced-decision-frequency active and parked/offline populations separately. Never skip necessary session, combat or persistence updates merely to improve performance numbers. While the server is stopped, state persists but this release does not simulate new progress.
 
 **POP-04 — Stable identities.** Persist names, race/class, faction, level, gear, inventory, quests and routine assignment. Provisioning is idempotent, uses game-valid race/class and item combinations, and can resume after a partial failure without duplicate characters or accounts. Distinguish bot-owned records from human characters for cleanup.
 
@@ -70,6 +70,8 @@ Provisioning policy must explicitly separate seeded background gear from earned 
 **POP-05 — Player access comes first.** Limit competition for quest targets, gathering nodes and vendors near the player. Avoid spawn camping, unsolicited PvP and mass chat spam. Initial release excludes auction-house trading and automated mail/trade to the human. Background loot and inventory need bounded disposal policies to prevent unbounded DB growth.
 
 **POP-06 — Natural movement.** Use validated maps, collision and pathfinding. No visible teleporting, impossible movement or arbitrary destination guesses. Moving a parked population to another region is allowed only outside player visibility under an explicit relocation policy. Handle unreachable routes with a bounded retry and a logged reason.
+
+**POP-07 — Independent-world observability.** Provide local status by zone: active counts, current activity categories, recent successful actions, and saved progression summaries. This lets the operator verify remote activity without teleporting there or causing the director to activate it. Do not move or reset bots solely because the player changes zones. On arrival, the player should encounter the continuing state of existing adventurers rather than a freshly staged crowd.
 
 ### Smart companions
 
@@ -110,7 +112,7 @@ Do not replace the working personal fork or import another server's character da
 ### Runtime components
 
 1. **Game action/controller layer:** reliable lifecycle, movement, combat, group roles, interactions and recovery. Runs without an LLM. Reuse tested strategies where compatible.
-2. **Population director:** provisions and schedules the ordinary population; manages density, activation, login pacing and overload shedding. No routine per-bot LLM calls for ambient bots.
+2. **Population director:** provisions and schedules the ordinary population; manages persistent regional activity budgets, density, activation, login pacing and overload shedding. Human proximity affects priority/detail without eliminating remote-world work. No routine per-bot LLM calls for ambient bots.
 3. **Companion coordinator:** owns party goals and translates plans into validated game actions. Uses roles, current state and deterministic tactical policies.
 4. **Local planner service:** optional asynchronous reasoning over compact observations, supported actions and retrieved knowledge. Returns structured plans; it cannot mutate game state itself.
 5. **Knowledge and memory stores:** versioned game facts/routes in a separate retrieval collection, plus bounded companion memory. Reuse the existing local embedding infrastructure with explicit scope; code-retrieval results are not automatically suitable game knowledge. Do not index credentials, accounts, raw chat logs or character backups into the code collection.
@@ -134,6 +136,7 @@ All numbers below are proposed acceptance thresholds. Establish a zero-bot basel
 |---|---|
 | Roster/persistence | Provision 500 identities twice without duplicates; sampled IDs plus complete row-count/checksum evidence survive restart and isolated backup/restore; human records remain unchanged by provisioning |
 | Density | On three fixed 20-minute town/road/quest routes, meet agreed visible-activity targets in at least 80% of observation windows; proposed starting targets are 8–20 adventurers in a selected hub and 2–6 around the player's quest route, without monopolizing targets |
+| Independent world | At the qualified 500-active profile, a proposed minimum 40% of active ambient bots remain outside the human's current zone, with at least six populated zones across both continents and three human-free test zones. During a 60-minute stationary-player test, each remote test zone records successful movement and meaningful routine/gameplay actions in at least 90% of five-minute windows. On a later visit, sampled bot identities and legitimately earned state persist; no arrival-triggered reset or teleport staging. Exact budgets are tunable, but remote activity is required |
 | Population scale | Stages 10, 50, 100, 250, 500 active sessions; each runs at least 30 minutes with reported actual counts, then an eight-hour 500-active soak if prior stages pass. Test dispersed, concentrated-hub and mixed-combat scenarios separately |
 | Server responsiveness | Provisional measured world-update processing p95 <=50 ms, p99 <=100 ms; zero >1 s bot-attributable stalls during the soak. Record configured tick interval separately and use its actual budget when tighter |
 | Client experience | With client on the same desktop, no sustained >10% median FPS regression or >100 ms p95 interaction-latency increase against matched zero-bot route; investigate GPU sharing and crowded-scene cost separately |
@@ -154,7 +157,7 @@ Count sampled bot actions and failures, not just screenshots of a crowded town. 
 | P0 — BOT-001 baseline; BOT-002 execution-engine comparison; BOT-003 shared-model arbitration design | Measured baseline, chosen engine/reuse boundary, compatibility and migration decision, approved scenario set | Build/protocol/persistence proof; no unsupported claim of 500-bot capacity |
 | P1 — BOT-010 lifecycle/timer/null safety; BOT-011 idempotent provisioning; BOT-012 minimal commands and recovery | Ten ordinary bots and two role-aware companions in a disposable world | Stable lifecycle, real saves, follow/combat/death smoke tests, no LLM dependency |
 | P2 — BOT-020 role tactics; BOT-021 supported quests/travel; BOT-022 party/loot/bench controls | Four useful party companions and optional fifth roster substitute | Combat/quest/recovery gates pass on declared content |
-| P3 — BOT-030 routines/density director; BOT-031 population pacing; BOT-032 load telemetry | 50 -> 100 -> 250 active bots with visible activity | Intermediate load, density and persistence gates pass at each stage |
+| P3 — BOT-030 independent regional routines/density director; BOT-031 population pacing; BOT-032 load and remote-activity telemetry | 50 -> 100 -> 250 active bots with visible activity near and away from the human | Intermediate load, scaled regional-activity budgets, density and persistence gates pass at each stage |
 | P4 — BOT-040 bounded planner API; BOT-041 game-knowledge retrieval/memory; BOT-042 arbitration/failure handling | LLM-assisted goals and coordination for 2–5 companions | Failure-tolerance and paired intelligence gates pass; costs reported |
 | P5 — BOT-050 500-active benchmark; BOT-051 eight-hour soak; BOT-052 rollout/rollback | Qualified capacity report and playable living-world profile | Scale, client responsiveness, persistence and recovery gates pass; lower-capacity result documented if needed |
 
@@ -172,7 +175,7 @@ P3 and P4 can be developed independently after the action boundary is stable. On
 
 - Default population and LLM flags remain off until the relevant gates pass. Separate controls for ambient population, companions and planner allow each to be disabled independently.
 - Start changes in disposable Compose projects without conflicting public ports. Keep bot state and migrations backed up with the existing game databases; independently back up any new companion-memory store and record a shared backup/version marker. Live character data remains in its current named volume.
-- On overload, stop new logins first, coalesce low-priority work and save/park distant ambient bots. Preserve human sessions and active-party tactics. Publish actual active counts after shedding.
+- On overload, stop new logins first and coalesce low-priority decisions; if necessary, save/park ambient bots across regions without silently draining all human-free zones. Preserve human sessions and active-party tactics. Publish actual active counts and whether regional activity floors remain met. Emergency safety can override those floors, but the result must be labeled degraded rather than a passing living-world profile.
 - Rollback disables the planner/population and restores a previously tested image; database rollback uses a separately verified backup because image rollback does not undo migrations. Never delete the human character or reset the personal database to provision bots.
 - Pin imported code revisions and review licenses, build flags, protocol/schema compatibility and upstream maintenance burden. Keep `ALLOW_TURTLE_ADDONS=ON` and correct map/DBC validation.
 - CI covers deterministic bot/controller tests with safe fixtures and no client archives. Local integration covers real maps, sessions and content. Seed randomness and retain compact structured metrics under ignored `local/` so regressions are reproducible.
@@ -187,11 +190,11 @@ P3 and P4 can be developed independently after the action boundary is stable. On
 
 ## 10. Open decisions
 
-1. Does 500+ primarily mean simultaneous active gameplay, or a larger persistent roster with adaptive activity? The PRD preserves both counters and the explicit 500-active benchmark until clarified.
+1. **Resolved:** use a combination of persistent population and simultaneous activity with adaptive simulation detail. The world must continue doing things away from the player; preserve separate counters and the explicit 500-active capacity benchmark. Exact measured capacity and regional budgets remain engineering decisions.
 2. Should the smart bots remain personal companions or eventually pursue independent goals? Default: companions first.
 3. Which classes, first quest set and first known-working dungeon should define acceptance? Default: support the current warlock with tank/healer/DPS coverage; choose exact scenarios in P0.
 4. Should companions level normally from the player’s current level or use an optional catch-up policy? Default: initial matched-level provisioning, then normal progression; no ongoing auto-leveling without a decision.
-5. What balance of capital-city atmosphere, nearby quest activity and distant-world coverage matters most? Default: nearby activity first, using caps to protect quest availability.
+5. What exact budgets should balance capital-city atmosphere, nearby quest activity and distant-world coverage? Independent distant activity is now confirmed; tune regional floors and nearby caps using the density and independent-world gates rather than prioritizing only the player's location.
 
 ## 11. Planning evidence and status
 
