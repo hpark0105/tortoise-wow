@@ -2202,10 +2202,11 @@ void LoadPlayerEggLoot();
     sScriptMgr.LoadGenericScripts();
     sLog.outString("Loading creature EventAI scripts...");
     sScriptMgr.LoadCreatureEventAIScripts();
-    sScriptMgr.CheckAllScriptTexts();
     sLog.outString("Loading creature EventAI events...");
     sEventAIMgr.LoadCreatureEventAI_Events();
     sScriptMgr.Initialize();
+    // must be after sScriptMgr.Initialize() so the legacy script_texts store is loaded
+    sScriptMgr.CheckAllScriptTexts();
     ScriptRegistry<WorldScript>::ForEachEnabledHook(WORLDHOOK_ON_LOAD_CUSTOM_DATABASE_TABLE, [](WorldScript* script)
     {
         script->OnLoadCustomDatabaseTable();

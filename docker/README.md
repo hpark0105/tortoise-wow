@@ -147,3 +147,5 @@ the containers, and verify those records and your position after logging back in
 Then check combat, death/recovery, vendors, travel, and one dungeon before bots.
 
 See [bot feasibility](bots.md) for the proposed LLM work and remaining decisions.
+See [content repair status](content-status.md) for repaired startup warnings,
+remaining gameplay gaps, and the opt-in disposable content integration check.
