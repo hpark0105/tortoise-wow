@@ -10,6 +10,7 @@ lib
 data
 local
 TurtleServer
+twmoa_1181_cn
 **/__pycache__
 **/*.log
 sql/base

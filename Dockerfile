@@ -32,6 +32,7 @@ COPY --from=build /opt/tortoise /opt/tortoise
 # The module updater uses this compile-time source path.
 COPY --from=build /source/modules /source/modules
 COPY sql/database_updates /opt/tortoise/sql/database_updates
+RUN mkdir -p /opt/tortoise/sql/database_updates/auth
 COPY tools/dbc_verification /opt/tortoise/dbc_verification
 COPY docker/server.py docker/verify_dbc.py /opt/tortoise/
 ENV PATH="/opt/tortoise/bin:${PATH}"

@@ -6,7 +6,8 @@ case "${1:-check}" in
     check)
         [[ "$(query "SELECT COUNT(*) FROM tw_world.creature_template")" -gt 0 ]]
         [[ "$(query "SELECT COUNT(*) FROM tw_world.quest_template")" -gt 0 ]]
-        [[ "$(query "SELECT COUNT(*) FROM tw_logon.realmlist WHERE id=1 AND address='127.0.0.1' AND port=8085 AND realmbuilds='7272'")" == 1 ]]
+        # World startup rewrites realmbuilds; realmd advertises its compiled Turtle build.
+        [[ "$(query "SELECT COUNT(*) FROM tw_logon.realmlist WHERE id=1 AND address='127.0.0.1' AND port=8085")" == 1 ]]
         query 'SELECT COUNT(*) AS characters_present FROM tw_char.characters' >/dev/null
         echo 'Database bootstrap and local realm checks passed.'
         ;;

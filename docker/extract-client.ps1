@@ -36,7 +36,7 @@ if ($VerifyOnly) {
     return
 }
 Invoke-Extractor 'mapextractor' @('-i', '/client', '-o', '/output', '-e', '1')
-Invoke-Extractor 'vmapextractor' @('-d', '/client')
+Invoke-Extractor 'vmapextractor' @('-d', '/client/Data')
 New-Item -ItemType Directory -Force -Path (Join-Path $outputDirectory 'vmaps') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $outputDirectory 'mmaps') | Out-Null
 Invoke-Extractor 'vmap_assembler' @('Buildings', 'vmaps')
