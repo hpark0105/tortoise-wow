@@ -1,5 +1,9 @@
 # LLM-directed bots: feasibility review
 
+The current product plan is [Living World and Capable Companions](../docs/prd/living-world.prd),
+covering a 500+ population target and 2–5 smart companions. This file records the
+earlier implementation feasibility review; the PRD owns scope and acceptance criteria.
+
 The repository already implements `PlayerBotMgr` and `PlayerBotAI` under
 `src/game/PlayerBots`. Population settings are `PlayerBot.MinBots` and
 `PlayerBot.MaxBots`. The manager loads an existing character roster from the
