@@ -1,7 +1,7 @@
 ---
 id: TW-BOTS-001
 title: Living World and Capable Companions
-version: 0.3
+version: 0.4
 status: draft-for-review
 created: 2026-09-11
 owner: hpark
@@ -33,7 +33,7 @@ This document plans implementation. It does not enable bots, change the live rea
 | Smart bots | Persistent personal companions focused on the human's party, goals and progression; independent routines belong to the ambient population | User-confirmed companions |
 | Party composition | With one human in a normal five-player party, at most four bots accompany them; a fifth smart bot is a substitute | Required party constraint |
 | Initial role coverage | Tank, healer and two damage dealers for the player's current warlock; selectable replacements | Proposed starting lineup, not a permanent class restriction |
-| LLM | Existing local inference stack, accessed through an explicit shared-service lease/scheduler | Local-first default; runtime arbitration still to be designed |
+| LLM | Existing local inference stack, accessed through a Windows host planner and shared-model broker | Proposed technical design below; runtime integration not implemented |
 | Cloud inference | Disabled by default; no paid fallback without an explicit later decision | Cost boundary |
 | Hardware limits | No container CPU/RAM caps initially; measure and adapt bot work before setting limits | Existing user preference |
 | Progression | Normal persisted quests/items/XP for companions after initial provisioning; background roster can be seeded across levels | Proposed default |
@@ -125,10 +125,78 @@ Model requests must never block the world thread. Responses carry bot/party iden
 
 - Use one approved shared model process; do not launch a model per bot or invoke a coding agent for gameplay decisions. Honor the existing single-slot local-model rules through a runtime lease/scheduler established in the feasibility phase.
 - Coding sessions may occupy the model. Companions then continue with deterministic tactics and a safe retained goal. Do not interrupt another model session or silently route to paid inference.
-- Proposed starting budget: one inference in flight; eight total planning requests/minute across all companions; at most 1,500 input and 256 output tokens/request; queue depth eight; response deadline eight seconds. These are tuning defaults to validate, not measured model performance.
+- Proposed starting budget: one inference in flight; at most four total planning requests/minute across all companions, burst one; at most 1,500 input and 256 output tokens/request; one pending, replaceable request per party; end-to-end response deadline eight seconds. Rate adapts downward to keep runtime inference utilization at or below 60% of a minute. These are tuning defaults to validate, not measured model performance. The previous eight requests/minute could consume more than a minute of service at the eight-second deadline and is superseded.
 - Use one shared party plan where possible. Trigger reasoning on meaningful changes; coalesce events, cache stable instructions/facts and bound memory summaries. Never send the whole world or repeated full histories.
 - Instrument calls/hour, input/output tokens, cache/retrieval hits, latency, discarded responses and inference busy time. Local inference still consumes hardware/electricity; claim hosted-token savings only against a measured comparable workflow.
 - Embeddings stay on CPU. Initial indexing and gameplay must be tested together; schedule bulk indexing away from peak play if it hurts responsiveness.
+
+### Technical implementation plan
+
+All new components, paths, endpoints and timing values in this subsection are proposals. None is a claim about an existing runtime API. P0 must confirm the execution-engine choice and benchmark the model before implementation commitments.
+
+#### A. Separate gameplay execution from reasoning
+
+The ordinary population uses C++ strategies and a state machine: select a valid regional goal, travel, perform supported quest/combat actions, recover, visit services, and save. The director assigns goals and regional budgets; controllers execute them using normal game systems. No LLM request is required to keep 500 bots active.
+
+Companions use the same tested execution primitives with stronger class/role and party policies. The optional LLM selects bounded goals, explains blockers and interprets natural-language requests. One party plan assigns coordinated tasks to the active companions; individual personalities do not create separate competing combat planners. Deterministic stop/stay/assist commands override a plan immediately through the server's normal update path.
+
+Start with the bundled `src/game/PlayerBots/` lifecycle behind a small controller interface. BOT-002 may replace selected strategies with a pinned compatible implementation after build, license and persistence checks. Keep lifecycle/session glue separate from role policies, regional scheduling and planner transport so a strategy can change without replacing the core or database. Prefer narrow core hooks over maintaining a wholesale divergent fork.
+
+Proposed code ownership:
+
+| Location | Responsibility |
+|---|---|
+| `src/game/PlayerBots/` | Session lifecycle, controller adapter, deterministic actions, party coordinator, population director and world-thread validation |
+| `services/companion-planner/` | Optional Windows host planner, compact observation handling, request coalescing, knowledge lookup and response schema checks |
+| `docs/bots/` | Versioned action protocol, supported scenarios, engine decision and benchmark reports without private data |
+| Existing ordered SQL updater directories | Versioned bot ownership, provisioning and routine metadata migrations in the appropriate database |
+| `park-llama` repository, separate change | Reusable Windows model-lease broker and tests; no duplicated model launcher in this repository |
+
+#### B. Concrete deployment and data flow
+
+Keep the world, realm and MariaDB services in Docker. Initially run the optional planner and inference broker on Windows beside the existing model stack. A Linux container cannot directly participate in the current Windows named-mutex ownership contract; moving the planner entirely into Docker requires a host broker regardless.
+
+1. On its update thread, the world creates a bounded immutable observation for an owned companion party. Transport code receives copied values, never live `Player` pointers.
+2. A new authenticated game bridge exposes a small poll/submit protocol. Bind its published Docker port to `127.0.0.1` on Windows; the service may listen on the container interface internally. Do not publish the database or reuse an unrestricted command console.
+3. The Windows planner polls for observations, coalesces them by party and goal version, and asks the host broker for one bounded model request. It never directly edits game tables.
+4. The broker acquires the shared model lease, verifies the approved model and health, performs inference against the existing loopback model endpoint, and returns structured output. Model credentials remain host-local and absent from game observations, prompts and container images.
+5. The planner submits a candidate plan to the game bridge. A bounded inbound queue delivers it to the world thread for authoritative validation and acceptance or rejection.
+
+Network handlers must not wait on the world thread or execute game actions themselves. Set payload, queue and request-time limits; authenticate reads and writes with an ignored local credential. Disconnects, bridge failure and an absent planner all leave deterministic gameplay operating. Exact port and transport library are selected in BOT-040 after checking existing dependencies; the protocol does not depend on an invented existing HTTP endpoint.
+
+#### C. Shared-model arbitration and the current throttle
+
+Verified current behavior: `park-llama/scripts/park-models.ps1` implements `Enter-ParkModelSession` with the named mutex `Global\park-llama-model-session` and a nonblocking acquisition. A second launcher throws rather than queues. `scripts/park-agent.ps1` acquires that mutex before model setup and holds it through the entire coding session, releasing it in `finally`. This proves exclusive launcher-session ownership; it does not establish the backend's configured inference parallelism or measured throughput.
+
+Use `park-agent exec` for bounded development/review assignments, not runtime gameplay requests. Implement a small broker in `park-llama` that obeys the same ownership mechanism and existing approved model-management functions. It must not start an independent model server, bypass the mutex or swap models underneath another owner. The broker uses one dedicated Windows owner thread to acquire and release the mutex, since mutex ownership belongs to the acquiring thread.
+
+When a coding session owns the model, skip optional inference and report `model_busy`; keep the current safe goal and deterministic tactics. Do not retain the lease between planning requests or force preemption. A fixed approved runtime model profile avoids per-companion model swapping; if the current profile is incompatible, defer planning until a safe supported transition is available. Runtime must also respect the operator's explicit model-stop state.
+
+The eight-second deadline includes queueing, lease acquisition, inference and validation. Drop expired queued work before inference. Coalesce to the newest observation for each party, invalidate requests on owner stop/goal change, and enforce the global rate cap before acquiring the lease. With average service time `S` seconds, target no more than `min(4, 36 / S)` requests/minute, with additional backoff for deadline failures. Measure tokenization and actual latency before treating the input/output caps as feasible. A failed or slow planner is an optional feature failure, not a reason to weaken combat behavior.
+
+A client timeout does not prove inference stopped. Retain ownership until completion or acknowledged backend cancellation. If completion cannot be established within a bounded drain interval, quarantine further runtime requests and expose an operator-visible failure; do not silently release the lease while generation may continue. Broker crash/abandoned-mutex recovery must establish backend idleness before another request or model swap. This requires a shared recovery contract with launchers/watchdog, not only an isolated broker fix. Test this contract before enabling runtime inference.
+
+#### D. Action contract and tactical safety
+
+Use a versioned JSON schema with `schemaVersion`, `requestId`, `partyId`, `partyEpoch`, `goalVersion`, `observationVersion`, server-issued expiry, and the allowed capabilities/targets for that observation. Candidate output contains the matching identifiers, a `planId`, and a bounded list of steps using action enums such as follow, wait, assist, recover or pursue a supported quest objective. The model cannot invent spell IDs, destinations, quest prerequisites or arbitrary executable commands.
+
+An accepted goal is not permission to execute every future step blindly. The controller rechecks ownership, party membership, current goal, target availability, map/access rules and action preconditions as it runs. Server legality checks still apply to every cast and interaction. Reject unknown fields/actions, oversized lists, duplicate plan IDs, expired observations and invalid targets. A stop command increments the goal version so an old response cannot resume the stopped activity. Reconnects create a new party epoch to reject pre-restart responses.
+
+Proposed starting decision intervals are 100–250 ms for needed tactical evaluations and 1–5 seconds for distant high-level routine selection, adjusted through profiling. These do not replace normal movement, session, combat or persistence updates. LLM planning happens on significant goal/blocker changes, generally tens of seconds apart, never for each movement step or spell cast.
+
+#### E. Persistence, knowledge and provisioning
+
+Game character, inventory, spell and quest tables remain authoritative. Add explicit persistent bot ownership/type, provisioning version/status and routine assignment metadata through reviewed migrations. Provisioning records a stable bot identity and resumes incomplete steps idempotently; it does not infer ownership from a name prefix. Save/logout uses normal game paths. Test interruption between provisioning steps and ensure retries cannot alter human records.
+
+Store bounded companion preferences and task summaries separately from authoritative game state, initially in a local planner SQLite store with schema versions. Include its snapshot and a shared version/backup marker in the backup procedure. On restore, reconcile memories against current game facts and discard stale goals; never replay saved action queues. Benched companions remain saved and inactive, without ambient progression.
+
+Start knowledge lookup with a curated, versioned set of supported quests, routes, roles and recovery rules. Deterministic lookups by game ID precede semantic search. Later use a separate approved game-knowledge collection on the existing embedding infrastructure; attach source revision and relevant IDs to retrieved facts. Do not feed the code index to bots as world knowledge, index raw player chat/history, or make embedding availability a requirement for combat. Bulk knowledge indexing is an operator-controlled maintenance task, not a startup action or a per-bot loop.
+
+#### F. Implementation evidence and CI
+
+BOT-003 delivers mutex contention, coding-session coexistence, watchdog interaction, cancellation and crash-recovery tests against a fake backend before a bounded real-model check. BOT-040 delivers protocol/schema fixtures and stale/duplicate/ownership rejection tests. BOT-042 injects unavailable, slow, malformed and disconnected inference for the full failure-tolerance gate. Report queue age, model-busy skips, completion/cancellation state, accepted/rejected plans and controller outcomes without recording hidden model reasoning or private chat.
+
+Add CI incrementally: deterministic controller/state-machine tests, schema validation, migration/provisioning fixtures and a client-free server compile preserving `-DALLOW_TURTLE_ADDONS=ON`. Keep real-map gameplay and GPU inference benchmarks as reproducible local integration runs; CI cannot prove those behaviors without their required assets. Each phase records commands, source revision, scenario seed, actual active counts and outcome. No extra runtime service or live bot flag is enabled by this planning change.
 
 ## 6. Success measures and release gates
 
@@ -203,3 +271,5 @@ P3 and P4 can be developed independently after the action boundary is stable. On
 Source checks: `src/game/PlayerBots/PlayerBotMgr.cpp`, `PlayerBotAI.cpp`, `PlayerBotAI.h`, `docker/server.py`, `modules/README.md`, and existing `docker/bots.md`. This PRD supersedes the older feasibility note's proposed scale while retaining its warnings about unproven behavior.
 
 Retrieval registration and Docker services are present, but the first code-index snapshot was not available during this draft; the initial sync call timed out. Bounded current-source reads were used instead, without claiming indexed evidence. A fresh local worker completed a read-only source review with verified file hashes; the head independently checked its useful lifecycle/scaling findings and excluded unsupported claims about guaranteed player aggression, account-row creation and dominant resource bottlenecks. No bot implementation or live configuration changes belong to this planning task.
+
+Version 0.4 adds the technical plan using directly verified current launcher source. SHA256: `park-models.ps1` = `144c0e58b1f0bfb44935befe5f312818feb4b828000b208b1204574c3fc7387a`; `park-agent.ps1` = `13c55d7593f030df25c78aa2253e4307197f010a0ebd0a3b41ab9d6f4fcf0e53`. A fresh bounded local review was attempted with a versioned evidence card, but the launcher rejected it because another session owned the shared model; no worker review is claimed for this revision. The head reviewed the plan directly. Retrieval/index synchronization is deferred while the operator works on the embedding containers; no new sync was started and no embedding/derived-write counts or token savings are claimed for this revision.
