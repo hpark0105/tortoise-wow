@@ -1,7 +1,7 @@
 ---
 id: TW-BOTS-001
 title: Living World and Capable Companions
-version: 0.2
+version: 0.3
 status: draft-for-review
 created: 2026-09-11
 owner: hpark
@@ -30,7 +30,7 @@ This document plans implementation. It does not enable bots, change the live rea
 | Host | Existing Windows desktop and Docker game server; local persistent data | Confirmed existing setup |
 | Population target | Combine 500+ persistent identities, substantial concurrent activity and adaptive simulation detail; retain the 500-concurrent capacity benchmark | User-confirmed combined approach; capacity still unmeasured |
 | Density | Independent activity across populated regions, including places without the human; higher detail near humans without abandoning distant activity | User-confirmed world-wide behavior; exact regional budgets proposed |
-| Smart bots | Persistent companions first, later independent adventuring | Proposed default; preference pending |
+| Smart bots | Persistent personal companions focused on the human's party, goals and progression; independent routines belong to the ambient population | User-confirmed companions |
 | Party composition | With one human in a normal five-player party, at most four bots accompany them; a fifth smart bot is a substitute | Required party constraint |
 | Initial role coverage | Tank, healer and two damage dealers for the player's current warlock; selectable replacements | Proposed starting lineup, not a permanent class restriction |
 | LLM | Existing local inference stack, accessed through an explicit shared-service lease/scheduler | Local-first default; runtime arbitration still to be designed |
@@ -76,6 +76,8 @@ Provisioning policy must explicitly separate seeded background gear from earned 
 ### Smart companions
 
 **CMP-01 — Ownership and roster.** Recruit, name/select, assign role, invite, dismiss and recall a roster of 2–5 bots. The human controls party leadership and loot policy. At most four occupy a standard five-player party with the human; replacements occur out of combat. Persist companion ownership independently of transient session IDs.
+
+Companions do not independently leave the player to pursue unrelated quests, join another party or change their assigned role. When dismissed or benched, retain their saved state and await recall; do not silently advance their quests, level or gear through ambient-population routines. Tactical initiative serves the player's current goal and can be overridden with stop/stay commands.
 
 **CMP-02 — Commands.** Support follow, stay, assist, defend, attack marked target, stop, recover, return and role assignment. Basic commands execute through deterministic validated actions. Natural-language requests translate into those capabilities or a bounded plan; unclear/destructive requests produce a short clarification, not a guessed action.
 
@@ -191,7 +193,7 @@ P3 and P4 can be developed independently after the action boundary is stable. On
 ## 10. Open decisions
 
 1. **Resolved:** use a combination of persistent population and simultaneous activity with adaptive simulation detail. The world must continue doing things away from the player; preserve separate counters and the explicit 500-active capacity benchmark. Exact measured capacity and regional budgets remain engineering decisions.
-2. Should the smart bots remain personal companions or eventually pursue independent goals? Default: companions first.
+2. **Resolved:** the 2–5 smart bots are personal companions. Independent adventuring belongs to the larger ambient population; companion autonomy is limited to carrying out the player's goals and party tactics.
 3. Which classes, first quest set and first known-working dungeon should define acceptance? Default: support the current warlock with tank/healer/DPS coverage; choose exact scenarios in P0.
 4. Should companions level normally from the player’s current level or use an optional catch-up policy? Default: initial matched-level provisioning, then normal progression; no ongoing auto-leveling without a decision.
 5. What exact budgets should balance capital-city atmosphere, nearby quest activity and distant-world coverage? Independent distant activity is now confirmed; tune regional floors and nearby caps using the density and independent-world gates rather than prioritizing only the player's location.
