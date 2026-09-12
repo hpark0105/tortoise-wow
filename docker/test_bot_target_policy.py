@@ -26,7 +26,10 @@ class BotTargetPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         p.IMAGE = os.environ.get("MVP003_LAB_IMAGE", "tortoise-local:mvp003-review")
-        p.command(["docker", "image", "inspect", p.IMAGE])
+        try:
+            p.command(["docker", "image", "inspect", p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{p.IMAGE} image not present; build it first")
         cls.project = "tortoise-bot-target-" + uuid.uuid4().hex[:12]
         cls.evidence = p.ROOT / "local" / (cls.project + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         cls.evidence.mkdir(parents=True)
