@@ -327,6 +327,9 @@ cross-ref 23891 on KAP-549):
   but the seeded creature was not acquired and XP remained 0 -> 0 after 235s.
   Draft test removed; follow-up must validate creature faction/grid activation
   before rerunning the combat-credit proof.
+- MVP-004 active-spawn retry also failed closed after 235s with XP `0 -> 0`.
+  No test was committed; the fixture needs a server-supported deterministic
+  combat probe or a verified loaded creature spawn before acceptance.
 - Future platform task added: `docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md`.
   It defines a local broker for multiple companion requests, fairness,
   backpressure, async game-side calls, stale-response rejection, metrics, and
