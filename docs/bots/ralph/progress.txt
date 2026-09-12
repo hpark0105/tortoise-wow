@@ -320,3 +320,6 @@ cross-ref 23891 on KAP-549):
 - MVP-003 card and prd.json updated; personal server untouched. Retrieval remains
   operator-paused with embedding unavailable, so no sync or derived-write counts.
 - Next dependency-ready slice: MVP-004 legitimate combat XP.
+- MVP-004 handoff refined with a concrete evidence plan: disposable seeded
+  hostile creature, normal PlayerBotAI kill credit, before/after `characters.xp`
+  query by GUID/name, positive delta, and no direct XP or GM mutation.
