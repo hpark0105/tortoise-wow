@@ -336,7 +336,7 @@
       ],
       "priority": 13,
       "passes": false,
-      "notes": "Small MVP work item. Full card: docs/bots/ralph/mvp/mvp-003.md",
+      "notes": "Idle player-target guard implemented and build-validated; passes remains false pending a bounded hostile-player runtime fixture. Full card: docs/bots/ralph/mvp/mvp-003.md",
       "dependsOn": [
         "MVP-002"
       ],

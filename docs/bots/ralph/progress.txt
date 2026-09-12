@@ -227,6 +227,16 @@ cross-ref 23891 on KAP-549):
 - Next dependency-ready item is MVP-001 save-boundary rejection coverage.
 - Retrieval sync remains operator-paused. Fresh park-agent review was attempted
   but the one shared-model slot was already occupied; no worker result claimed.
+
+2026-09-12 MVP-003 started:
+- Current core source defines SelectNearestTarget as the nearest hostile unit,
+  so hostile players can be returned even though friendly units are filtered.
+- Added the narrow idle-acquisition guard in PlayerBotAI.cpp: autonomous bots
+  skip player targets, while the existing combat branch can defend against a
+  current victim. Personal server remains untouched.
+- Runtime hostile-player staging is not yet proven; next validation is the
+  disposable feature build plus source/diff review. Do not claim live PvP safety
+  until a bounded hostile-player fixture exists.
 2026-09-12 Local MVP-001 save-boundary rejection (park-head; KAP-550 / TW-007, C4):
 - Card scope honored: only docker/test_bot_save_guard.py changed; added
   BotSaveBoundaryTests (disposable tortoise-bot-sbnd-* lab, one L10 Human

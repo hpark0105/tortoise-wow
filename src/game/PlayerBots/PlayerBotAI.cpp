@@ -96,8 +96,14 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         {
             if (Unit* target = me->SelectNearestTarget(30.0f))
             {
-                me->Attack(target, true);
-                me->GetMotionMaster()->MoveChase(target);
+                // Autonomous companions never initiate PvP. A hostile player
+                // may still be the current victim when the bot is defending
+                // itself; this guard applies only to idle target acquisition.
+                if (!target->IsPlayer())
+                {
+                    me->Attack(target, true);
+                    me->GetMotionMaster()->MoveChase(target);
+                }
             }
         }
     }

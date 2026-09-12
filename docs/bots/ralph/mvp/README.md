@@ -14,7 +14,7 @@ A foundation persistence gate ends at MVP-008. A playable companion MVP addition
 
 1. MVP-001 save-boundary rejection.
 2. MVP-002 stale-completion injection and rejection.
-3. MVP-003 owner-safe targeting.
+3. MVP-003 owner-safe targeting (source/build gate; live hostile-player fixture remains open).
 4. MVP-004 normal combat XP.
 5. MVP-005 normal corpse loot.
 6. MVP-006 one declared supported quest.
