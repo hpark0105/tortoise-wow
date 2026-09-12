@@ -1,6 +1,6 @@
 # Playable companion MVP
 
-Reviewed 2026-09-12 on `feature/kap-543-bot-living-world` at `7bba514`. This folder splits the remaining MVP work into assignments small enough for one fresh local-model session. `../prd.json` is the machine-readable queue.
+Reviewed 2026-09-12 on `feature/kap-543-bot-living-world`. This folder splits the remaining MVP work into assignments small enough for one fresh local-model session. `../prd.json` is the machine-readable queue.
 
 ## Corrected assessment
 
@@ -14,7 +14,7 @@ A foundation persistence gate ends at MVP-008. A playable companion MVP addition
 
 1. MVP-001 save-boundary rejection.
 2. MVP-002 stale-completion injection and rejection.
-3. MVP-003 owner-safe targeting (source/build gate; live hostile-player fixture remains open).
+3. MVP-003 owner-safe targeting (source/build gate plus disposable two-faction lifecycle proof).
 4. MVP-004 normal combat XP.
 5. MVP-005 normal corpse loot.
 6. MVP-006 one declared supported quest.

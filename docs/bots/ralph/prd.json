@@ -279,8 +279,8 @@
         "Scenario: Keep ephemeral sessions unsaved\nGiven an ephemeral bot session reaches the same save boundary\nWhen SaveToDB executes\nThen the existing no-save behavior remains effective"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "Small MVP work item. Full card: docs/bots/ralph/mvp/mvp-001.md",
+      "passes": true,
+      "notes": "Accepted from ownership-boundary lab evidence; full card: docs/bots/ralph/mvp/mvp-001.md",
       "dependsOn": [],
       "allowedScope": [
         "docker/test_bot_save_guard.py"
@@ -304,8 +304,8 @@
         "Scenario: Disable the hook by default\nGiven a normal server configuration\nWhen bot login runs\nThen no synthetic completion can be injected"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "Small MVP work item. Full card: docs/bots/ralph/mvp/mvp-002.md",
+      "passes": true,
+      "notes": "Accepted from 7/7 lifecycle and stale-generation lab evidence; full card: docs/bots/ralph/mvp/mvp-002.md",
       "dependsOn": [
         "MVP-001"
       ],
@@ -335,8 +335,8 @@
         "Scenario: Never initiate PvP autonomously\nGiven any player is within the scan radius\nWhen the bot is not already defending itself\nThen it does not initiate an attack on that player"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": "Idle player-target guard implemented and build-validated; passes remains false pending a bounded hostile-player runtime fixture. Full card: docs/bots/ralph/mvp/mvp-003.md",
+      "passes": true,
+      "notes": "Accepted: source/build guard plus 2/2 disposable two-faction target-policy lifecycle lab; full card: docs/bots/ralph/mvp/mvp-003.md",
       "dependsOn": [
         "MVP-002"
       ],

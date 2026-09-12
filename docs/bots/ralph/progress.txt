@@ -309,3 +309,14 @@ cross-ref 23891 on KAP-549):
   fallback, no embedding/derived-write counts. Personal server untouched
   (still running the prior image 34763fe92418).
 - Next: MVP-003 owner-safe targeting.
+- 2026-09-12 hosted-head acceptance: MVP-001 and MVP-002 accepted from the
+  previously reviewed ownership-boundary and 7/7 stale-generation lab evidence.
+- MVP-003 target-policy fixture completed with `python docker/test_bot_target_policy.py -v`:
+  2/2 in 65.266s. Disposable project loaded opposing-faction owned bots
+  Targetally (500001) and Targethorde (500002), reached world-ready, and had no
+  crash. The fixture intentionally waits on normal login/world health because
+  seeded PvP-desired flags do not force active PvP state during this login path;
+  source/build evidence remains the direct proof of the idle player guard.
+- MVP-003 card and prd.json updated; personal server untouched. Retrieval remains
+  operator-paused with embedding unavailable, so no sync or derived-write counts.
+- Next dependency-ready slice: MVP-004 legitimate combat XP.
