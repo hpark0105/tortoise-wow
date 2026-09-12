@@ -336,3 +336,7 @@ cross-ref 23891 on KAP-549):
   deterministic fallback while `park-llama` is saturated. Implementation is
   intentionally post-MVP and belongs in the park-llama repository plus the
   game client integration.
+- CI follow-up: GitHub Actions run 34719018160 failed in pre-build unittest
+  discovery because Docker lab modules inspected unavailable local images.
+  Added image-missing skips to the target-policy, provision-commit, and
+  telemetry labs; py_compile and diff checks pass. Commit `d38c5f3` pushed.
