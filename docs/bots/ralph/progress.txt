@@ -330,6 +330,11 @@ cross-ref 23891 on KAP-549):
 - MVP-004 active-spawn retry also failed closed after 235s with XP `0 -> 0`.
   No test was committed; the fixture needs a server-supported deterministic
   combat probe or a verified loaded creature spawn before acceptance.
+- MVP-004 accepted: corrected active fixture uses creature template 6 (Kobold
+  Vermin, level 1-2) against level-3 owned bot Combatxp GUID 500101. Normal
+  PlayerBotAI combat and core kill credit changed XP `0 -> 54`; 1/1 passed in
+  121.231s. No direct XP write, GM command, published port, or personal volume.
+- Next: MVP-005 normal corpse loot using the same deterministic combat fixture.
 - Future platform task added: `docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md`.
   It defines a local broker for multiple companion requests, fairness,
   backpressure, async game-side calls, stale-response rejection, metrics, and
