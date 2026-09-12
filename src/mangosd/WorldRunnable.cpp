@@ -60,11 +60,14 @@ void WorldRunnable::operator()()
     {
         if (telemetrySeconds > 3600)
             sLog.outError("Perf.ProcessingTelemetry=%u is out of range (1..3600); processing telemetry disabled", telemetrySeconds);
-        else if (!PerfProcessingHistogram::SelfTest())
+        else if (!PerfProcessingHistogram::SelfTest() || !BoundedTelemetrySink::SelfTest())
             sLog.outError("World processing telemetry self-test failed; telemetry disabled");
         else
             telemetryEnabled = true;
     }
+    if (telemetryEnabled)
+        sPerfMonitor.StartTelemetrySink(
+            sConfig.GetStringDefault("Perf.ProcessingTelemetryFile", "world_processing_telemetry.log").c_str());
     uint64 tickIntervalTotalMs = 0;
     uint32 telemetryLastReportMs = telemetryEnabled ? WorldTimer::getMSTime() : 0;
 
@@ -138,6 +141,9 @@ void WorldRunnable::operator()()
 
 		sPerfMonitor.FrameEnd(diff);
     }
+
+    if (telemetryEnabled)
+        sPerfMonitor.StopTelemetrySink();
 
     sLog.outString("Shutting down world...");
     sWorld.Shutdown();

@@ -2122,3 +2122,7 @@ Perf.ReportInterval = 600
 
 # World processing-time telemetry: report interval in seconds; 0 disables it.
 Perf.ProcessingTelemetry = 0
+
+# World processing-time telemetry sink file. Written by a dedicated bounded
+# nonblocking writer thread; a blocked consumer can never stall the world thread.
+Perf.ProcessingTelemetryFile = "world_processing_telemetry.log"

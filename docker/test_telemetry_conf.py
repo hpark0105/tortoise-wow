@@ -18,6 +18,16 @@ class TelemetryConfTests(unittest.TestCase):
         output = server.render("Motd = hi\n", {"Perf.ProcessingTelemetry": "30"})
         self.assertIn("Perf.ProcessingTelemetry = 30", output)
 
+    def test_render_replaces_telemetry_file_line(self):
+        template = 'Perf.ProcessingTelemetry = 5\nPerf.ProcessingTelemetryFile = "x.log"\n'
+        output = server.render(template, {"Perf.ProcessingTelemetryFile": '"/state/t.log"'})
+        self.assertIn('Perf.ProcessingTelemetryFile = "/state/t.log"', output)
+        self.assertEqual(output.count("Perf.ProcessingTelemetryFile"), 1)
+
+    def test_render_replaces_player_save_interval(self):
+        output = server.render("PlayerSave.Interval = 60000\n", {"PlayerSave.Interval": "5000"})
+        self.assertIn("PlayerSave.Interval = 5000", output)
+
     def test_lab_config_omits_telemetry_env_by_default(self):
         config = bot_baseline.lab_config(Path("."), "tortoise-local:dev")
         self.assertNotIn("PERF_PROCESSING_TELEMETRY", config["services"]["world"]["environment"])

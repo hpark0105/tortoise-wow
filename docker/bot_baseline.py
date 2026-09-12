@@ -194,12 +194,19 @@ def main():
             raise RuntimeError("Fresh zero-bot lab unexpectedly contains characters")
         report["resources"] = sample_resources(ids, args.seconds, args.interval, evidence)
         if args.isolated and args.telemetry_interval:
-            telemetry_lines = [line for line in run("logs", "--no-color", "world").splitlines()
+            # R6: telemetry lines go to the isolated sink file, never to the
+            # world log stream.
+            try:
+                sink_output = run("exec", "-T", "world", "sh", "-c",
+                                  "cat /state/world_processing_telemetry.log")
+            except RuntimeError:
+                sink_output = ""
+            telemetry_lines = [line for line in sink_output.splitlines()
                                if "World processing telemetry:" in line]
             (evidence / "telemetry.log").write_text(
                 "\n".join(telemetry_lines) + ("\n" if telemetry_lines else ""), encoding="utf-8")
             report["tick_processing_percentiles"] = (telemetry_lines[-1] if telemetry_lines
-                                                     else "no telemetry lines found in world logs")
+                                                     else "no telemetry lines found in the sink file")
         report["counts_after"] = aggregate_counts()
         report["completed"] = True
         print(json.dumps(report["resources"], indent=2), flush=True)

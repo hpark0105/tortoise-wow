@@ -64,6 +64,8 @@ def main():
             "PlayerBot.Provision": '"%s"' % os.environ.get("PLAYERBOT_PROVISION", ""),
             "PlayerBot.TestLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_LOGIN", ""),
             "Perf.ProcessingTelemetry": os.environ.get("PERF_PROCESSING_TELEMETRY", "0"),
+            "Perf.ProcessingTelemetryFile": os.environ.get("PERF_PROCESSING_TELEMETRY_FILE", '"world_processing_telemetry.log"'),
+            "PlayerSave.Interval": os.environ.get("PLAYER_SAVE_INTERVAL", "60000"),
         })
         for kind, database in (("Login", "tw_logon"), ("World", "tw_world"),
                                ("Character", "tw_char"), ("Logs", "tw_logs")):
