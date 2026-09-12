@@ -216,3 +216,14 @@ cross-ref 23891 on KAP-549):
   violations/source-hash invalidation; no worker report accepted.
 - Next: R6 nonblocking telemetry, R5 save-boundary failure, R4 stale completion,
   then TW-011 earned-state restart/restore. No Jira change or live deployment.
+
+2026-09-12 hosted MVP/Jira reconciliation at 7bba514:
+- Read KAP-543 and KAP-544..KAP-557 directly. Jira: KAP-544..553 Done;
+  KAP-554..557 To Do; epic KAP-543 To Do.
+- Corrected the local summary: SelectNearestTarget is hostile-only, although a
+  hostile player may qualify; normal loot and quest actions are not yet proven.
+- Reconciled prd.json to the feature branch and accepted first-wave evidence.
+  Split the playable MVP into MVP-001..MVP-008 plus post-MVP identity config.
+- Next dependency-ready item is MVP-001 save-boundary rejection coverage.
+- Retrieval sync remains operator-paused. Fresh park-agent review was attempted
+  but the one shared-model slot was already occupied; no worker result claimed.

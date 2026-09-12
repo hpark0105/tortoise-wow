@@ -1,13 +1,13 @@
 # Living-world local-LLM handoff
 
-Updated 2026-09-11. Start here after a new session or context reset.
+Updated 2026-09-12. Start here after a new session or context reset.
 
-**Current review:** read [the native initialization result](../native-initialization-2026-09-12.md)
-and [the hosted repair re-review](../review-2026-09-11-hosted-recheck.md).
-Native creation and bounded partial-write recovery now pass disposable labs.
-Custom-AI runtime
-coverage and the remaining P2 queue are still open. Earlier implementation and
-Jira completion claims below/in `progress.txt` are history, not acceptance.
+**Current review:** read the [small playable-MVP queue](mvp/README.md),
+[native initialization result](../native-initialization-2026-09-12.md), and
+[R6 telemetry result](../r6-telemetry-sink-2026-09-12.md). Native creation,
+bounded partial-write recovery, and nonblocking telemetry pass disposable labs.
+R5 save-boundary coverage, R4 stale-completion coverage, and earned-gameplay
+integration remain open.
 
 ## Outcome and requirements
 
@@ -31,7 +31,7 @@ Jira epic: [KAP-543](https://parkenstein.atlassian.net/browse/KAP-543).
 ## Where we stand
 
 - Working personal fork: https://github.com/hpark0105/tortoise-wow, branch
-  `personal-server`, Windows workspace
+  `feature/kap-543-bot-living-world`, Windows workspace
   `C:/Users/hpark/WebstormProjects/tortoise-wow`.
 - Game server runs in Docker with persistent local data; prior human-character
   restart/restore checks passed. Bots remain disabled.
@@ -43,9 +43,10 @@ Jira epic: [KAP-543](https://parkenstein.atlassian.net/browse/KAP-543).
 - The local head reported 42 passing tests; the hosted re-review records its
   separate, targeted build/test evidence and uncovered failure paths. Remote
   CI results for this handoff have not been claimed.
-- Persistent ownership/save guards and timer/null fixes now exist in the
-  uncommitted worktree. Native creation, save-boundary failure coverage, and
-  earned-state restart/restore remain gates. MyISAM character/roster tables
+- Persistent ownership/save guards, lifecycle guards, native creation, and
+  timer/null fixes are committed on the feature branch. Save-boundary failure
+  coverage, stale-completion injection, and earned-state restart/restore remain
+  gates. MyISAM character/roster tables
   mean transaction blocks alone do not guarantee atomic provisioning.
 - Population counts and companion role/recovery/quest behavior remain
   unverified for the intended living-world requirements.
@@ -68,9 +69,9 @@ Jira epic: [KAP-543](https://parkenstein.atlassian.net/browse/KAP-543).
 
 ## What we are doing now
 
-Continue with R6 telemetry, R5 save-boundary coverage, and R4 stale-completion
-coverage as described in the latest native-initialization result. TW-011 follows
-those gates; the personal realm remains unchanged.
+Continue with `mvp/MVP-001` (R5 save-boundary coverage), then `MVP-002` (R4
+stale-completion coverage). Follow the dependency order in [the MVP queue](mvp/README.md);
+the personal realm remains unchanged.
 The first execution wave below ends at a small persistent cohort and one
 deterministic follow/stop companion. It does not authorize a wholesale fork port
 or live rollout.
@@ -96,14 +97,18 @@ Reference: [Ralph example](https://github.com/snarktank/ralph/blob/main/prd.json
 This is a task-data handoff, **not an installed Ralph runner or a claim that its
 Amp/Claude launch script supports park-agent**.
 
-`acceptance.feature` contains the same Given/When/Then scenarios. These are
+`acceptance.feature` preserves the original first-wave scenarios. `prd.json`
+and the cards under `mvp/` are canonical for the current queue. These are
 acceptance specifications, not executable step definitions or passing tests.
 `progress.txt` carries compact decisions and results between fresh sessions.
 
 Execute one small dependency-ready item per fresh session. The head verifies
 current source and writes a versioned evidence card with hashes before delegating.
-All items start with `passes: false`; only the active head may accept evidence and
-change that flag. Never treat a worker's success statement as acceptance.
+Completed first-wave items now carry accepted `passes` values. The separate
+MVP-001/MVP-002 repair items remain false despite their source Jira stories
+being Done because review found missing failure-path evidence. Only the active
+head may accept new evidence and change a flag. Never treat a worker's success
+statement as acceptance.
 Dependencies are mandatory even if a generic Ralph runner ignores extra fields.
 If a story expands beyond one bounded change, split it before implementation.
 
@@ -117,9 +122,8 @@ not bypass it.
 Suggested prompt for a new **head** session:
 
 > Read AGENTS.md, docs/bots/ralph/README.md, progress.txt and prd.json. Confirm the
-> current worktree and read docs/bots/native-initialization-2026-09-12.md. Start
-> with R6 bounded nonblocking telemetry as a bounded change. Cover a blocked
-> consumer and continued world progress with a regression test. Use current
+> current worktree and read docs/bots/ralph/mvp/README.md. Select the first
+> dependency-ready item whose passes flag is false. Use current
 > verified source; preserve unrelated work and do not deploy to the live realm.
 > Independently verify the result. Preserve the ownership/save
 > blocker, one-model rule and operator's embedding maintenance. Do not mark a
