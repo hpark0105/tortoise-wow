@@ -1,4 +1,5 @@
 #include "PerformanceMonitor.h"
+#include "Log.h"
 #include "Chat.h"
 #include "World.h"
 #include "MapManager.h"
@@ -183,4 +184,81 @@ void PerformanceMonitor::ReportDealloc(const char* Category, size_t Bytes)
 {
 	std::lock_guard guard{ MemBytesGuard };
 	MemBytes[Category] -= Bytes;
+}
+// --- World processing-time telemetry (Perf.ProcessingTelemetry) -----------
+
+uint64 PerfProcessingHistogram::Count() const
+{
+	uint64 count = 0;
+	for (uint64 c : counts)
+		count += c;
+	return count;
+}
+
+uint32 PerfProcessingHistogram::PercentileBucket(uint32 p) const
+{
+	const uint64 count = Count();
+	if (count == 0 || p == 0)
+		return 0;
+	const uint64 target = (count * p + 99) / 100;
+	uint64 cumulative = 0;
+	for (uint32 bucket = 0; bucket <= BUCKETS; ++bucket)
+	{
+		cumulative += counts[bucket];
+		if (cumulative >= target)
+			return bucket;
+	}
+	return BUCKETS;
+}
+
+bool PerfProcessingHistogram::SelfTest()
+{
+	PerfProcessingHistogram histogram;
+	if (histogram.Count() != 0 || histogram.PercentileBucket(99) != 0)
+		return false;
+
+	for (uint32 ms = 0; ms < 100; ++ms)
+		histogram.Record(ms);
+	if (histogram.Count() != 100 || histogram.PercentileBucket(50) != 49 ||
+		histogram.PercentileBucket(95) != 94 || histogram.PercentileBucket(99) != 98)
+		return false;
+
+	PerfProcessingHistogram single;
+	single.Record(7);
+	if (single.Count() != 1 || single.PercentileBucket(50) != 7 || single.TotalMs() != 7)
+		return false;
+
+	PerfProcessingHistogram overflow;
+	for (int i = 0; i < 10; ++i)
+		overflow.Record(300);
+	if (overflow.PercentileBucket(99) != PerfProcessingHistogram::BUCKETS)
+		return false;
+
+	PerfProcessingHistogram mixed;
+	for (uint32 ms = 1; ms <= 100; ++ms)
+		mixed.Record(ms);
+	return mixed.PercentileBucket(95) == 95 && mixed.PercentileBucket(99) == 99;
+}
+
+void PerformanceMonitor::RecordProcessingTime(uint32 ms)
+{
+	processingHistogram.Record(ms);
+}
+
+void PerformanceMonitor::ReportProcessingTime(uint64 tickIntervalTotalMs)
+{
+	const uint64 count = processingHistogram.Count();
+	if (count == 0)
+		return;
+	const uint32 p50 = processingHistogram.PercentileBucket(50);
+	const uint32 p95 = processingHistogram.PercentileBucket(95);
+	const uint32 p99 = processingHistogram.PercentileBucket(99);
+	const uint64 totalMs = processingHistogram.TotalMs();
+	processingHistogram.Reset();
+	const uint64 avgProc = totalMs / count;
+	const uint64 avgTick = tickIntervalTotalMs / count;
+	const char* overflowNote = (p95 >= PerfProcessingHistogram::BUCKETS || p99 >= PerfProcessingHistogram::BUCKETS)
+		? " (percentiles hit the histogram overflow bucket; values are lower bounds)" : "";
+	sLog.outInfo("World processing telemetry: samples=%llu proc p50=%ums p95=%ums p99=%ums avg_proc=%ums avg_tick_interval=%ums%s (processing time is separate from the elapsed tick interval)",
+		(unsigned long long)count, p50, p95, p99, (unsigned long long)avgProc, (unsigned long long)avgTick, overflowNote);
 }

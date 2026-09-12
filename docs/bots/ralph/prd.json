@@ -1,0 +1,333 @@
+{
+  "project": "Tortoise-WoW Living World",
+  "branchName": "personal-server",
+  "description": "First bounded execution wave toward 500+ persistent ambient bots and 2–5 personal companions. Future phases remain in the product PRD. This is Ralph-style data, not an installed autonomous runner. Head selects one dependency-ready item, prepares fresh evidence, and independently accepts results.",
+  "epicKey": "KAP-543",
+  "epicUrl": "https://parkenstein.atlassian.net/browse/KAP-543",
+  "sourcePrd": "docs/prd/living-world.prd",
+  "userStories": [
+    {
+      "id": "TW-001",
+      "title": "Diagnose the pinned candidate test-configuration mismatch",
+      "description": "As the personal server operator, I want diagnose the pinned candidate test-configuration mismatch so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Diagnose the pinned candidate test-configuration mismatch\nGiven a pinned candidate and a head-provided build status\nWhen the regression extraction marker is compared with its current source\nThen the report identifies the missing contract and distinguishes unexecuted tests from failed tests",
+        "Scenario: Reject or handle the failure path\nGiven a proposed repair would change the meaning of the tested behavior\nWhen this condition is detected\nThen the worker records that uncertainty rather than deleting the assertion to obtain a pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Read-only source comparison; report exact revision and bounded source references. No duplicate server build while the head's probe is running.",
+      "dependsOn": [],
+      "allowedScope": [
+        "docker/bot-candidate.Dockerfile",
+        "docs/bots/feasibility.md",
+        "local/bot-engine-candidate/tests/architecture/CMakeLists.txt",
+        "local/bot-engine-candidate/tests/architecture/ForkIntegrationTest.cpp",
+        "local/bot-engine-candidate/modules/mod-playerbots/src/playerbot/strategy/actions/BattleGroundTactics.cpp"
+      ],
+      "jiraKey": "KAP-544",
+      "issueType": "Spike",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-002",
+      "title": "Record the smallest viable bot-engine integration boundary",
+      "description": "As the personal server operator, I want record the smallest viable bot-engine integration boundary so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Record the smallest viable bot-engine integration boundary\nGiven the bundled-engine blockers and pinned candidate findings\nWhen the head reviews the proposed execution-engine boundary\nThen an ADR lists selected reuse, required host hooks, excluded changes and unresolved runtime proof",
+        "Scenario: Reject or handle the failure path\nGiven a dependency requires unrelated core scheduling or content changes\nWhen this condition is detected\nThen it is separated for review rather than silently importing the whole fork"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Worker proposes only; head records the architecture decision. Reopen at most the referenced host interfaces before expanding scope.",
+      "dependsOn": [
+        "TW-001"
+      ],
+      "allowedScope": [
+        "docs/bots/feasibility.md",
+        "docs/bots/engine-decision.md",
+        "src/game/ScriptObjects.h",
+        "src/game/Objects/Player.h"
+      ],
+      "jiraKey": "KAP-545",
+      "issueType": "Spike",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-003",
+      "title": "Add opt-in world-processing-time measurements",
+      "description": "As the personal server operator, I want add opt-in world-processing-time measurements so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Add opt-in world-processing-time measurements\nGiven a disposable zero-bot world with measurements enabled\nWhen world updates and intentional frame sleeps run\nThen bounded telemetry reports processing-time counts and p95/p99 separately from elapsed tick intervals",
+        "Scenario: Reject or handle the failure path\nGiven telemetry is disabled or its output consumer is unavailable\nWhen this condition is detected\nThen the world remains nonblocking and retains bounded memory"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Compile server; test known duration samples, percentile edges and disabled mode; run disposable baseline. No live deployment.",
+      "dependsOn": [],
+      "allowedScope": [
+        "src/mangosd/WorldRunnable.cpp",
+        "src/game/PerformanceMonitor.h",
+        "src/game/PerformanceMonitor.cpp",
+        "src/game/World.cpp"
+      ],
+      "jiraKey": "KAP-546",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-004",
+      "title": "Specify persistent bot ownership and save invariants",
+      "description": "As the personal server operator, I want specify persistent bot ownership and save invariants so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Specify persistent bot ownership and save invariants\nGiven persistent and ephemeral bots have different intended lifetimes\nWhen identity, login, save and logout paths are specified\nThen the contract binds a persistent bot to a real owned account and character while preserving ephemeral no-save behavior",
+        "Scenario: Reject or handle the failure path\nGiven session account identity disagrees with character ownership\nWhen this condition is detected\nThen the contract rejects login/save and never reassigns a human character"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Source-backed design only; head approves before schema or save-path changes. Include interrupted provisioning and stale callback cases.",
+      "dependsOn": [
+        "TW-002"
+      ],
+      "allowedScope": [
+        "docs/bots/persistence-contract.md",
+        "src/game/Objects/Player.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/WorldSession.cpp"
+      ],
+      "jiraKey": "KAP-547",
+      "issueType": "Spike",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-005",
+      "title": "Add versioned bot-ownership metadata migrations",
+      "description": "As the personal server operator, I want add versioned bot-ownership metadata migrations so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Add versioned bot-ownership metadata migrations\nGiven a disposable character database and an approved identity contract\nWhen the ownership metadata migration is applied and the updater is rerun\nThen stable bot identity, ownership, type and provisioning version are retained without duplicate records",
+        "Scenario: Reject or handle the failure path\nGiven a metadata row references an unowned or incompatible character\nWhen this condition is detected\nThen validation reports the mismatch without changing human records"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Use the actual updater directory verified in source; migration tests in a disposable database, including an existing-character fixture. No live migration.",
+      "dependsOn": [
+        "TW-004"
+      ],
+      "allowedScope": [
+        "sql/database_updates/characters/",
+        "docs/bots/persistence-contract.md",
+        "docker/"
+      ],
+      "jiraKey": "KAP-548",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-006",
+      "title": "Validate persistent bot ownership before session login",
+      "description": "As the personal server operator, I want validate persistent bot ownership before session login so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Validate persistent bot ownership before session login\nGiven a registered persistent bot and matching real account/character ownership\nWhen the bot requests a session\nThen login uses the approved account identity and preserves the character's stored owner",
+        "Scenario: Reject or handle the failure path\nGiven ownership is mismatched or a conflicting session exists\nWhen this condition is detected\nThen login is rejected without replacing the human session or rewriting ownership"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Compile; isolated valid-owner, wrong-owner and conflicting-session tests. Adapt to the approved engine; do not retain synthetic IDs for persistent saves.",
+      "dependsOn": [
+        "TW-005"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Handlers/CharacterHandler.cpp",
+        "src/game/WorldSession.cpp"
+      ],
+      "jiraKey": "KAP-549",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-007",
+      "title": "Enable saving only for explicitly owned persistent bots",
+      "description": "As the personal server operator, I want enable saving only for explicitly owned persistent bots so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Enable saving only for explicitly owned persistent bots\nGiven an authenticated bot session satisfies the approved persistent ownership contract\nWhen normal character save executes\nThen earned state is written under the existing real owner through normal save paths",
+        "Scenario: Reject or handle the failure path\nGiven the bot is ephemeral or ownership validation fails\nWhen this condition is detected\nThen the existing no-save protection remains effective and unrelated human records are unchanged"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Compile; disposable save tests for persistent, ephemeral and mismatched identities. Do not merely remove GetBot() guard.",
+      "dependsOn": [
+        "TW-006"
+      ],
+      "allowedScope": [
+        "src/game/Objects/Player.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/WorldSession.cpp"
+      ],
+      "jiraKey": "KAP-550",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-008",
+      "title": "Repair bundled bot initialization and null-entry safety",
+      "description": "As the personal server operator, I want repair bundled bot initialization and null-entry safety so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Repair bundled bot initialization and null-entry safety\nGiven a newly constructed or detached bundled bot controller\nWhen its first update executes\nThen all decision timers have deterministic initialization and a null player is checked before dereference",
+        "Scenario: Reject or handle the failure path\nGiven a valid player is completing a teleport\nWhen this condition is detected\nThen required acknowledgement handling remains reachable and correct"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Compile; meaningful null/first-update/teleport fixtures. If the approved engine replaces this class, head records supersession and remaps the test rather than performing an obsolete edit.",
+      "dependsOn": [
+        "TW-002"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotAI.cpp"
+      ],
+      "jiraKey": "KAP-551",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-009",
+      "title": "Make repeated and stale bot logins lifecycle-safe",
+      "description": "As the personal server operator, I want make repeated and stale bot logins lifecycle-safe so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Make repeated and stale bot logins lifecycle-safe\nGiven one owned bot is loading or online\nWhen the same add request is repeated\nThen one session and one matching state transition exist with accurate loading/online counters",
+        "Scenario: Reject or handle the failure path\nGiven an old asynchronous completion arrives after cancellation and retry\nWhen this condition is detected\nThen its generation is rejected and the current session is preserved"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Compile; asynchronous login failure, duplicate add, cancellation/retry and logout tests. Online means successful player entry, not merely queued SQL.",
+      "dependsOn": [
+        "TW-006",
+        "TW-008"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Handlers/CharacterHandler.cpp"
+      ],
+      "jiraKey": "KAP-552",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-010",
+      "title": "Provision one persistent test bot idempotently",
+      "description": "As the personal server operator, I want provision one persistent test bot idempotently so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Provision one persistent test bot idempotently\nGiven an empty disposable lab and one requested bot identity\nWhen provisioning runs twice\nThen exactly one valid owned account and character exist with resumable provisioning status",
+        "Scenario: Reject or handle the failure path\nGiven the first run stops between account and character creation\nWhen this condition is detected\nThen retry completes the same identity without deleting unrelated records"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Use native account/character creation paths; test at each interruption boundary. One identity only; normal class/race legality and no copied human character data.",
+      "dependsOn": [
+        "TW-007",
+        "TW-009"
+      ],
+      "allowedScope": [
+        "docker/",
+        "src/game/PlayerBots/",
+        "docs/bots/persistence-contract.md"
+      ],
+      "jiraKey": "KAP-553",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-011",
+      "title": "Prove one bot's earned state survives restart and restore",
+      "description": "As the personal server operator, I want prove one bot's earned state survives restart and restore so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Prove one bot's earned state survives restart and restore\nGiven one lab bot has legitimately earned XP, an item and a supported quest update\nWhen the world restarts and a backup is restored into a second disposable project\nThen the same bot identity, owner and earned records match the pre-restart evidence",
+        "Scenario: Reject or handle the failure path\nGiven the save or backup is incomplete\nWhen this condition is detected\nThen the check fails with bounded evidence and cannot overwrite the personal volume"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Real game/save integration required; compare complete relevant state, not only table existence. Do not use fabricated SQL rewards as gameplay proof.",
+      "dependsOn": [
+        "TW-010"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "jiraKey": "KAP-554",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-012",
+      "title": "Make bot population boundaries deterministic",
+      "description": "As the personal server operator, I want make bot population boundaries deterministic so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Make bot population boundaries deterministic\nGiven roster sizes of zero, one and ten with explicit min/max targets\nWhen the director reconciles requested population\nThen exact target boundaries are respected and loading, online and offline counts remain distinct",
+        "Scenario: Reject or handle the failure path\nGiven the requested target exceeds valid roster capacity or a login fails\nWhen this condition is detected\nThen actual capacity is reported without underflow, a fake online count or an unbounded retry"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "Compile; empty/single/full roster, min=max and failure-boundary tests. Preserve a separate random-range mode only if explicitly required.",
+      "dependsOn": [
+        "TW-002",
+        "TW-009"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h"
+      ],
+      "jiraKey": "KAP-555",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-013",
+      "title": "Validate a paced ten-bot disposable cohort",
+      "description": "As the personal server operator, I want validate a paced ten-bot disposable cohort so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Validate a paced ten-bot disposable cohort\nGiven ten valid persistent bot identities in a disposable project\nWhen a bounded login schedule activates the cohort\nThen ten distinct successful sessions are observed with saved ownership intact and recorded resource/tick measurements",
+        "Scenario: Reject or handle the failure path\nGiven a bot cannot load or resource thresholds are exceeded\nWhen this condition is detected\nThen new logins back off and the report identifies the achieved count without repeatedly recreating identities"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Run a 30-minute ten-bot observation after prior gates; no 50+ load or live rollout. Record actual actions separately from online status.",
+      "dependsOn": [
+        "TW-011",
+        "TW-012"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/cohort-ten.md"
+      ],
+      "jiraKey": "KAP-556",
+      "issueType": "Story",
+      "headReviewRequired": true
+    },
+    {
+      "id": "TW-014",
+      "title": "Add deterministic follow and stop for one owned companion",
+      "description": "As the personal server operator, I want add deterministic follow and stop for one owned companion so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Add deterministic follow and stop for one owned companion\nGiven one owned companion in the human's test party and no LLM service\nWhen the owner issues follow and then stop\nThen normal pathfinding follows the leader and stop invalidates the current goal immediately",
+        "Scenario: Reject or handle the failure path\nGiven a different player commands the bot or an old goal is delivered after stop\nWhen this condition is detected\nThen the command is rejected and the bot does not resume the invalidated goal"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "Compile and isolated command/ownership tests; local in-game follow, range, stop and relog checks. No combat-role or natural-language scope in this story.",
+      "dependsOn": [
+        "TW-011"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Commands/",
+        "docs/bots/companion-scenarios.md"
+      ],
+      "jiraKey": "KAP-557",
+      "issueType": "Story",
+      "headReviewRequired": true
+    }
+  ]
+}

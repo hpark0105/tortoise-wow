@@ -27,6 +27,12 @@ bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 
 void PlayerBotAI::UpdateAI(const uint32 diff)
 {
+    // TW-008 (AC1): a newly constructed or detached controller has me == nullptr;
+    // check before any dereference. The teleport-ack blocks below stay reachable
+    // for a valid player mid-teleport (AC2).
+    if (!me)
+        return;
+
     if (me->IsBeingTeleportedNear())
     {
         WorldPacket data(MSG_MOVE_TELEPORT_ACK, 10);
@@ -37,7 +43,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (me->IsBeingTeleportedFar())
         me->GetSession()->HandleMoveWorldportAckOpcode();
 
-    if (!me || !me->IsInWorld())
+    if (!me->IsInWorld())
         return;
 
     // Detect manual level changes in case GiveLevel hook missed
@@ -589,6 +595,9 @@ void PlayerBotAI::AutoEquipForLevel()
 
 void PlayerBotAI::Remove()
 {
+    // TW-008 (AC1): tolerate double removal of a detached controller.
+    if (!me)
+        return;
     me->setAI(nullptr);
     me = nullptr;
 }
@@ -674,6 +683,9 @@ bool MageOrgrimmarAttackerAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSessio
 
 void MageOrgrimmarAttackerAI::UpdateAI(const uint32 diff)
 {
+    // TW-008 (AC1): keep the override null-safe for a detached controller.
+    if (!me)
+        return;
     PlayerBotAI::UpdateAI(diff);
     if (me->GetLevel() != 60)
         me->GiveLevel(60);

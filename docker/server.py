@@ -55,7 +55,15 @@ def main():
             "PDumpDir": '"/state/pdump"', "HttpApi.Enable": "0",
             "Database.AutoUpdate.Path": '"/opt/tortoise/sql/database_updates"',
             "Database.AutoUpdate.SortByName": "1",
-            "PlayerBot.Enable": "0", "PlayerBot.MinBots": "0", "PlayerBot.MaxBots": "0",
+            "PlayerBot.Enable": os.environ.get("PLAYERBOT_ENABLE", "0"),
+            "PlayerBot.MinBots": os.environ.get("PLAYERBOT_MIN_BOTS", "0"),
+            "PlayerBot.MaxBots": os.environ.get("PLAYERBOT_MAX_BOTS", "0"),
+            "PlayerBot.Refresh": os.environ.get("PLAYERBOT_REFRESH", "60000"),
+            "PlayerBot.UpdateMs": os.environ.get("PLAYERBOT_UPDATE_MS", "10000"),
+            "PlayerBot.Debug": os.environ.get("PLAYERBOT_DEBUG", "0"),
+            "PlayerBot.Provision": '"%s"' % os.environ.get("PLAYERBOT_PROVISION", ""),
+            "PlayerBot.TestLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_LOGIN", ""),
+            "Perf.ProcessingTelemetry": os.environ.get("PERF_PROCESSING_TELEMETRY", "0"),
         })
         for kind, database in (("Login", "tw_logon"), ("World", "tw_world"),
                                ("Character", "tw_char"), ("Logs", "tw_logs")):

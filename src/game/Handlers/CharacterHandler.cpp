@@ -38,6 +38,7 @@
 #include "Group.h"
 #include "Database/DatabaseImpl.h"
 #include "SocialMgr.h"
+#include "PlayerBotMgr.h"
 #include "Util.h"
 #include "Language.h"
 #include "Chat.h"
@@ -64,9 +65,12 @@ class LoginQueryHolder : public SqlQueryHolder
 private:
     uint32 m_accountId;
     ObjectGuid m_guid;
+    uint32 m_botGeneration; // TW-009 (AC2): bot entry generation at queue time (0 = not a bot login)
 public:
     LoginQueryHolder(uint32 accountId, ObjectGuid guid)
-        : SqlQueryHolder(guid.GetCounter()), m_accountId(accountId), m_guid(guid) { }
+        : SqlQueryHolder(guid.GetCounter()), m_accountId(accountId), m_guid(guid), m_botGeneration(0) { }
+    void SetBotGeneration(uint32 gen) { m_botGeneration = gen; }
+    uint32 GetBotGeneration() const { return m_botGeneration; }
     ~LoginQueryHolder()
     {
         // Queries should NOT be deleted by user
@@ -149,6 +153,19 @@ public:
         {
             delete holder;
             return;
+        }
+        // TW-009 (AC2): reject a stale async login completion - the session for
+        // this account was replaced (timeout + retry) after this query was queued.
+        if (PlayerBotEntry* bot = session->GetBot())
+        {
+            if (((LoginQueryHolder*)holder)->GetBotGeneration() != bot->loginGeneration)
+            {
+                sLog.outError("Playerbot: stale login completion for %u (gen %u != %u); current session preserved",
+                              ((LoginQueryHolder*)holder)->GetGuid().GetCounter(),
+                              ((LoginQueryHolder*)holder)->GetBotGeneration(), bot->loginGeneration);
+                delete holder;
+                return;
+            }
         }
         session->HandlePlayerLogin((LoginQueryHolder*)holder);
     }
@@ -559,6 +576,10 @@ void WorldSession::LoginPlayer(ObjectGuid loginPlayerGuid)
 {
     ASSERT(loginPlayerGuid.IsPlayer());
     LoginQueryHolder *holder = new LoginQueryHolder(GetAccountId(), loginPlayerGuid);
+    // TW-009 (AC2): stamp the bot login generation so a stale completion
+    // (session replaced since this query was queued) can be rejected.
+    if (m_bot)
+        holder->SetBotGeneration(m_bot->loginGeneration);
     if (!holder->Initialize())
     {
         delete holder;                                      // delete all unprocessed queries

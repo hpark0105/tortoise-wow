@@ -2119,3 +2119,6 @@ Perf.Enable = 1
 
 # Report to logs DB. Time in seconds
 Perf.ReportInterval = 600
+
+# World processing-time telemetry: report interval in seconds; 0 disables it.
+Perf.ProcessingTelemetry = 0

@@ -29,10 +29,15 @@ struct PlayerBotEntry
     bool isChatBot; // bot des joueurs en discussion via le site.
     bool customBot; // Enabled even if PlayerBot system disabled (AutoTesting system for example)
     PlayerBotAI* ai;
+    uint32 loadingSinceMs; // WorldTimer ms when PB_STATE_LOADING started (0 = not loading)
+    bool persistent; // true only for verified roster entries (TW-007, contract C4)
+    WorldSession* session; // current login session (TW-009, AC2); null when not logging in
+    bool loginQueued; // login queued for the current session (TW-009, AC1)
+    uint32 loginGeneration; // increments on every session creation (TW-009, AC2)
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0)
     {}
 };
 
@@ -64,6 +69,11 @@ class PlayerBotMgr
 
         void LoadConfig();
         void Load();
+        // TW-010 (contract C6 / section 5a): idempotent, resumable runtime
+        // provisioning of one persistent test bot, keyed on its stable identity
+        // (character name). Safe to run more than once; completes an interrupted
+        // run without touching unrelated records.
+        void ProvisionPersistentBot(const std::string& name);
 
         void Update(uint32 diff);
         bool AddOrRemoveBot();
@@ -90,6 +100,10 @@ class PlayerBotMgr
         bool IsChatBot(uint32 playerGuid);
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
+        // TW-007 (contract C4): only verified persistent (roster) bots may save,
+        // and only through a session that uses their approved bound identity.
+        bool IsSaveableBot(PlayerBotEntry* e, uint32 sessionAccountId) const;
+
         uint32 GenBotAccountId() { return ++_maxAccountId; }
         PlayerBotStats& GetStats(){ return m_stats; }
         void Start() { enable = true; }
@@ -110,9 +124,13 @@ class PlayerBotMgr
         uint32 confBotsRefresh;
         uint32 confUpdateDiff;
         bool confDebug;
+        std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
+        std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
         bool forceLogoutDelay;
 
         bool enable;
+        uint32 AllocateReservedBotAccount(); // TW-010: fresh id in reserved range (>= 1e9)
+        uint32 AllocateReservedBotGuid();   // TW-010: fresh id in reserved guid band (>= 4e9)
 };
 
 extern PlayerBotMgr sPlayerBotMgr;

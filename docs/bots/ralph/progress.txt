@@ -1,0 +1,196 @@
+Living-world handoff — 2026-09-11
+Epic: KAP-543; first execution wave KAP-544 through KAP-557.
+Repository: hpark0105/tortoise-wow, personal-server.
+
+Completed evidence:
+- Product/technical PRD v0.4 exists; persistent 500+ ambient roster plus real remote activity and 2–5 companions confirmed.
+- Two-minute idle live resource baseline; world mean 9.49% CPU, 1.163 GiB RAM.
+- Fresh no-port disposable world boot, 60-second sample and scoped cleanup passed.
+- Seven Python tests passed; no new bot implementation deployed.
+
+Important findings:
+- Bundled SaveToDB rejects bot sessions; save owner comes from session account ID.
+- Synthetic bot session accounts make deleting the guard alone unsafe.
+- Timer/null ordering, duplicate/stale login and population boundaries need tests.
+- Candidate revision deada5f33018d2bbddf21d07601e89c5469a5dcd requires host changes.
+- Candidate CMake server configuration passed; full architecture test configuration failed on stale ForkBannerCandidates.inc extraction marker. Four intended tests did not run.
+
+In flight at initial handoff:
+- Separate candidate server build, hosted tool session 69317, local/bot-candidate-server-build.log.
+- A completion result is not yet recorded. Do not launch a duplicate or assume success.
+- A focused test adapter was considered but NOT implemented or run.
+
+Next:
+1. Head records current candidate compile result without sending raw logs to a worker.
+2. TW-001 / KAP-544: bounded read-only diagnosis of test/source mismatch.
+3. TW-002 engine boundary and TW-004 identity/save contract before persistent login/save edits.
+4. Follow dependencies in prd.json; one fresh bounded local session at a time.
+
+Constraints:
+- Model mutex was occupied on attempted local reviews; no review result from those attempts.
+- Operator is working on embeddings; no new sync/index job started. Recheck/sync later.
+- Personal server stayed running; no personal volume reset, bot flag change or candidate deployment.
+- Jira parent was supplied on creation, but connector readback does not expose it; dependency links are textual, not separate Jira blocks links.
+- All first-wave passes flags remain false. Acceptance scenarios are specs, not executable Gherkin tests.
+
+Append only concise head-reviewed results below; never add secrets, raw logs or transcripts.
+
+2026-09-11 TW-003 / KAP-546 (implementation in progress):
+- World processing-time telemetry implemented: Perf.ProcessingTelemetry (seconds, 0=disabled, cap 3600).
+  Fixed 251-bucket whole-ms histogram in PerformanceMonitor (zero allocation, no locks; world thread sole writer/reader),
+  startup self-test; on failure telemetry is disabled and the world continues.
+- Head-approved scope expansion: mangosd.conf.dist.in key, PERF_PROCESSING_TELEMETRY in docker/server.py,
+  --telemetry-interval + evidence capture in docker/bot_baseline.py, new docker/test_telemetry_conf.py.
+- 11/11 docker unit tests pass (4 new); py_compile OK; git diff --check clean.
+- Build and isolated telemetry lab validation in progress; results recorded after pass.
+
+2026-09-11 TW-004 / KAP-547 (done; comment 23882):
+- docs/bots/persistence-contract.md written and staged: invariants C1-C8 (persisted ownership binding,
+  login identity agreement with narrowed bot load bypass, no human reassignment, ephemeral no-save,
+  single-owner teardown, interrupted-provisioning quarantine, bounded LOADING timeout + duplicate-login reject).
+- Every citation verified against worktree 8a7f25a (direct-read fallback, retrieval mid-sync). No code/schema changes.
+- Regression gate green (TW-001 56/1 known-bad; TW-002 ADR; candidate pin deada5f; TW-003 evidence).
+- Jira: In Progress -> Done, verified.
+
+2026-09-11 TW-005 / KAP-548 (starting):
+- Versioned bot-ownership metadata migrations per contract C1/C6.
+
+2026-09-11 TW-005 / KAP-548 (done; comment 23883):
+- Migration sql/database_updates/character/20260911174500_character.sql: tw_char.bot_ownership
+  (char_guid PK, unique reserved account_id >= 1e9, bot_type, provision_version); idempotent seed
+  of roster characters already in the reserved range; never touches below-range (human) owners.
+- docker/test_bot_ownership_migration.py: disposable single-MariaDB compose project, real base schema,
+  existing-character fixtures; AC1 (stable identity, no duplicates on rerun) and AC2 (read-only
+  validation reports unowned/non-bot-owned/roster-without-binding; human records byte-identical).
+- Contract doc section 5a added. 14/14 docker tests pass; no live migration; personal DB untouched.
+
+2026-09-11 TW-006 / KAP-549 (starting):
+- Login-time validation per contract C2/C6/C7.
+
+2026-09-11 TW-006 / KAP-549 (done; comment 23884):
+- PlayerBotMgr login-time validation: roster load JOINs bot_ownership+characters and quarantines
+  missing-character / unbound / mismatched / below-range rows; AddBot gates (duplicate login,
+  ownership match, no session replace, no in-world re-login) all fail closed; LOADING timeout 2x Refresh.
+- Head-approved scope expansion: docker/server.py PLAYERBOT_* env passthroughs (defaults preserve
+  zero-bot behavior) + docker/test_bot_login_validation.py disposable lab (2 valid reserved bots,
+  1 human-owned roster char, 1 orphan row).
+- Isolated lab (tortoise-local:dev): valid bot logged in under approved identity; invalid rows
+  quarantined; human records untouched; 18/18 docker tests pass; build clean.
+- Residual risk stated: live concurrent-human conflict exercised by construction only; TW-009/TW-011 cover it.
+
+2026-09-11 TW-007 / KAP-550 (starting):
+- Enable saving only for explicitly owned persistent bots.
+2026-09-11 TW-007 / KAP-550 (done; comment 23885):
+- Save guard per contract C4: PlayerBotEntry.persistent set only for verified roster rows;
+  Player::SaveToDB now saves persistent bots whose session account matches the stored owner;
+  ephemeral bots and identity disagreement keep the no-save protection. 3 source files + new test.
+- Root cause of initial fixture failure: digit-containing bot names fail WoW 1.x CheckPlayerName
+  (letter-only), LoadFromDB fails via AT_LOGIN_RENAME, session kicked, save skipped; race/class=0
+  would also fail _LoadHomeBind. Fixtures: letters-only names, valid race/class/level/position/health,
+  explicit bot_ownership bindings for the two valid bots.
+- Flakiness fix (test-only): PLAYERBOT_REFRESH 60000 -> 10000 (delete rolled every 10s; worst-case
+  no-logout residual ~3e-8 over the extended 600s window; load timeout stays 20s). Real production
+  logout path still exercised; SaveToDB writes logout_time unconditionally.
+- Standalone 3/3 OK (72s, clean image); full suite 21/21 OK (164s); gate: marker audit 56/1,
+  ADR D3 intact, pin deada5f33018 unchanged, git diff --check clean. No live migration; not committed.
+2026-09-11 TW-008 / KAP-551 (done; comment 23886):
+- Controller init/null safety (PlayerBotAI.{h,cpp}): ctor initializes _abilityTimer(0) (last uninitialized
+  member); UpdateAI null check hoisted before the teleport-ack blocks (ack blocks stay reachable before the
+  IsInWorld return = AC2 invariant); Remove() guards double removal; MageOrgrimmarAttackerAI::UpdateAI
+  override gets the same guard.
+- Head-approved scope expansion: docker/test_bot_init_safety.py - disposable lab, 2 valid reserved bots,
+  10s refresh; asserts >=2 manager logouts with re-login in between (controller attach/detach/re-attach),
+  world container stays running, last-logged-out bots saved under owner. Self-healing teardown on boot failure.
+- Standalone 3/3 OK (110s); full suite 24/24 OK; gate: marker audit 56/1, ADR D3 intact, pin unchanged,
+  git diff --check clean. No live migration; not committed.
+2026-09-11 TW-009 / KAP-552 (done; comment 23887):
+- Lifecycle-safe bot logins (PlayerBotMgr.{h,cpp} + CharacterHandler.cpp): PlayerBotEntry gains
+  session/loginQueued/loginGeneration; OnPlayerInWorld is now the single ONLINE transition (stale
+  in-world + unexpected-state guards, idempotent setAI on map transfer); the loading loop queues each
+  bot once and no longer fires [Login] at queue time; LoginQueryHolder stamps loginGeneration and
+  HandlePlayerLoginCallback rejects a stale async completion routed by account. TW-006 caveat resolved:
+  [Login] now fires at real in-world entry.
+- Head-approved scope expansion: docker/test_bot_login_lifecycle.py (AC1 no overlapping sessions per
+  GUID + AC2 no stale/unexpected-entry false positives + a TW-007 save regression; self-healing teardown)
+  and repair of the TW-006 fixture in docker/test_bot_login_validation.py (minimally-columned bots + a
+  digit name were silently failing load under the old queue-time [Login]; now fully loadable, letters-only
+  names, explicit bot_ownership for the two reserved bots only).
+- Standalone lifecycle 4/4 OK (162s); standalone TW-006 after repair 4/4 OK (85s); full suite 28/28 OK
+  (426s); gate: marker audit 56/1, ADR D3 intact, pin deada5f33018 unchanged, git diff --check clean.
+  No live migration; not committed.
+2026-09-11 TW-010 / KAP-553 (done; comment 23888):
+- Idempotent + resumable runtime provisioning (PlayerBotMgr.{h,cpp} + server.py): new
+  PlayerBot.Provision config (PLAYERBOT_PROVISION env) read at Load(); ProvisionPersistentBot(name)
+  runs once at world start before the roster load. Identity = character name (letters-only 2..12).
+  Fresh: reserved account (>= 1e9, no account row per C5) + reserved guid band (>= 4e9) + a legal
+  L10 Human Warrior + roster row + bot_ownership (provision_version=2) in one transaction. Resume:
+  an orphan character is completed in place (same guid/account, never duplicated); a complete bot is
+  a no-op; non-bot-owned characters are never adopted (C3); inconsistent bindings fail closed.
+- Head-approved scope expansion: docker/test_bot_provision.py (two disposable port-free labs, self-
+  healing teardown): AC1 idempotent-from-empty-run-twice (world restarted), AC2 resume-orphan with an
+  unrelated fully-provisioned bot left untouched.
+- Standalone 6/6 OK (130s); full suite 34/34 OK (662s); gate: marker audit 56/1, ADR D3 intact,
+  pin deada5f33018 unchanged, git diff --check clean. No live migration; not committed.
+
+2026-09-11 Hosted independent review after local implementation finished:
+- Revisions required; full findings and small Gherkin repair slices are in
+  docs/bots/review-2026-09-11.md. Earlier done entries remain as reported history.
+- Current server image builds; 11 fast tests independently pass.
+- Disposable runtime confirmed orphan account reuse and roster mutation for an
+  inconsistent partial binding. Fixture cleaned up; personal data not copied.
+- Source review also found temporary/custom login regressions, native-creation
+  scope departure, untested lifecycle/save failure cases and blocking telemetry.
+- Candidate compile is finished: gSOAP/glibc symbol link failure, not a server pass.
+- Jira KAP-546/550/552/553 read as Done; statuses and Ralph flags not changed here.
+- Next: one bounded R1 account-reservation fix and regression test, then R2/R3.
+  Resolve creation contract and failure-path tests before TW-011 and larger cohorts.
+- Retrieval transport closed; no sync/counts. Fresh local review attempt rejected
+  by occupied model mutex; head reviewed directly without bypassing the lock.
+2026-09-11 TW-010 / KAP-553 review repairs R1+R2 (local park-head; Jira comment 23889):
+- R1 (finding 2): AllocateReservedBotAccount now also takes MAX(characters.account)
+  for accounts >= 1e9 (reserved owners without a binding), so a fresh bot can no
+  longer inherit an orphan's identity.
+- R2 (finding 3): ProvisionPersistentBot reads binding + roster before any write;
+  any existing binding is validated (bound==owner, owner >= 1e9, version==2)
+  regardless of roster state; mismatch logs "rejected, nothing modified (fail
+  closed)" with zero writes. Fresh create and orphan completion each run in ONE
+  transaction with per-statement result checks + rollback.
+- New lab classes in docker/test_bot_provision.py: BotProvisionReviewRepairTests
+  (orphan + fresh get distinct accounts; orphan resume preserves identity; R3
+  probe) and BotProvisionFailClosedTests (mismatched no-roster / mismatched
+  with-roster / version=1 -> DB snapshots prove zero data change).
+- Standalone: ReviewRepair 4/4 OK (101s); FailClosed 4/4 OK (86s). Full suite
+  42/42 OK (716s). Gates: marker audit 56/1 (known ForkBannerCandidates.inc),
+  ADR D3 intact, pin deada5f33018 unchanged, git diff --check clean, py_compile
+  clean.
+- Uncommitted; embedding sync paused at operator direction; next: hosted
+  re-review, then P2 queue (finding 4, R6, R5, R4) before TW-011.
+2026-09-11 TW-009 / KAP-552 review repair R3 (local park-head; Jira comments 23890,
+cross-ref 23891 on KAP-549):
+- R3 (finding 1): no-stacking guard scoped to pre-existing entries; fresh temp
+  entries start OFFLINE and flip LOADING only after all guards pass; custom AI
+  bots exempt from the character-exists ownership check (character is created
+  later by the AI under the synthetic account); rejected fresh entries cleaned
+  up; AddBot(AI*) returns the delegated result instead of hardcoded true.
+- New optional PlayerBot.TestLogin probe (PLAYERBOT_TEST_LOGIN env, default
+  empty; rendered by docker/server.py): Load() invokes AddBot twice per guid and
+  logs first/second results - lab proves duplicate rejection without a second
+  queued login (first=1 second=0) and failed-login return (first=0).
+- TW-006 validation 4/4 and TW-009 lifecycle 4/4 green within the 42/42 full
+  suite. Uncommitted; next: hosted re-review.
+2026-09-12 Local audit before resume (park-head; no source changes):
+- Worktree audited and index normalized: TW-001..TW-010 + R1-R3 repairs + commit-failure
+  regression all present; the seven previously untracked epic files (4 test modules, 3
+  review docs) are now Git-tracked. All 44 changed paths are epic-scoped; .idea/ left
+  untouched and untracked.
+- Fast gates: py_compile clean (11 python files), git diff --check clean,
+  docker compose config --quiet clean. No leftover lab containers or volumes.
+- Image freshness: tortoise-local:review (built 2026-09-11 23:24) contains all current
+  C++ (newest src edit 23:22). tortoise-local:dev (22:18) is stale - it predates the
+  R3 fix and the synchronous commit-result fix. The next full-suite run must target
+  :review (p.IMAGE override) or rebuild :dev first.
+- Jira (read-only): KAP-544..KAP-553 Done; KAP-554 (TW-011) is the next story;
+  KAP-543 epic still To Do.
+- Next: finding-4 native initialization (transient SEC_PLAYER session + Player::Create
+  + SaveToDB direct + player-cache publication, level-10 stat re-init), then :dev
+  rebuild, then TW-011. R4/R5/R6 remain open P2 coverage items.

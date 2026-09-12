@@ -13,7 +13,7 @@ PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 class PlayerBotAI: public PlayerAI
 {
     public:
-        explicit PlayerBotAI(Player* pPlayer = nullptr) : PlayerAI(pPlayer), botEntry(nullptr), _wanderTimer(0), _combatCheckTimer(0) {}
+        explicit PlayerBotAI(Player* pPlayer = nullptr) : PlayerAI(pPlayer), botEntry(nullptr), _wanderTimer(0), _combatCheckTimer(0), _abilityTimer(0) {}
         virtual ~PlayerBotAI() {}
         void Remove() override;
 

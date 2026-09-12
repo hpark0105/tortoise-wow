@@ -3,6 +3,8 @@
 The current product plan is [Living World and Capable Companions](../docs/prd/living-world.prd),
 covering a 500+ population target and 2–5 smart companions. This file records the
 earlier implementation feasibility review; the PRD owns scope and acceptance criteria.
+The [current engineering feasibility report](../docs/bots/feasibility.md) records
+baseline measurements, persistence blockers and the pinned candidate build probe.
 
 The repository already implements `PlayerBotMgr` and `PlayerBotAI` under
 `src/game/PlayerBots`. Population settings are `PlayerBot.MinBots` and
@@ -53,6 +55,6 @@ availability and resource budget need to be explicit.
   adds local-model personalities and memory to CMaNGOS/playerbots. Personality
   integration alone does not establish autonomous quest/dungeon competence here.
 
-No external bot module has been installed and no LLM integration is implemented.
-Next decisions: companion party versus autonomous population, initial count,
-player class/role, and local model versus hosted provider.
+No external bot module has been installed on the personal server and no LLM
+integration is implemented. The PRD resolves the population/companion direction;
+the feasibility report tracks the next implementation gates.
