@@ -128,9 +128,24 @@ class PlayerBotMgr
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
         bool forceLogoutDelay;
 
+        // MVP-002 (KAP-552) lab-only stale-completion probe, armed from
+        // PlayerBot.TestStaleLogin (default empty = disabled). Logs the probe
+        // bot out (generation N), re-logs it in (generation N+1), then delivers
+        // a synthetic generation-N completion. Stages: 0 wait gen-N online,
+        // 1 wait old session dropped, 2 wait gen-(N+1) online, 3 delivered.
+        void UpdateStaleLoginProbe();
+        uint32 m_staleProbeGuid;
+        int m_staleProbeStage;
+        uint32 m_staleProbeOldGen;
+
         bool enable;
         uint32 AllocateReservedBotAccount(); // TW-010: fresh id in reserved range (>= 1e9)
 };
+
+// MVP-002 (KAP-552) lab-only hook (defined in CharacterHandler.cpp): queues a
+// synthetic login completion stamped with a stale generation so the guard in
+// CharacterHandler::HandlePlayerLoginCallback can be exercised deterministically.
+void TestDeliverStaleBotLoginCompletion(uint32 accountId, uint32 guid, uint32 staleGeneration);
 
 extern PlayerBotMgr sPlayerBotMgr;
 

@@ -171,6 +171,23 @@ public:
     }
 } chrHandler;
 
+// MVP-002 (KAP-552) lab-only hook: delivers a synthetic login completion
+// stamped with a stale generation through the normal async callback path.
+// Only reachable via the config-gated PlayerBotMgr probe (PlayerBot.
+// TestStaleLogin, default empty), so a normal server configuration cannot
+// inject completions.
+void TestDeliverStaleBotLoginCompletion(uint32 accountId, uint32 guid, uint32 staleGeneration)
+{
+    LoginQueryHolder *holder = new LoginQueryHolder(accountId, ObjectGuid(HIGHGUID_PLAYER, guid));
+    holder->SetBotGeneration(staleGeneration);
+    if (!holder->Initialize())
+    {
+        delete holder;
+        return;
+    }
+    CharacterDatabase.DelayQueryHolderUnsafe(&chrHandler, &CharacterHandler::HandlePlayerLoginCallback, holder);
+}
+
 bool WorldSession::HasHighLevelCharacter() const
 {
     return _characterMaxLevel >= sWorld.getConfig(CONFIG_UINT32_HIGH_LEVEL_CHARACTER);

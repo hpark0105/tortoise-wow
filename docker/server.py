@@ -63,6 +63,7 @@ def main():
             "PlayerBot.Debug": os.environ.get("PLAYERBOT_DEBUG", "0"),
             "PlayerBot.Provision": '"%s"' % os.environ.get("PLAYERBOT_PROVISION", ""),
             "PlayerBot.TestLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_LOGIN", ""),
+            "PlayerBot.TestStaleLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_STALE_LOGIN", ""),
             "Perf.ProcessingTelemetry": os.environ.get("PERF_PROCESSING_TELEMETRY", "0"),
             "Perf.ProcessingTelemetryFile": os.environ.get("PERF_PROCESSING_TELEMETRY_FILE", '"world_processing_telemetry.log"'),
             "PlayerSave.Interval": os.environ.get("PLAYER_SAVE_INTERVAL", "60000"),

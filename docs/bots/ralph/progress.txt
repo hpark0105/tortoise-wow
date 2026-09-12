@@ -267,3 +267,35 @@ cross-ref 23891 on KAP-549):
   fallback, no embedding/derived-write counts. Personal server and
   tortoise-local:dev untouched.
 - Next: MVP-002 stale-login completion coverage.
+2026-09-12 Local MVP-002 stale login completion rejection (park-head; KAP-552 / TW-009, AC2):
+- Added the lab-only deterministic hook that lets the TW-009 generation
+  guard be proven in the lab. PlayerBot.TestStaleLogin (default empty =
+  disabled, never set outside the Docker lab) arms a PlayerBotMgr probe
+  state machine: wait gen-N online -> DeleteBot -> wait for the old
+  session to be dropped -> AddBot (gen N+1) -> wait gen-(N+1) online ->
+  deliver a synthetic gen-N completion. CharacterHandler.cpp provides
+  TestDeliverStaleBotLoginCompletion, which queues a stale-generation
+  LoginQueryHolder through the normal DelayQueryHolderUnsafe callback path.
+- Scope note: the card allow-list did not include docker/server.py; added
+  the one-line PLAYERBOT_TEST_STALE_LOGIN -> PlayerBot.TestStaleLogin env
+  passthrough (same pattern as the R3 TestLogin probe).
+- Validation: docker compose build world green (incremental, 14 ninja
+  steps; ALLOW_TURTLE_ADDONS=ON baked into the Dockerfile); new image
+  tortoise-local:dev 730a5fb6a3d2. python docker/test_bot_login_lifecycle.py:
+  7 tests in 168.4s OK on disposable tortoise-bot-lc-* / tortoise-bot-stale-*
+  projects (stale evidence: tortoise-bot-stale-e6a0ad403433-20260912T172054Z).
+  S1: probe log shows gen-1 logout, gen-2 re-login, delivery; the guard
+  rejects with "stale login completion for 500001 (gen 1 != 2); current
+  session preserved"; no [CRASH], no in-world-entry rejections, no
+  re-login after the rejection, world state running. S2: the default-config
+  lifecycle lab (no PLAYERBOT_TEST_STALE_LOGIN) shows zero stale-probe
+  activity - the hook is inert without the env var.
+- Pre-existing lifecycle tests still pass (AC1 no overlapping sessions,
+  AC2 no false stale rejections, TW-007 owner saves, world survives cycles).
+- Fast gates: py_compile, git diff --check, docker compose config clean.
+  No tortoise-bot-* containers or volumes remain.
+- No Jira change; prd.json pass-flags untouched (acceptance belongs to
+  head/operator). Retrieval sync operator-paused: bounded direct-read
+  fallback, no embedding/derived-write counts. Personal server untouched
+  (still running the prior image 34763fe92418).
+- Next: MVP-003 owner-safe targeting.

@@ -36,6 +36,9 @@ PlayerBotMgr::PlayerBotMgr()
     m_elapsedTime = 0;
     m_lastBotsRefresh = 0;
     m_lastUpdate = 0;
+    m_staleProbeGuid = 0;
+    m_staleProbeStage = 0;
+    m_staleProbeOldGen = 0;
 }
 
 PlayerBotMgr::~PlayerBotMgr()
@@ -54,6 +57,27 @@ void PlayerBotMgr::LoadConfig()
     forceLogoutDelay = sConfig.GetBoolDefault("PlayerBot.ForceLogoutDelay", true);
     confProvisionName = sConfig.GetStringDefault("PlayerBot.Provision", "");
     confTestLoginGuids = sConfig.GetStringDefault("PlayerBot.TestLogin", "");
+    // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
+    // login-completion delivery; never set outside the Docker lab.
+    m_staleProbeGuid = 0;
+    m_staleProbeStage = 0;
+    m_staleProbeOldGen = 0;
+    std::string staleToken = sConfig.GetStringDefault("PlayerBot.TestStaleLogin", "");
+    bool staleTokenValid = !staleToken.empty();
+    uint32 staleProbeGuid = 0;
+    for (size_t k = 0; k < staleToken.size(); ++k)
+    {
+        char c = staleToken[k];
+        if (c < '0' || c > '9')
+        {
+            staleTokenValid = false;
+            break;
+        }
+        staleProbeGuid = staleProbeGuid * 10 + (uint32)(c - '0');
+    }
+    m_staleProbeGuid = (staleTokenValid && staleProbeGuid != 0) ? staleProbeGuid : 0;
+    if (m_staleProbeGuid)
+        sLog.outString("Playerbot: stale-probe armed for %u (MVP-002 lab probe)", m_staleProbeGuid);
     if (!forceLogoutDelay)
         m_tempBots.clear();
 }
@@ -319,6 +343,9 @@ void PlayerBotMgr::Update(uint32 diff)
     }
 
     m_elapsedTime += diff;
+    // MVP-002 (KAP-552): deterministic stale-completion probe (lab-only,
+    // config-gated; cheap state check when disabled).
+    UpdateStaleLoginProbe();
     if (!((m_elapsedTime - m_lastUpdate) > confUpdateDiff))
         return; //Pas besoin d'update
 
@@ -382,6 +409,57 @@ void PlayerBotMgr::Update(uint32 diff)
     {
         AddOrRemoveBot();
         m_lastBotsRefresh += confBotsRefresh;
+    }
+}
+
+void PlayerBotMgr::UpdateStaleLoginProbe()
+{
+    if (!m_staleProbeGuid || m_staleProbeStage >= 3)
+        return;
+
+    std::map<uint32, PlayerBotEntry*>::iterator iter = m_bots.find(m_staleProbeGuid);
+    if (iter == m_bots.end())
+    {
+        sLog.outError("Playerbot: stale-probe %u has no entry; probe aborted (MVP-002)", m_staleProbeGuid);
+        m_staleProbeStage = 3;
+        return;
+    }
+    PlayerBotEntry* e = iter->second;
+
+    switch (m_staleProbeStage)
+    {
+        case 0:
+            if (e->state != PB_STATE_ONLINE)
+                return; // wait for the original (generation-N) login to finish
+            m_staleProbeOldGen = e->loginGeneration;
+            sLog.outString("Playerbot: stale-probe %u: logging out gen %u (MVP-002)",
+                           m_staleProbeGuid, m_staleProbeOldGen);
+            DeleteBot(m_staleProbeGuid);
+            m_staleProbeStage = 1;
+            break;
+        case 1:
+            if (sWorld.FindSession(e->accountId))
+                return; // wait for the old session to be dropped by WorldSession::Update
+            if (!AddBot(m_staleProbeGuid, false))
+            {
+                sLog.outError("Playerbot: stale-probe %u re-login rejected; probe aborted (MVP-002)", m_staleProbeGuid);
+                m_staleProbeStage = 3;
+                return;
+            }
+            sLog.outString("Playerbot: stale-probe %u: re-login queued, generation now %u (MVP-002)",
+                           m_staleProbeGuid, e->loginGeneration);
+            m_staleProbeStage = 2;
+            break;
+        case 2:
+            if (e->state != PB_STATE_ONLINE)
+                return; // wait for the generation-(N+1) login to complete in-world
+            TestDeliverStaleBotLoginCompletion(e->accountId, m_staleProbeGuid, m_staleProbeOldGen);
+            sLog.outString("Playerbot: stale-probe %u: delivered stale gen %u against current gen %u (MVP-002)",
+                           m_staleProbeGuid, m_staleProbeOldGen, e->loginGeneration);
+            m_staleProbeStage = 3;
+            break;
+        default:
+            break;
     }
 }
 
