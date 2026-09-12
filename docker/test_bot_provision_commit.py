@@ -8,7 +8,10 @@ import test_bot_provision as p
 class BotProvisionCommitFailureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        p.command(['docker', 'image', 'inspect', p.IMAGE])
+        try:
+            p.command(['docker', 'image', 'inspect', p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{p.IMAGE} image not present; build it first")
         cls.project = 'tortoise-bot-prov-' + uuid.uuid4().hex[:12]
         cls.evidence = p.ROOT / 'local' / cls.project
         cls.evidence.mkdir()
@@ -101,7 +104,10 @@ class BotNativeSaveFailureTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        p.command(['docker', 'image', 'inspect', p.IMAGE])
+        try:
+            p.command(['docker', 'image', 'inspect', p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{p.IMAGE} image not present; build it first")
         cls.project = 'tortoise-bot-prov-' + uuid.uuid4().hex[:12]
         cls.evidence = p.ROOT / 'local' / cls.project
         cls.evidence.mkdir()

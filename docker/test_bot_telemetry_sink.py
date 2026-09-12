@@ -93,7 +93,10 @@ def bot_position(base, env):
 class BotTelemetrySinkTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        p.command(["docker", "image", "inspect", IMAGE])
+        try:
+            p.command(["docker", "image", "inspect", IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{IMAGE} image not present; build it first")
         cls.project = "tortoise-bot-tel-" + uuid.uuid4().hex[:12]
         cls.evidence = ROOT / "local" / (cls.project + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         cls.evidence.mkdir(parents=True)
