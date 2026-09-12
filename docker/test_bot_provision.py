@@ -3,8 +3,8 @@
 Boots a fresh, port-free two-service lab (disposable MariaDB + the current
 tortoise-local:dev world image) with PlayerBot.Enable=1 and a PlayerBot.Provision
 identity. The world provisions that bot at load: a reserved-range synthetic
-account (>= 1e9, no account row per contract C5), a reserved-band character guid,
-a legal level-10 Human Warrior (non-copied values), the roster row, and the
+account (>= 1e9, no account row per contract C5), a core-allocated character guid,
+a native Human Warrior created from the configured starting state, the roster row, and the
 bot_ownership binding with provision_version=2 (contract C6 / section 5a).
 
 Two scenarios are validated:
@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RESERVED = 1000000000
 IMAGE = "tortoise-local:dev"
 MIGRATION = ROOT / "sql" / "database_updates" / "character" / "20260911174500_character.sql"
+PROVISION_MIGRATION = ROOT / "sql" / "database_updates" / "character" / "20260912120000_character.sql"
 PROVISION_NAME = "ProvisionBot"
 UNRELATED_NAME = "UnrelatedBot"
 UNRELATED_GUID = 500001
@@ -134,6 +135,7 @@ def boot_lab(project, evidence, world_env, seed_sql=None):
     command(["docker", "compose"] + base + ["up", "-d", "--wait", "--wait-timeout", "600", "db"],
             env=env, timeout=660)
     db_exec(base, env, MIGRATION.read_text(encoding="utf-8"))
+    db_exec(base, env, PROVISION_MIGRATION.read_text(encoding="utf-8"))
     if seed_sql:
         db_exec(base, env, seed_sql)
     return base, env
@@ -193,6 +195,8 @@ class BotProvisionIdempotentTests(unittest.TestCase):
             cls.logs = wait_for(cls.base, cls.env,
                                 lambda l: l.count("World server is up and running!") >= 2)
             (cls.evidence / "world.log").write_text(cls.logs, encoding="utf-8")
+            cls.guid = db_exec(cls.base, cls.env,
+                               f"SELECT guid FROM characters WHERE name = '{PROVISION_NAME}'").strip()
         except BaseException:
             if cls.base is not None:
                 force_down(cls.base, cls.env)
@@ -212,7 +216,7 @@ class BotProvisionIdempotentTests(unittest.TestCase):
         self.assertEqual(db_int(self.base, self.env,
                                 f"SELECT COUNT(*) FROM characters WHERE name = '{PROVISION_NAME}'"), 1,
                          "exactly one character for the provisioned identity; log: " + str(self.evidence / "world.log"))
-        guid = db_exec(self.base, self.env, f"SELECT guid FROM characters WHERE name = '{PROVISION_NAME}'").strip()
+        guid = self.guid
         account = int(db_exec(self.base, self.env,
                               f"SELECT account FROM characters WHERE name = '{PROVISION_NAME}'").strip())
         self.assertGreaterEqual(account, RESERVED, "account must be in the reserved range")
@@ -225,10 +229,64 @@ class BotProvisionIdempotentTests(unittest.TestCase):
         self.assertEqual(bound, account, "binding must match the character owner")
 
     def test_ac1_second_run_is_idempotent_noop(self):
-        self.assertEqual(self.logs.count(f"created character '{PROVISION_NAME}'"), 1,
+        self.assertEqual(self.logs.count(f"created native character '{PROVISION_NAME}'"), 1,
                          "the bot must be created exactly once across both runs")
         self.assertGreaterEqual(self.logs.count("idempotent no-op"), 1,
                                 "the second run must be an idempotent no-op")
+
+    def test_native_character_matches_core_starting_state(self):
+        actual = db_exec(
+            self.base, self.env,
+            f"SELECT race,class,gender,level,money,map,zone,ROUND(position_x,3),"
+            f"ROUND(position_y,3),ROUND(position_z,3) FROM characters WHERE guid={self.guid}")
+        expected = db_exec(
+            self.base, self.env,
+            # Core creation persists zone=0; normal login derives/caches zone.
+            "SELECT 1,1,0,1,0,map,0,ROUND(position_x,3),ROUND(position_y,3),"
+            "ROUND(position_z,3) FROM playercreateinfo WHERE race=1 AND class=1",
+            database="tw_world")
+        self.assertEqual(actual, expected, "native bot must use the core Human Warrior starting state")
+        self.assertGreater(db_int(self.base, self.env,
+                                  f"SELECT health FROM characters WHERE guid={self.guid}"), 0)
+
+    def test_native_spells_actions_items_and_homebind_match_create_info(self):
+        spells = db_exec(self.base, self.env,
+                         f"SELECT spell FROM character_spell WHERE guid={self.guid} ORDER BY spell")
+        # Core default race/class spells are derived by LearnDefaultSpells and
+        # intentionally marked dependent, so native creation does not duplicate
+        # them in character_spell.
+        self.assertEqual(spells, "")
+        self.assertGreater(int(db_exec(self.base, self.env,
+                                       "SELECT COUNT(*) FROM playercreateinfo_spell WHERE race=1 AND class=1",
+                                       database="tw_world")), 0)
+
+        actions = db_exec(self.base, self.env,
+                          f"SELECT button,action,type FROM character_action WHERE guid={self.guid} ORDER BY button")
+        expected_actions = db_exec(self.base, self.env,
+                                   "SELECT button,action,type FROM playercreateinfo_action WHERE race=1 AND class=1 ORDER BY button",
+                                   database="tw_world")
+        self.assertEqual(actions, expected_actions)
+
+        items = db_exec(self.base, self.env,
+                        f"SELECT ci.item_template,SUM(ii.count) FROM character_inventory ci "
+                        f"JOIN item_instance ii ON ii.guid=ci.item WHERE ci.guid={self.guid} "
+                        "GROUP BY ci.item_template ORDER BY ci.item_template")
+        expected_items = db_exec(self.base, self.env,
+                                 "SELECT itemid,SUM(amount) FROM playercreateinfo_item "
+                                 "WHERE race=1 AND class=1 GROUP BY itemid ORDER BY itemid",
+                                 database="tw_world")
+        self.assertEqual(items, expected_items)
+
+        home = db_exec(self.base, self.env,
+                       f"SELECT map,zone,ROUND(position_x,3),ROUND(position_y,3),ROUND(position_z,3) "
+                       f"FROM character_homebind WHERE guid={self.guid}")
+        expected_home = db_exec(self.base, self.env,
+                                "SELECT map,zone,ROUND(position_x,3),ROUND(position_y,3),ROUND(position_z,3) "
+                                "FROM playercreateinfo WHERE race=1 AND class=1",
+                                database="tw_world")
+        self.assertEqual(home, expected_home)
+        self.assertEqual(db_int(self.base, self.env,
+                                f"SELECT phase FROM bot_provision_state WHERE char_guid={self.guid}"), 2)
 
 
 class BotProvisionResumeTests(unittest.TestCase):
@@ -253,6 +311,8 @@ class BotProvisionResumeTests(unittest.TestCase):
             f"  ({UNRELATED_GUID}, 100, 'Default');\n"
             "INSERT INTO tw_char.bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES\n"
             f"  ({UNRELATED_GUID}, {RESERVED + UNRELATED_GUID}, 1, 2);\n"
+            "INSERT INTO tw_char.bot_provision_state (char_guid, account_id, character_name, phase) VALUES\n"
+            f"  ({ORPHAN_GUID}, {RESERVED + ORPHAN_GUID}, '{PROVISION_NAME}', 2);\n"
         )
 
     @classmethod
@@ -296,7 +356,7 @@ class BotProvisionResumeTests(unittest.TestCase):
         self.assertEqual(db_int(self.base, self.env, f"SELECT COUNT(*) FROM playerbot WHERE char_guid = {ORPHAN_GUID}"), 1)
         self.assertEqual(db_int(self.base, self.env,
                                 f"SELECT MAX(provision_version) FROM bot_ownership WHERE char_guid = {ORPHAN_GUID}"), 2)
-        self.assertIn("completed (existing character)", self.logs)
+        self.assertIn("completed (native-ready character)", self.logs)
         self.assertEqual(self.logs.count("created character"), 0,
                          "an existing orphan must be reused, never re-created")
 
@@ -362,6 +422,8 @@ class BotProvisionReviewRepairTests(unittest.TestCase):
             "power1, power2, power3, power4, power5) VALUES\n"
             f"  ({REV_ORPHAN_GUID}, {RESERVED + REV_ORPHAN_GUID}, '{REV_ORPHAN_NAME}', 1, 1, 0, 10, 100000, "
             "-8946.95, -136.493, 83.5312, 0, 0, 12, 26, 0, 0, 0, 0, 0);\n"
+            "INSERT INTO tw_char.bot_provision_state (char_guid, account_id, character_name, phase) VALUES\n"
+            f"  ({REV_ORPHAN_GUID}, {RESERVED + REV_ORPHAN_GUID}, '{REV_ORPHAN_NAME}', 2);\n"
         )
 
     @classmethod
@@ -386,7 +448,7 @@ class BotProvisionReviewRepairTests(unittest.TestCase):
             cls.snap1 = {n: snapshot(cls.base, cls.env, n) for n in (REV_FRESH_NAME, REV_ORPHAN_NAME)}
             cls.logs_run2 = start_world_again(
                 cls.base, cls.env, cls.evidence, world_env_for(REV_ORPHAN_NAME),
-                "world-run2", "completed (existing character)")
+                "world-run2", "completed (native-ready character)")
             cls.snap2 = {n: snapshot(cls.base, cls.env, n) for n in (REV_FRESH_NAME, REV_ORPHAN_NAME)}
         except BaseException:
             if cls.base is not None:
@@ -416,7 +478,7 @@ class BotProvisionReviewRepairTests(unittest.TestCase):
         self.assertEqual(after["bindings"], [(after["account"], 2)],
                          "exactly one valid binding for the orphan after resume")
         self.assertEqual(after["roster"], 1)
-        self.assertIn("completed (existing character)", self.logs_run2)
+        self.assertIn("completed (native-ready character)", self.logs_run2)
         self.assertEqual(self.logs_run2.count(f"created character '{REV_ORPHAN_NAME}'"), 0)
 
     def test_r1_fresh_bot_untouched_after_orphan_resume(self):
@@ -528,7 +590,7 @@ class BotProvisionFailClosedTests(unittest.TestCase):
         self.assertIn("inconsistent binding", self.logs1)
         self.assertIn("rejected, nothing modified (fail closed)", self.logs1)
         self.assertNotIn("created character", self.logs1)
-        self.assertNotIn("completed (existing character)", self.logs1)
+        self.assertNotIn("completed (native-ready character)", self.logs1)
         self.assertNotIn("roster row added to existing binding", self.logs1)
 
     def test_r2_mismatched_binding_with_roster_rejected(self):
@@ -536,7 +598,7 @@ class BotProvisionFailClosedTests(unittest.TestCase):
         self.assertEqual(self.snap2[MISFIT2_NAME], expected,
                          "mismatched binding (roster present) must not change any data; log: " + str(self.evidence / "world-run2.log"))
         self.assertIn("rejected, nothing modified (fail closed)", self.logs2)
-        self.assertNotIn("completed (existing character)", self.logs2)
+        self.assertNotIn("completed (native-ready character)", self.logs2)
         self.assertNotIn("roster row added to existing binding", self.logs2)
 
     def test_r2_unsupported_version_rejected(self):

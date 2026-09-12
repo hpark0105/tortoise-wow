@@ -194,3 +194,25 @@ cross-ref 23891 on KAP-549):
 - Next: finding-4 native initialization (transient SEC_PLAYER session + Player::Create
   + SaveToDB direct + player-cache publication, level-10 stat re-init), then :dev
   rebuild, then TW-011. R4/R5/R6 remain open P2 coverage items.
+2026-09-12 Hosted finding-4 native initialization:
+- Fresh provisioning now uses a transient SEC_PLAYER bot session, core
+  GeneratePlayerLowGuid, Player::Create, direct SaveToDB, native MasterPlayer
+  actions, playercreateinfo homebind, then ownership/roster/cache publication.
+  Native configured level/money are preserved; no implicit level-10 preset.
+- Added versioned bot_provision_state migration. Phase-1 partial saves are
+  cleaned only after marker/name/account/GUID, reserved owner, and zero
+  binding/roster validation; deletion is verified before the same materialized
+  identity is retried. Unmarked legacy orphans fail closed. Phase-2 ownership
+  publication remains resumable across mixed MyISAM/InnoDB tables.
+- Validation: final Docker build green with ALLOW_TURTLE_ADDONS=ON; native
+  equivalence/idempotency 5/5 (66.877s); preceding combined provision suite
+  22/22 (444.779s); final persisted-inventory partial-save/retry 2/2 (62.260s); fast 11/11,
+  py_compile, Compose config, and diff checks green. Review image only; personal
+  server/dev image untouched. One exploratory inventory-trigger run safely
+  retried but failed its expected-item assertion because InnoDB rolled items
+  back; the later action-trigger test supplies the stronger accepted evidence.
+- Retrieval embedding unhealthy/incomplete: bounded direct-read fallback, no
+  sync counts. Fresh local-worker reviews were stopped for evidence-card scope
+  violations/source-hash invalidation; no worker report accepted.
+- Next: R6 nonblocking telemetry, R5 save-boundary failure, R4 stale completion,
+  then TW-011 earned-state restart/restore. No Jira change or live deployment.

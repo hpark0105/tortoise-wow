@@ -203,8 +203,9 @@ Feature: Native initialization of persistent companions
     Then its gameplay state is not persisted
 ```
 
-This is a hosted architecture decision and a pending implementation gate, not a
-claim of native provisioning completion. After this slice: R6 asynchronous
+Implementation evidence: [native persistent-bot initialization](native-initialization-2026-09-12.md).
+The gate is implemented for fresh provisioning and disposable recovery tests;
+it is not an earned-gameplay persistence claim. After this slice: R6 asynchronous
 telemetry, R5 save-boundary failure coverage, R4 stale-completion coverage, then
 TW-011 earned-state restart/restore. Custom-AI login remains a direct runtime
 coverage requirement alongside these gates.

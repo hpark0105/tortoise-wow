@@ -130,7 +130,6 @@ class PlayerBotMgr
 
         bool enable;
         uint32 AllocateReservedBotAccount(); // TW-010: fresh id in reserved range (>= 1e9)
-        uint32 AllocateReservedBotGuid();   // TW-010: fresh id in reserved guid band (>= 4e9)
 };
 
 extern PlayerBotMgr sPlayerBotMgr;

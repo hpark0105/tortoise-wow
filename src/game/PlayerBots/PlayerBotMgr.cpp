@@ -12,6 +12,7 @@
 #include "Config/Config.h"
 #include "Chat.h"
 #include "Player.h"
+#include "MasterPlayer.h"
 #include "PlayerBotAI.h"
 #include "Anticheat.h"
 
@@ -662,8 +663,8 @@ void PlayerBotMgr::AddAllBots()
 // persistent test bot (contract C6 / section 5a).
 //
 // Identity is the character NAME. A fresh provision allocates a reserved-range
-// synthetic account (>= 1e9; no account row - C5) and a reserved-band character
-// guid (>= 4e9), creates a legal level-10 Human Warrior (non-copied values),
+// synthetic account (>= 1e9; no account row - C5) and a core-allocated character
+// guid, creates a native Human Warrior through Player::Create,
 // then persists the roster row and the bot_ownership binding (provision_version
 // = 2). Because the character is keyed by name, a second run is a no-op when the
 // bot is already complete, and an interrupted run (an orphan character left
@@ -697,6 +698,13 @@ uint32 PlayerBotMgr::AllocateReservedBotAccount()
         maxOwner = ownerResult->Fetch()[0].GetUInt32();
         delete ownerResult;
     }
+    uint32 maxProvision = 0;
+    QueryResult *provisionResult = CharacterDatabase.PQuery("SELECT COALESCE(MAX(account_id), 0) FROM bot_provision_state");
+    if (provisionResult)
+    {
+        maxProvision = provisionResult->Fetch()[0].GetUInt32();
+        delete provisionResult;
+    }
     uint32 candidate = kReservedBase;
     if (maxReal >= candidate)
         candidate = maxReal + 1;
@@ -704,22 +712,9 @@ uint32 PlayerBotMgr::AllocateReservedBotAccount()
         candidate = maxBot + 1;
     if (maxOwner >= candidate)
         candidate = maxOwner + 1;
+    if (maxProvision >= candidate)
+        candidate = maxProvision + 1;
     return candidate;
-}
-
-uint32 PlayerBotMgr::AllocateReservedBotGuid()
-{
-    const uint32 kGuidBandBase = 4000000000u;
-    uint32 maxGuid = 0;
-    QueryResult *g = CharacterDatabase.PQuery("SELECT COALESCE(MAX(guid), 0) FROM characters WHERE guid >= 4000000000");
-    if (g)
-    {
-        maxGuid = g->Fetch()[0].GetUInt32();
-        delete g;
-    }
-    if (maxGuid < kGuidBandBase)
-        return kGuidBandBase;
-    return maxGuid + 1;
 }
 
 void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
@@ -755,6 +750,29 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
             account = f[1].GetUInt32();
         }
         delete qr;
+    }
+
+    bool hasProvisionState = false;
+    uint32 provisionGuid = 0;
+    uint32 provisionAccount = 0;
+    uint32 provisionPhase = 0;
+    QueryResult *pq = CharacterDatabase.PQuery(
+        "SELECT char_guid, account_id, phase FROM bot_provision_state WHERE character_name = '%s'",
+        name.c_str());
+    if (pq)
+    {
+        Field *f = pq->Fetch();
+        hasProvisionState = true;
+        provisionGuid = f[0].GetUInt32();
+        provisionAccount = f[1].GetUInt32();
+        provisionPhase = f[2].GetUInt32();
+        delete pq;
+    }
+
+    if (hasProvisionState && guid && (provisionGuid != guid || provisionAccount != account))
+    {
+        sLog.outError("Playerbot provisioning: marker for '%s' disagrees with character identity; rejected, nothing modified", name.c_str());
+        return;
     }
 
     // C3: never adopt a character owned by a real (non-bot) account.
@@ -809,65 +827,156 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
             sLog.outError("Playerbot provisioning: roster completion failed for '%s' (guid %u); not provisioned", name.c_str(), guid);
             return;
         }
+        if (!sObjectMgr.GetPlayerDataByGUID(guid))
+            sObjectMgr.LoadPlayerCacheData(guid);
         sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (roster row added to existing binding)", name.c_str(), guid, account);
         return;
     }
 
-    // --- No binding: fresh create (one transaction) or orphan completion ---
-    if (guid == 0)
+    bool cleanedIncompleteCharacter = false;
+
+    // A phase-1 marker proves this reserved character was created by this
+    // provisioner but did not finish native persistence. Permanently remove
+    // only that tightly validated partial identity, verify deletion, then
+    // retry with the same reserved guid/account. This also clears partial
+    // inventory/action rows left by the mixed MyISAM/InnoDB save path.
+    if (guid != 0 && hasProvisionState && provisionPhase == 1)
     {
-        account = AllocateReservedBotAccount();
-        guid = AllocateReservedBotGuid();
-        if (!CharacterDatabase.BeginTransaction())
+        if (hasBinding || hasRoster || account < 1000000000u)
         {
-            sLog.outError("Playerbot provisioning: cannot begin fresh creation for '%s'; not provisioned", name.c_str());
+            sLog.outError("Playerbot provisioning: incomplete marker for '%s' has published ownership state; rejected, nothing modified", name.c_str());
             return;
         }
-        bool ok = CharacterDatabase.PExecute(
-            "INSERT INTO characters (guid, account, name, race, class, gender, level, money, "
-            "position_x, position_y, position_z, map, orientation, zone, health, "
-            "power1, power2, power3, power4, power5) "
-            "VALUES (%u, %u, '%s', 1, 1, 0, 10, 100000, -8949.95, -132.493, 83.5312, 0, 0, 12, 26, 0, 0, 0, 0, 0)",
-            guid, account, name.c_str());
-        ok = ok && CharacterDatabase.PExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account);
-        ok = ok && CharacterDatabase.PExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid);
-        if (!ok)
+        Player::DeleteFromDB(ObjectGuid(HIGHGUID_PLAYER, guid), account, false, true);
+        QueryResult *remaining = CharacterDatabase.PQuery("SELECT COUNT(*) FROM characters WHERE guid = %u", guid);
+        bool stillExists = remaining && remaining->Fetch()[0].GetUInt32() != 0;
+        delete remaining;
+        if (stillExists)
         {
-            CharacterDatabase.RollbackTransaction();
-            sLog.outError("Playerbot provisioning: fresh creation failed for '%s'; rolled back, nothing persisted", name.c_str());
+            sLog.outError("Playerbot provisioning: cleanup of incomplete native character '%s' (guid %u) failed; retry stopped", name.c_str(), guid);
             return;
         }
-        // PExecute above only queues statements. Report success only after the
-        // database executes them; provisioning needs a synchronous result.
-        if (!CharacterDatabase.CommitTransactionDirect())
-        {
-            sLog.outError("Playerbot provisioning: fresh creation transaction failed for '%s'; not provisioned", name.c_str());
-            return;
-        }
-        sLog.outString("Playerbot provisioning: created character '%s' (guid %u account %u); bound (provision_version=2)", name.c_str(), guid, account);
+        sLog.outString("Playerbot provisioning: cleaned incomplete native character '%s' (guid %u); retrying reserved identity", name.c_str(), guid);
+        cleanedIncompleteCharacter = true;
+        guid = 0;
+        account = 0;
+    }
+
+    // An unbound character is resumable only when this provisioner recorded a
+    // completed native save. Legacy raw fixtures and unrelated characters are
+    // never upgraded implicitly.
+    if (guid != 0 && (!hasProvisionState || provisionPhase != 2))
+    {
+        sLog.outError("Playerbot provisioning: unbound character '%s' (guid %u) has no completed native provision marker; rejected, nothing modified", name.c_str(), guid);
         return;
     }
 
-    // Orphan resume: the character exists on a reserved account without a
-    // binding; complete it in place (same guid/account, never duplicated).
-    if (!CharacterDatabase.BeginTransaction())
+    // --- No binding: native fresh create or completed-native orphan resume ---
+    if (guid == 0)
     {
-        sLog.outError("Playerbot provisioning: cannot begin orphan completion for '%s'; not provisioned", name.c_str());
+        if (hasProvisionState)
+        {
+            guid = provisionGuid;
+            account = provisionAccount;
+            if (provisionPhase != 1)
+            {
+                sLog.outError("Playerbot provisioning: ready marker for '%s' has no character; rejected, nothing modified", name.c_str());
+                return;
+            }
+            // If no character ever reached MyISAM, the core generator did not
+            // learn this marker's guid on restart. Consume its next guid and
+            // move the pre-character marker when necessary, preventing a later
+            // human character from receiving the same guid. A cleaned partial
+            // character was present during SetHighestGuids, so its old guid is
+            // already below the generator frontier and remains safe to reuse.
+            if (!cleanedIncompleteCharacter)
+            {
+                uint32 coreGuid = sObjectMgr.GeneratePlayerLowGuid();
+                if (!coreGuid || (coreGuid != guid && !CharacterDatabase.DirectPExecute(
+                        "UPDATE bot_provision_state SET char_guid = %u WHERE char_guid = %u AND account_id = %u AND phase = 1",
+                        coreGuid, guid, account)))
+                {
+                    sLog.outError("Playerbot provisioning: could not reserve a core guid for retrying '%s'; not provisioned", name.c_str());
+                    return;
+                }
+                guid = coreGuid;
+            }
+        }
+        else
+        {
+            account = AllocateReservedBotAccount();
+            guid = sObjectMgr.GeneratePlayerLowGuid();
+            if (!guid || !CharacterDatabase.DirectPExecute(
+                    "INSERT INTO bot_provision_state (char_guid, account_id, character_name, phase) VALUES (%u, %u, '%s', 1)",
+                    guid, account, name.c_str()))
+            {
+                sLog.outError("Playerbot provisioning: could not reserve native identity for '%s'; not provisioned", name.c_str());
+                return;
+            }
+        }
+
+        PlayerBotEntry provisionEntry(guid, account, 100);
+        provisionEntry.persistent = true;
+        WorldSession provisionSession(account, nullptr, SEC_PLAYER, 0, LOCALE_enUS, "<BOT-PROVISION>", 0);
+        provisionSession.SetBot(&provisionEntry);
+        Player nativePlayer(&provisionSession);
+        if (!nativePlayer.Create(guid, name, RACE_HUMAN, CLASS_WARRIOR, GENDER_MALE, 0, 0, 0, 0, 0))
+        {
+            sLog.outError("Playerbot provisioning: native Player::Create failed for '%s'; marker retained for retry", name.c_str());
+            return;
+        }
+        nativePlayer.SetCinematic(1);
+        nativePlayer.SetAtLoginFlag(AT_LOGIN_FIRST);
+        MasterPlayer nativeMaster(&provisionSession);
+        nativeMaster.Create(&nativePlayer);
+        if (!nativePlayer.SaveToDB(false, true, true))
+        {
+            sLog.outError("Playerbot provisioning: native save failed for '%s'; incomplete marker retained, no roster published", name.c_str());
+            return;
+        }
+        if (!CharacterDatabase.BeginTransaction())
+        {
+            sLog.outError("Playerbot provisioning: cannot begin native action save for '%s'; incomplete marker retained", name.c_str());
+            return;
+        }
+        nativeMaster.SaveActions();
+        if (!CharacterDatabase.CommitTransactionDirect())
+        {
+            sLog.outError("Playerbot provisioning: native action save failed for '%s'; incomplete marker retained", name.c_str());
+            return;
+        }
+        PlayerInfo const* info = sObjectMgr.GetPlayerInfo(RACE_HUMAN, CLASS_WARRIOR);
+        if (!info || !CharacterDatabase.DirectPExecute(
+                "INSERT INTO character_homebind (guid,map,zone,position_x,position_y,position_z) VALUES (%u,%u,%u,%f,%f,%f)",
+                guid, info->mapId, info->areaId, info->positionX, info->positionY, info->positionZ) ||
+            !CharacterDatabase.DirectPExecute("UPDATE bot_provision_state SET phase = 2 WHERE char_guid = %u AND account_id = %u", guid, account))
+        {
+            sLog.outError("Playerbot provisioning: native home/action state incomplete for '%s'; marker retained, no roster published", name.c_str());
+            return;
+        }
+
+        // Publish ownership only after native state is complete. MyISAM means
+        // this remains resumable rather than cross-table atomic.
+        if (!CharacterDatabase.DirectPExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account) ||
+            !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid))
+        {
+            sLog.outError("Playerbot provisioning: native character '%s' saved but roster publication failed; retry will resume", name.c_str());
+            return;
+        }
+        sObjectMgr.InsertPlayerInCache(&nativePlayer);
+        sObjectMgr.UpdatePlayerCachedPosition(&nativePlayer);
+        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u); bound (provision_version=2)", name.c_str(), guid, account);
         return;
     }
-    bool ok = CharacterDatabase.PExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account);
-    if (!hasRoster)
-        ok = ok && CharacterDatabase.PExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid);
-    if (!ok)
+
+    // Native-ready orphan resume: complete it in place (same identity).
+    if (!CharacterDatabase.DirectPExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account) ||
+        (!hasRoster && !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid)))
     {
-        CharacterDatabase.RollbackTransaction();
-        sLog.outError("Playerbot provisioning: orphan completion failed for '%s' (guid %u); rolled back, nothing persisted", name.c_str(), guid);
+        sLog.outError("Playerbot provisioning: native-ready orphan completion failed for '%s' (guid %u); retryable", name.c_str(), guid);
         return;
     }
-    if (!CharacterDatabase.CommitTransactionDirect())
-    {
-        sLog.outError("Playerbot provisioning: orphan completion transaction failed for '%s' (guid %u); not provisioned", name.c_str(), guid);
-        return;
-    }
-    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (existing character); bound (provision_version=2)", name.c_str(), guid, account);
+    if (!sObjectMgr.GetPlayerDataByGUID(guid))
+        sObjectMgr.LoadPlayerCacheData(guid);
+    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (native-ready character); bound (provision_version=2)", name.c_str(), guid, account);
 }

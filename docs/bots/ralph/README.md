@@ -2,10 +2,10 @@
 
 Updated 2026-09-11. Start here after a new session or context reset.
 
-**Current review:** read [the hosted repair re-review](../review-2026-09-11-hosted-recheck.md)
-for R1/R2/R3 evidence and the additional transaction-result fix. Native character
-initialization is the next implementation gate; its decision and Gherkin checks
-are in [the persistence contract](../persistence-contract.md). Custom-AI runtime
+**Current review:** read [the native initialization result](../native-initialization-2026-09-12.md)
+and [the hosted repair re-review](../review-2026-09-11-hosted-recheck.md).
+Native creation and bounded partial-write recovery now pass disposable labs.
+Custom-AI runtime
 coverage and the remaining P2 queue are still open. Earlier implementation and
 Jira completion claims below/in `progress.txt` are history, not acceptance.
 
@@ -68,9 +68,9 @@ Jira epic: [KAP-543](https://parkenstein.atlassian.net/browse/KAP-543).
 
 ## What we are doing now
 
-Finish the hosted re-review gates before changing live gameplay. Continue with
-native character initialization, then R6 telemetry, R5 save-boundary coverage,
-and R4 stale-completion coverage as described in the latest review.
+Continue with R6 telemetry, R5 save-boundary coverage, and R4 stale-completion
+coverage as described in the latest native-initialization result. TW-011 follows
+those gates; the personal realm remains unchanged.
 The first execution wave below ends at a small persistent cohort and one
 deterministic follow/stop companion. It does not authorize a wholesale fork port
 or live rollout.
@@ -117,9 +117,9 @@ not bypass it.
 Suggested prompt for a new **head** session:
 
 > Read AGENTS.md, docs/bots/ralph/README.md, progress.txt and prd.json. Confirm the
-> current worktree and read docs/bots/review-2026-09-11-hosted-recheck.md. Start
-> with the native-creation gate in persistence-contract.md as a bounded change.
-> Cover native starting state and failed persistence with regression tests. Use current
+> current worktree and read docs/bots/native-initialization-2026-09-12.md. Start
+> with R6 bounded nonblocking telemetry as a bounded change. Cover a blocked
+> consumer and continued world progress with a regression test. Use current
 > verified source; preserve unrelated work and do not deploy to the live realm.
 > Independently verify the result. Preserve the ownership/save
 > blocker, one-model rule and operator's embedding maintenance. Do not mark a
