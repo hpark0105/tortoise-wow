@@ -8,6 +8,12 @@ LogoutPlayer -> SaveToDB path under the new saveability guard, after which
 the world is shut down gracefully (SIGTERM). Asserts the persistent bots'
 earned state was written under their stored owners while the quarantined
 human-owned character was never saved and its record is unchanged.
+MVP-001 (KAP-550 / TW-007) adds BotSaveBoundaryTests: the ownership
+binding is deleted after login and immediately before periodic save
+ticks; contract C4 requires those saves to be rejected with the
+character, inventory and quest rows unchanged. IMAGE can be
+overridden with SAVE_GUARD_LAB_IMAGE (default tortoise-local:dev).
+
 """
 import json
 from datetime import datetime, timezone
@@ -23,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT_PATTERN = r"tortoise-bot-save-[a-f0-9]{12}"
 RESERVED = 1000000000
-IMAGE = "tortoise-local:dev"
+IMAGE = os.environ.get("SAVE_GUARD_LAB_IMAGE", "tortoise-local:dev")
 MIGRATION = ROOT / "sql" / "database_updates" / "character" / "20260911174500_character.sql"
 
 
@@ -40,6 +46,10 @@ def db_exec(base, env, query, flags="--batch --skip-column-names", database="tw_
     script = 'export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"\nmariadb --user=root ' + flags + (" " + database if database else "")
     return command(["docker", "compose"] + base + ["exec", "-T", "db", "bash"],
                    env=env, input_text=script + "\n" + query, timeout=300)
+
+
+def login_guids(logs):
+    return set(re.findall(r"\[PlayerBot\]\[Login\]\s*'[^']*'\s+GUID:(\d+)", logs))
 
 
 class BotSaveGuardTests(unittest.TestCase):
@@ -219,6 +229,227 @@ INSERT INTO tw_char.bot_ownership (char_guid, account_id, bot_type, provision_ve
         account, logout_time, _ = int(row[0]), int(row[1]), int(row[2])
         self.assertEqual(account, 5, "human-owned character was reassigned")
         self.assertEqual(logout_time, 0, "quarantined human-owned character was saved")
+
+
+
+class BotSaveBoundaryTests(unittest.TestCase):
+    """MVP-001 (KAP-550 / TW-007, contract C4): ownership rejection at the save boundary.
+
+    Scenario 1: an owned bot logs in under a valid binding, a periodic save
+    succeeds (online flag flips), then the bot_ownership binding row is
+    deleted immediately before further save ticks. The C4 identity matrix
+    ("Any session | Owner mismatch at save | Reject save; error log")
+    requires the later saves to be rejected so the character, inventory and
+    quest rows remain unchanged. The current guard (PlayerBotMgr::
+    IsSaveableBot) is in-memory only (persistent flag + session-account
+    match captured at Load), so the scenario is marked expectedFailure
+    until the guard re-validates the binding at the save boundary
+    (MVP-001 finding F1; see progress.txt).
+
+    Scenario 2: a non-persistent (ephemeral) bot session reaching SaveToDB
+    must keep the no-save behavior. No runtime path in the current build
+    creates such a session (AddBot(PlayerBotAI*) has no callers outside
+    PlayerBots; temp-bot accounts have no account rows, so no temp-bot
+    session can authenticate), so the scenario is skipped with finding F2
+    and a proposed lab-only probe hook.
+    """
+    base = None
+    env = None
+    project = None
+    evidence = None
+    logs = ""
+    _steps = []
+    guid = 300001
+    owner = RESERVED + 300001
+    item_guid = 400001
+    item_entry = 17185  # Round Buckler: present in this build's item_template
+    quest_id = 5        # present in this build's quest_template (level 10)
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            command(["docker", "image", "inspect", IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{IMAGE} image not present; build it first")
+        cls.project = "tortoise-bot-sbnd-" + uuid.uuid4().hex[:12]
+        cls.evidence = ROOT / "local" / (cls.project + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+        cls.evidence.mkdir(parents=True)
+        cls._steps = []
+        bind = lambda source, target: {"type": "bind", "source": str(ROOT / source),
+                                       "target": target, "read_only": True}
+        # The R3 PlayerBot.TestLogin probe forces a deterministic first
+        # login at Load (independent of the refresh lottery). Refresh stays
+        # at 10s so logouts can interleave: every save path (periodic and
+        # logout) after the invalidation must be rejected per contract C4.
+        world_env = {"DB_PASSWORD": "${BOT_LAB_DB_PASSWORD:?}",
+                     "PLAYERBOT_ENABLE": "1", "PLAYERBOT_MIN_BOTS": "1", "PLAYERBOT_MAX_BOTS": "1",
+                     "PLAYERBOT_REFRESH": "10000", "PLAYERBOT_UPDATE_MS": "5000", "PLAYERBOT_DEBUG": "1",
+                     "PLAYERBOT_TEST_LOGIN": "300001",
+                     "PLAYER_SAVE_INTERVAL": "5000"}
+        (cls.evidence / "compose.json").write_text(json.dumps({
+            "services": {
+                "db": {
+                    "image": "mariadb:10.11",
+                    "environment": {"MARIADB_ROOT_PASSWORD": "${BOT_LAB_ROOT_PASSWORD:?}",
+                                    "DB_PASSWORD": "${BOT_LAB_DB_PASSWORD:?}"},
+                    "volumes": ["database:/var/lib/mysql", bind("sql", "/bootstrap/sql"),
+                                bind("docker/init-db.sh", "/docker-entrypoint-initdb.d/10-tortoise.sh")],
+                    "healthcheck": {"test": ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"],
+                                    "interval": "5s", "timeout": "5s", "retries": 120,
+                                    "start_period": "5m"},
+                    "stop_grace_period": "2m",
+                },
+                "world": {
+                    "image": IMAGE, "command": ["world"],
+                    "environment": world_env,
+                    "volumes": ["world-state:/state", bind("data", "/data")],
+                    "stdin_open": True, "tty": True, "stop_grace_period": "2m",
+                },
+            },
+            "volumes": {"database": {}, "world-state": {}},
+        }, indent=2), encoding="utf-8")
+        cls.env = dict(os.environ, BOT_LAB_ROOT_PASSWORD=secrets.token_hex(24),
+                       BOT_LAB_DB_PASSWORD=secrets.token_hex(24))
+        cls.base = ["-f", str(cls.evidence / "compose.json"), "-p", cls.project]
+        command(["docker", "compose"] + cls.base + ["config", "--quiet"], env=cls.env)
+        command(["docker", "compose"] + cls.base + ["up", "-d", "--wait", "--wait-timeout", "600", "db"],
+                env=cls.env, timeout=660)
+        db_exec(cls.base, cls.env, MIGRATION.read_text(encoding="utf-8"))
+        fixtures = """
+INSERT INTO tw_char.characters
+  (guid, account, name, race, class, gender, level, money,
+   position_x, position_y, position_z, map, orientation, zone,
+   health, power1, power2, power3, power4, power5)
+VALUES
+  ({g}, {o}, 'Savebnd', 1, 1, 0, 10, 100000,
+   -8949.95, -132.493, 83.5312, 0, 0, 12, 26, 0, 0, 0, 0, 0);
+INSERT INTO tw_char.playerbot (char_guid, chance, ai) VALUES ({g}, 100, 'Default');
+INSERT INTO tw_char.bot_ownership (char_guid, account_id, bot_type, provision_version)
+VALUES ({g}, {o}, 1, 1);
+INSERT INTO tw_char.item_instance
+  (guid, itemEntry, owner_guid, creatorGuid, giftCreatorGuid, count, duration,
+   charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, generated_loot)
+VALUES ({i}, {e}, {g}, 0, 0, 1, 0, '', 0, '', 0, 0, 0, 0, 0);
+INSERT INTO tw_char.character_inventory (guid, bag, slot, item, item_template)
+VALUES ({g}, 0, 20, {i}, {e});
+INSERT INTO tw_char.character_queststatus (guid, quest, status, rewarded)
+VALUES ({g}, {q}, 9, 0);
+""".format(g=cls.guid, o=cls.owner, i=cls.item_guid, e=cls.item_entry, q=cls.quest_id)
+        db_exec(cls.base, cls.env, fixtures)
+        command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+        deadline = time.monotonic() + 600
+        logs = ""
+        while time.monotonic() < deadline:
+            logs = command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
+                           env=cls.env, timeout=60)
+            (cls.evidence / "startup.log").write_text(logs, encoding="utf-8")
+            if "World server is up and running!" in logs:
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError("boundary lab world failed to become ready; inspect " + str(cls.evidence / "startup.log"))
+        login_deadline = time.monotonic() + 120
+        while time.monotonic() < login_deadline:
+            cls.logs = command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
+                               env=cls.env, timeout=60)
+            if str(cls.guid) in login_guids(cls.logs):
+                break
+            time.sleep(3)
+        cls.step("login observed: %s" % (str(cls.guid) in login_guids(cls.logs)))
+        # A periodic save while ownership is valid must succeed: the guard's
+        # allow path is covered at the periodic boundary (the existing class
+        # covers only the logout boundary).
+        cls.online_after_valid_save = 0
+        save_deadline = time.monotonic() + 90
+        while time.monotonic() < save_deadline:
+            out = db_exec(cls.base, cls.env, "SELECT online FROM characters WHERE guid = %d" % cls.guid)
+            cls.online_after_valid_save = int(out.strip() or 0)
+            if cls.online_after_valid_save == 1:
+                break
+            time.sleep(2)
+        cls.step("first periodic save completed (online=%d)" % cls.online_after_valid_save)
+        cls.snapshot = cls.capture_rows()
+        (cls.evidence / "snapshot-after-valid-save.txt").write_text(cls.snapshot, encoding="utf-8")
+        cls.step("snapshot captured after valid save")
+        # Invalidate ownership at the save boundary: the binding row that
+        # verified this roster entry at load is gone.
+        db_exec(cls.base, cls.env, "DELETE FROM bot_ownership WHERE char_guid = %d" % cls.guid)
+        remaining = db_exec(cls.base, cls.env,
+                            "SELECT COUNT(*) FROM bot_ownership WHERE char_guid = %d" % cls.guid)
+        cls.binding_rows_after_delete = int(remaining.strip() or -1)
+        cls.step("binding deleted; rows remaining = %d" % cls.binding_rows_after_delete)
+        # Let several 5s periodic save ticks fire while ownership is invalid.
+        time.sleep(20)
+        cls.post = cls.capture_rows()
+        (cls.evidence / "post-invalidation.txt").write_text(cls.post, encoding="utf-8")
+        cls.step("post-invalidation capture")
+        command(["docker", "compose"] + cls.base + ["stop", "--timeout", "90", "world"], env=cls.env, timeout=180)
+        cls.logs = command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
+                           env=cls.env, timeout=60)
+        (cls.evidence / "world.log").write_text(cls.logs, encoding="utf-8")
+        (cls.evidence / "boundary-steps.txt").write_text("".join(cls._steps), encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.base is None:
+            return
+        try:
+            ids = command(["docker", "compose"] + cls.base + ["ps", "-a", "-q"], env=cls.env).splitlines()
+            for row in (json.loads(command(["docker", "inspect", *ids])) if ids else []):
+                labels = row["Config"]["Labels"]
+                if labels.get("com.docker.compose.project") != cls.project:
+                    raise AssertionError("refusing to remove container from another project")
+                if row["HostConfig"].get("PortBindings"):
+                    raise AssertionError("boundary lab unexpectedly published ports")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            print(f"boundary-lab: teardown verification degraded: {exc}", flush=True)
+        try:
+            command(["docker", "compose"] + cls.base + ["down", "--volumes"], env=cls.env, timeout=300)
+        finally:
+            (cls.evidence / "compose.json").write_text(
+                "removed: " + datetime.now(timezone.utc).isoformat() + "\n", encoding="utf-8")
+
+    @classmethod
+    def step(cls, text):
+        cls._steps.append("%s %s\n" % (datetime.now(timezone.utc).isoformat(), text))
+
+    @classmethod
+    def capture_rows(cls):
+        parts = []
+        for label, query in (
+            ("characters", "SELECT * FROM characters WHERE guid = %d" % cls.guid),
+            ("character_inventory", "SELECT * FROM character_inventory WHERE guid = %d ORDER BY item" % cls.guid),
+            ("item_instance", "SELECT * FROM item_instance WHERE owner_guid = %d ORDER BY guid" % cls.guid),
+            ("character_queststatus", "SELECT * FROM character_queststatus WHERE guid = %d ORDER BY quest" % cls.guid),
+        ):
+            parts.append("=== " + label + " ===\n" + db_exec(cls.base, cls.env, query) + "\n")
+        return "\n".join(parts)
+
+    def test_lab_mechanics(self):
+        self.assertIn("World server is up and running!", self.logs)
+        self.assertTrue(str(self.guid) in login_guids(self.logs),
+                        "bot %d never logged in; log: %s" % (self.guid, self.evidence / "world.log"))
+        self.assertEqual(self.online_after_valid_save, 1,
+                         "periodic save must succeed while ownership is valid (online flag must flip)")
+        self.assertEqual(self.binding_rows_after_delete, 0,
+                         "binding row must be deleted before the invalidation window")
+
+    @unittest.expectedFailure
+    def test_s1_save_rejected_after_ownership_invalidated(self):
+        self.assertEqual(self.post, self.snapshot,
+                         "MVP-001 finding F1 (contract C4): character/inventory/quest "
+                         "rows changed after the binding was deleted; the guard must "
+                         "reject the save at the boundary. Diff evidence: "
+                         "snapshot-after-valid-save.txt vs post-invalidation.txt in %s" % self.evidence)
+
+    @unittest.skip("MVP-001 finding F2: no runtime path creates a non-persistent bot "
+                   "session (AddBot(PlayerBotAI*) has no external callers; temp-bot "
+                   "accounts have no account rows). A lab-only probe hook is required "
+                   "to reach the SaveToDB boundary with an ephemeral entry.")
+    def test_s2_ephemeral_session_unsaved(self):
+        self.fail("placeholder; scenario skipped with finding F2")
 
 
 if __name__ == "__main__":

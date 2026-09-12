@@ -227,3 +227,43 @@ cross-ref 23891 on KAP-549):
 - Next dependency-ready item is MVP-001 save-boundary rejection coverage.
 - Retrieval sync remains operator-paused. Fresh park-agent review was attempted
   but the one shared-model slot was already occupied; no worker result claimed.
+2026-09-12 Local MVP-001 save-boundary rejection (park-head; KAP-550 / TW-007, C4):
+- Card scope honored: only docker/test_bot_save_guard.py changed; added
+  BotSaveBoundaryTests (disposable tortoise-bot-sbnd-* lab, one L10 Human
+  Warrior bot, guid 300001 / account 1000300001, item 17185 + quest 5 rows).
+  Deterministic login via the PLAYERBOT_TEST_LOGIN probe; SAVE_INTERVAL=5000.
+  IMAGE is now overridable via SAVE_GUARD_LAB_IMAGE; validated on
+  tortoise-local:r6-review (current-branch C++; 6cce393 is docs-only).
+- Finding F1 (bounded, expectedFailure evidence): the saveability guard is
+  in-memory only (PlayerBotMgr::IsSaveableBot = persistent flag + session
+  account match captured at Load; Player.cpp SaveToDB guard). Deleting the
+  bot_ownership binding after login does not stop later saves. Green run
+  (tortoise-bot-sbnd-dd38dbea8d4d-20260912T170034Z): snapshot provably
+  pre-full-save, binding deletion verified to 0 rows, then the post-
+  invalidation capture shows position/totaltime/health/playerFlags changed,
+  logout_time set (logout save also violated) and 10 starting-gear item +
+  inventory rows written. Nuance: online=1 flips at login, not at the first
+  full save. The fix is a C++ guard change (re-validate the binding at
+  SaveToDB/logout, or an explicit head decision on the C4 matrix) - outside
+  this test-only card; it needs its own bounded card.
+- Finding F2 (scenario 2 skipped): no runtime path creates a non-persistent
+  bot session (AddBot(PlayerBotAI*) has no callers outside PlayerBots;
+  temp-bot accounts have no account rows, so no temp-bot session can
+  authenticate). A lab-only probe hook (synthetic non-persistent entry
+  reaching SaveToDB) is proposed.
+- Observation: a fixture item_instance row with NULL charges aborts the world
+  in Item::LoadFromDB (Tokenizer null) - data-repair-grade robustness note,
+  out of card scope; the fixture now writes charges=''.
+- Lab: three iterations kept as evidence (tortoise-bot-sbnd-7ab14025e408:
+  login never fired - min clamp + single lottery roll; f5dd5b218afe: world
+  crash on NULL charges; dd38dbea8d4d: green). Final run: 6 tests in
+  165.493s OK (skipped=1, expected failures=1), exit 0; pre-existing
+  BotSaveGuardTests 3/3. Full Docker lab suite not re-run in this slice
+  (scoped card validation only).
+- Fast gates: py_compile clean, git diff --check clean, docker compose
+  config --quiet clean. No tortoise-bot-* containers or volumes remain.
+- No Jira change; prd.json pass-flags untouched (acceptance belongs to
+  head/operator). Retrieval sync operator-paused: bounded direct-read
+  fallback, no embedding/derived-write counts. Personal server and
+  tortoise-local:dev untouched.
+- Next: MVP-002 stale-login completion coverage.
