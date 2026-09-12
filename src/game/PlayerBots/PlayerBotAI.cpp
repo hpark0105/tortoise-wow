@@ -104,6 +104,9 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                     me->Attack(target, true);
                     me->GetMotionMaster()->MoveChase(target);
                 }
+                else if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] autonomous player target skipped GUID:%u target:%u",
+                                   me->GetGUIDLow(), target->GetGUIDLow());
             }
         }
     }

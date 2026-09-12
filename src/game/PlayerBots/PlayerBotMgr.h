@@ -98,6 +98,7 @@ class PlayerBotMgr
         bool ForceAccountConnection(WorldSession* sess);
         bool IsPermanentBot(uint32 playerGuid);
         bool IsChatBot(uint32 playerGuid);
+        bool IsDebugEnabled() const { return confDebug; }
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
         // TW-007 (contract C4): only verified persistent (roster) bots may save,
