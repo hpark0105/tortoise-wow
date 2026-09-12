@@ -513,12 +513,7 @@
       "notes": "Real game/save integration required; compare complete relevant state, not only table existence. Do not use fabricated SQL rewards as gameplay proof.",
       "dependsOn": [
         "TW-010",
-        "MVP-001",
-        "MVP-002",
-        "MVP-003",
-        "MVP-004",
-        "MVP-005",
-        "MVP-006"
+        "MVP-008"
       ],
       "allowedScope": [
         "docker/",
