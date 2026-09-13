@@ -1,5 +1,9 @@
 # Living-world local-LLM handoff
 
+> Current dispatch: [one useful companion port queue](companion-port/README.md).
+> Its dependency order and hosted governance supersede the historical status and
+> start instructions below. Read prd.json for accepted flags; do not restart old MVP work.
+
 Updated 2026-09-12. Start here after a new session or context reset.
 
 **Current review:** read the [small playable-MVP queue](mvp/README.md),

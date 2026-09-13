@@ -19386,3 +19386,49 @@ bool ChatHandler::HandleBotFollowStopCommand(char* args, bool follow)
     }
     return ok;
 }
+
+bool ChatHandler::HandleBotRecruitCommand(char* args)
+{
+    return HandleBotPartyCommand(args, 0);
+}
+
+bool ChatHandler::HandleBotDismissCommand(char* args)
+{
+    return HandleBotPartyCommand(args, 1);
+}
+
+bool ChatHandler::HandleBotRecallCommand(char* args)
+{
+    return HandleBotPartyCommand(args, 2);
+}
+
+bool ChatHandler::HandleBotPartyCommand(char* args, uint8 action)
+{
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+    std::string botName(args ? args : "");
+    size_t const end = botName.find_first_of(" \t\r\n");
+    if (end != std::string::npos)
+        botName = botName.substr(0, end);
+    if (botName.empty())
+    {
+        SendSysMessage(action == 0 ? "Usage: .botrecruit <botname>" :
+                       action == 1 ? "Usage: .botdismiss <botname>" :
+                                     "Usage: .botrecall <botname>");
+        return false;
+    }
+    bool ok = action == 0 ? sPlayerBotMgr.BotRecruit(p, botName) :
+              action == 1 ? sPlayerBotMgr.BotDismiss(p, botName) :
+                            sPlayerBotMgr.BotRecall(p, botName);
+    if (!ok)
+    {
+        SendSysMessage("Bot party command rejected.");
+        SetSentErrorMessage(true);
+    }
+    return ok;
+}

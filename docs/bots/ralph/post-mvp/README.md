@@ -1,5 +1,9 @@
 # Living-world post-MVP queue
 
+Current dispatch is the [chunked companion port queue](../companion-port/README.md).
+CMP-011 is now a hosted roll-up after PORT-010, not an editing assignment.
+The order below is historical; use prd.json dependencies and priorities.
+
 These cards continue KAP-543 after the one-companion persistence MVP. Select
 the lowest-priority dependency-ready item with `passes:false` in `../prd.json`.
 Each card is one bounded implementation or validation session.

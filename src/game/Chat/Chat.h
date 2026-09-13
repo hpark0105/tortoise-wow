@@ -728,6 +728,10 @@ class ChatHandler
         bool HandleBotFollowCommand(char* args);
         bool HandleBotStopCommand(char* args);
         bool HandleBotFollowStopCommand(char* args, bool follow);
+        bool HandleBotRecruitCommand(char* args);
+        bool HandleBotDismissCommand(char* args);
+        bool HandleBotRecallCommand(char* args);
+        bool HandleBotPartyCommand(char* args, uint8 action);
 
         bool HandleBankCommand(char* args);
         bool HandleChangeWeatherCommand(char* args);

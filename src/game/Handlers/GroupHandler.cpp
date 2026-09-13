@@ -31,6 +31,7 @@
 #include "Group.h"
 #include "SocialMgr.h"
 #include "Util.h"
+#include "PlayerBotMgr.h"
 
 /* differeces from off:
     -you can uninvite yourself - is is useful
@@ -169,6 +170,12 @@ void WorldSession::HandleGroupInviteOpcode(WorldPacket & recv_data)
     WorldPacket data(SMSG_GROUP_INVITE, 10);                // guess size
     data << GetPlayer()->GetName();
     player->GetSession()->SendPacket(&data);
+
+    // NEXT-002 (post-MVP): a socketless bot session can never answer
+    // the queued SMSG_GROUP_INVITE, so settle it here: an owned
+    // companion accepts its owner's invite, and every other bot invite
+    // declines. Non-roster players are unaffected.
+    sPlayerBotMgr.HandlePartyInvite(GetPlayer(), player);
 
     SendPartyResult(PARTY_OP_INVITE, membername, ERR_PARTY_RESULT_OK);
 }

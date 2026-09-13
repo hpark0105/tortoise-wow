@@ -1,7 +1,7 @@
 {
   "project": "Tortoise-WoW Living World",
   "branchName": "feature/kap-543-bot-living-world",
-  "description": "Small, dependency-ordered Ralph work items for the one-bot persistence gate and playable companion MVP. KAP-543 remains the outcome epic; completed Jira stories retain evidence status, while review repairs and integration proofs stay open.",
+  "description": "Preserve completed persistence foundations; next qualify one useful Turtle companion by small, provenance-reviewed Playerbots behavior ports. Hosted Codex governs dispatch, review, commits and acceptance.",
   "epicKey": "KAP-543",
   "epicUrl": "https://parkenstein.atlassian.net/browse/KAP-543",
   "sourcePrd": "docs/prd/living-world.prd",
@@ -30,7 +30,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T16:57:24.366-0500"
     },
     {
       "id": "TW-002",
@@ -57,7 +58,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:10:12.450-0500"
     },
     {
       "id": "TW-003",
@@ -82,7 +84,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:38:15.698-0500"
     },
     {
       "id": "TW-004",
@@ -109,7 +112,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:40:52.747-0500"
     },
     {
       "id": "TW-005",
@@ -135,7 +139,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:47:22.862-0500"
     },
     {
       "id": "TW-006",
@@ -161,7 +166,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T22:50:06.290-0500"
     },
     {
       "id": "TW-007",
@@ -185,10 +191,11 @@
       "jiraKey": "KAP-550",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "Done - repair coverage open",
+      "jiraStatus": "Done",
       "milestone": "mvp",
       "acceptanceState": "Implemented and Jira Done; review follow-up is represented by MVP-001 or MVP-002.",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T19:59:48.509-0500"
     },
     {
       "id": "TW-008",
@@ -213,7 +220,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T20:17:28.394-0500"
     },
     {
       "id": "TW-009",
@@ -238,10 +246,11 @@
       "jiraKey": "KAP-552",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "Done - repair coverage open",
+      "jiraStatus": "Done",
       "milestone": "mvp",
       "acceptanceState": "Implemented and Jira Done; review follow-up is represented by MVP-001 or MVP-002.",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T22:50:05.179-0500"
     },
     {
       "id": "TW-010",
@@ -268,7 +277,8 @@
       "headReviewRequired": true,
       "jiraStatus": "Done",
       "milestone": "history",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-11T22:50:04.077-0500"
     },
     {
       "id": "MVP-001",
@@ -292,8 +302,9 @@
       "sourceStory": "TW-007",
       "issueType": "Repair",
       "headReviewRequired": true,
-      "jiraStatus": "Mapped locally; Jira parent status unchanged",
-      "milestone": "mvp"
+      "jiraStatus": "Done",
+      "milestone": "mvp",
+      "jiraUpdated": "2026-09-11T19:59:48.509-0500"
     },
     {
       "id": "MVP-002",
@@ -323,8 +334,9 @@
       "sourceStory": "TW-009",
       "issueType": "Repair",
       "headReviewRequired": true,
-      "jiraStatus": "Mapped locally; Jira parent status unchanged",
-      "milestone": "mvp"
+      "jiraStatus": "Done",
+      "milestone": "mvp",
+      "jiraUpdated": "2026-09-11T22:50:05.179-0500"
     },
     {
       "id": "MVP-003",
@@ -497,8 +509,9 @@
       "sourceStory": "TW-011",
       "issueType": "Subtask",
       "headReviewRequired": true,
-      "jiraStatus": "Mapped locally; Jira parent status unchanged",
-      "milestone": "mvp"
+      "jiraStatus": "In Progress",
+      "milestone": "mvp",
+      "jiraUpdated": "2026-09-13T10:05:39.886-0500"
     },
     {
       "id": "TW-011",
@@ -522,9 +535,10 @@
       "jiraKey": "KAP-554",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
+      "jiraStatus": "In Progress",
       "milestone": "mvp",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:39.886-0500"
     },
     {
       "id": "TW-014",
@@ -549,9 +563,10 @@
       "jiraKey": "KAP-557",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
+      "jiraStatus": "In Progress",
       "milestone": "mvp",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:44.711-0500"
     },
     {
       "id": "TW-012",
@@ -575,9 +590,10 @@
       "jiraKey": "KAP-555",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
+      "jiraStatus": "In Progress",
       "milestone": "post-mvp",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:41.484-0500"
     },
     {
       "id": "TW-013",
@@ -601,9 +617,10 @@
       "jiraKey": "KAP-556",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
+      "jiraStatus": "In Progress",
       "milestone": "post-mvp",
-      "validation": []
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:43.115-0500"
     },
     {
       "id": "NEXT-001",
@@ -675,11 +692,12 @@
       ],
       "priority": 42,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/post-mvp/cmp-010.md",
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-010.md Existing dirty party/invite edits and untracked docker/test_bot_party.py must be inventoried and reviewed by hosted head before dispatch; never overwrite or claim them as new worker work.",
       "dependsOn": [
         "TW-014",
         "NEXT-001",
-        "REF-001"
+        "REF-001",
+        "PORT-001"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -696,7 +714,8 @@
       "milestone": "P2",
       "validation": [
         "focused disposable group lifecycle lab"
-      ]
+      ],
+      "trackingJiraKey": "KAP-558"
     },
     {
       "id": "CMP-011",
@@ -708,10 +727,9 @@
       ],
       "priority": 43,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/post-mvp/cmp-011.md",
+      "notes": "Roll-up acceptance only; implementation split into PORT-003 through PORT-010. Do not independently implement the old broad card.",
       "dependsOn": [
-        "CMP-010",
-        "MVP-003"
+        "PORT-010"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -727,7 +745,9 @@
       "milestone": "P2",
       "validation": [
         "focused disposable command authorization and target-safety lab"
-      ]
+      ],
+      "executionMode": "hosted-acceptance",
+      "trackingJiraKey": "KAP-558"
     },
     {
       "id": "CMP-012",
@@ -737,7 +757,7 @@
         "Scenario: Tank a declared small pull\nGiven a supported tank class with learned legal abilities and normal gear\nWhen the party starts a declared two-creature pull\nThen the tank establishes threat before damage companions engage and reacts when a non-tank holds threat",
         "Scenario: Avoid an unsafe pull\nGiven no healer resources, an uncontrolled extra target or an unreachable enemy\nWhen the tank evaluates the pull\nThen it waits, recovers or stops with a bounded reason"
       ],
-      "priority": 44,
+      "priority": 64,
       "passes": false,
       "notes": "Card: docs/bots/ralph/post-mvp/cmp-012.md",
       "dependsOn": [
@@ -766,7 +786,7 @@
         "Scenario: Heal a declared small pull\nGiven a supported healer class in the owner party\nWhen party health falls during combat\nThen the healer prioritizes survival using learned legal spells while respecting range, line of sight and mana",
         "Scenario: Recover before the next pull\nGiven low mana, no legal heal or an unreachable party member\nWhen the healer evaluates readiness\nThen the party waits or reports the blocker instead of starting another pull"
       ],
-      "priority": 45,
+      "priority": 65,
       "passes": false,
       "notes": "Card: docs/bots/ralph/post-mvp/cmp-013.md",
       "dependsOn": [
@@ -795,7 +815,7 @@
         "Scenario: Assist the party tank\nGiven a supported damage class and established tank target\nWhen the damage companion enters combat\nThen it attacks that target with learned legal abilities and does not pull an unselected nearby enemy",
         "Scenario: Preserve control and stop authority\nGiven a controlled target or owner stop command\nWhen an offensive action is considered\nThen the companion does not damage the controlled target and no invalidated action resumes"
       ],
-      "priority": 46,
+      "priority": 66,
       "passes": false,
       "notes": "Card: docs/bots/ralph/post-mvp/cmp-014.md",
       "dependsOn": [
@@ -825,11 +845,12 @@
         "Scenario: Maintain activity away from the human\nGiven persistent bots assigned across at least six zones\nWhen the human remains in one zone for sixty minutes\nThen configured remote-zone floors remain active and meaningful actions succeed in three human-free zones",
         "Scenario: Degrade under load without hiding it\nGiven world processing exceeds a configured threshold\nWhen optional work is reduced\nThen new logins pause first, required activity remains, and status reports requested, active, reduced-detail and parked counts"
       ],
-      "priority": 50,
+      "priority": 70,
       "passes": false,
       "notes": "Card: docs/bots/ralph/post-mvp/pop-020.md",
       "dependsOn": [
-        "TW-013"
+        "TW-013",
+        "PORT-010"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -854,7 +875,7 @@
         "Scenario: Sustain the first scaled cohort\nGiven 50 valid persistent bots and a zero-bot baseline\nWhen bots activate at a bounded rate and run for thirty minutes\nThen 50 achieved sessions, regional actions, saves, world processing, memory, database writes and failures are reported",
         "Scenario: Report lower achieved capacity\nGiven login failures or a resource threshold breach\nWhen the stage cannot sustain 50\nThen activation backs off and the run fails with the achieved count and limiting measurement"
       ],
-      "priority": 51,
+      "priority": 71,
       "passes": false,
       "notes": "Card: docs/bots/ralph/post-mvp/pop-021.md",
       "dependsOn": [
@@ -882,7 +903,7 @@
         "Scenario: Accept one current bounded party plan\nGiven a versioned immutable observation and available park-llama service\nWhen one shared request returns before its deadline\nThen schema-valid allowlisted steps with matching versions are offered to the deterministic controller",
         "Scenario: Continue without the model\nGiven the model is busy, offline, slow, malformed or stale\nWhen validation fails\nThen no returned action executes and deterministic follow, combat and recovery continue"
       ],
-      "priority": 60,
+      "priority": 80,
       "passes": false,
       "notes": "Card: docs/bots/ralph/post-mvp/llm-010.md; related park-llama concurrency card: docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md",
       "dependsOn": [
@@ -906,6 +927,324 @@
         "schema and stale-response tests",
         "thirty-minute model-offline companion run"
       ]
+    },
+    {
+      "id": "PORT-001",
+      "title": "Pin upstream behavior and audit reuse",
+      "description": "Read-only analysis of maintained mod-playerbots follow, assist, defend and action-priority implementations. The hosted head supplies a pinned revision and bounded source files; do not use the old azerothcore/mod-playerbots repository.",
+      "acceptanceCriteria": [
+        "Record repository URL, immutable commit, exact file/symbol ranges and hashes, file-level license notices, dependencies and Turtle API mappings for each proposed reuse. Distinguish copied/adapted code from behavior-only reimplementation.",
+        "If license compatibility or a dependency is unclear, label that fragment blocked and propose a smaller alternative; do not copy runtime code or choose architecture.",
+        "Scenario: Approve modular behavior boundaries\nGiven the current Turtle bot engine and pinned upstream evidence\nWhen PORT-001 proposes the minimal architecture\nThen lifecycle and persistence, immutable observations, behavior policies, action selection, and Turtle action execution have explicit responsibilities and dependency directions\nAnd tank/healer/DPS and quest policies can propose typed intents without owning sessions or database writes\nAnd an optional personality/planner adapter can only propose bounded typed goals or preferences and cannot execute game actions\nAnd hosted Codex approves exact interfaces and file paths before implementation."
+      ],
+      "priority": 41,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-001.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [],
+      "allowedScope": [
+        "docs/bots/port-provenance.md",
+        "docs/bots/companion-architecture.md"
+      ],
+      "jiraKey": null,
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Head reviews the provenance matrix and explicitly approves the chosen minimal boundary; no server build for this documentation spike.",
+        "Hosted review of concrete module responsibilities, dependency direction, typed contracts and extension examples."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-002",
+      "title": "Keep dismissed companions benched",
+      "description": "Separate persistent companion availability from the ambient population target. Head must approve the exact additive migration path and schema before dispatch; do not edit applied migrations.",
+      "acceptanceCriteria": [
+        "Dismiss an owned companion with a positive population target, run at least two refresh intervals, and prove it stays offline; recall reactivates it, preserving ownership and earned state. Repeat across a world restart.",
+        "Ambient bots remain eligible; a rejected foreign dismiss cannot change availability. Existing ownership rows receive an explicit compatible default."
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-002.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "CMP-010",
+        "PORT-001"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "sql/wip_updates/bot_ownership.sql",
+        "docker/test_bot_bench.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; run the disposable bench/recall/restart fixture and relevant population/party regressions. No personal-volume operations."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-003",
+      "title": "Separate companion follow from combat priorities",
+      "description": "Implement only the head-approved minimal deterministic priority boundary. Keep existing autonomous behavior unchanged for bots outside companion control; no imported engine framework.",
+      "acceptanceCriteria": [
+        "An active follow goal no longer suppresses an existing legal combat action. After combat, the companion returns to its owner. Following without combat still works.",
+        "No new target selection or unrelated pull is introduced. Missing/dead/different-map owner produces a bounded hold; persistent bots gain no free gear or progress.",
+        "Scenario: Prove behavior extension without lifecycle coupling\nGiven separate follow and existing-combat policies using a shared observation and typed intent contract\nWhen PORT-003 implements and exercises both policies\nThen adding the second policy requires no changes to bot identity, login, save or bench logic\nAnd shared action selection interrupts follow for legal combat and resumes the still-valid follow goal afterward\nAnd the executor revalidates ownership, party, action generation, target and relevant game constraints immediately before action\nAnd model unavailability does not affect deterministic behavior.",
+        "Scenario: Preserve goals safely across interruptions\nGiven a suspended follow goal and a newer owner order or invalid owner state\nWhen combat ends\nThen the suspended goal resumes only if its generation and prerequisites remain valid\nAnd a canceled goal cannot be resumed by a policy or planner."
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-003.md. Follow companion-port/README.md; hosted acceptance only. Companion/ is a candidate location only: hosted head must approve exact new files/build registration in PORT-001 and narrow dispatch; split if extraction cannot fit one bounded assignment.",
+      "dependsOn": [
+        "PORT-002"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_priority.py",
+        "src/game/PlayerBots/Companion/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable existing-combat to follow transition plus existing follow/stop regression.",
+        "Behavioral extension proof with follow and existing combat policies; no lifecycle changes and stale-resume regression."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-004",
+      "title": "Add explicit hold and cancel semantics",
+      "description": "Add a distinct owner-only hold command, preserving the documented legacy botstop behavior. Head fixes command spelling and cancellation contract in the evidence card.",
+      "acceptanceCriteria": [
+        "Hold cancels movement and offensive goals, increments the action generation and persists until a new authorized order in this session. A delayed old action cannot restart offense.",
+        "Foreign commands and stale goals are rejected. Define and test defensive behavior while held; do not silently resume autonomous nearest-target aggression."
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-004.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-003"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Chat/Chat.cpp",
+        "src/game/Chat/Chat.h",
+        "src/game/Commands/Commands.cpp",
+        "docker/test_bot_companion_hold.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable hold during chase, hold during combat, stale delivery and foreign-owner cases."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-005",
+      "title": "Assist one owner-selected hostile target",
+      "description": "Port only the approved upstream assist decision rules. One owned melee damage companion and one explicit owner target; use learned abilities and normal Turtle combat APIs.",
+      "acceptanceCriteria": [
+        "A same-party companion attacks the owner's selected legal creature through normal chase/combat, earns only normal credit, and resumes following after the kill.",
+        "Reject friendly/player/missing/dead targets and foreign or non-party issuers. Revalidate target and action generation at execution; hold cancels pursuit. Never pick a replacement unrelated enemy."
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-005.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-004"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Chat/Chat.cpp",
+        "src/game/Chat/Chat.h",
+        "src/game/Commands/Commands.cpp",
+        "docker/test_bot_companion_assist.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable assist/kill/follow, invalid-target and cancellation fixtures; preserve the autonomous player-target protection."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-006",
+      "title": "Defend the owner without additional pulls",
+      "description": "Adapt bounded defensive target selection for one companion; no tank threat engine or PvP behavior.",
+      "acceptanceCriteria": [
+        "When enabled by the owner, select a legal creature actually attacking the owner or companion, handle it, and return to follow. Explicit hold has the precedence approved in PORT-004.",
+        "A nearby neutral/unengaged creature is never pulled; invalid owner/party state clears the goal. Multiple attackers use a deterministic documented tie-break."
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-006.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-005"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Chat/Chat.cpp",
+        "src/game/Chat/Chat.h",
+        "src/game/Commands/Commands.cpp",
+        "docker/test_bot_companion_defend.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable attacked-owner, unrelated-bystander, owner-loss and hold-precedence fixtures."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-007",
+      "title": "Finish combat with bounded loot and regroup",
+      "description": "Reuse the current normal corpse-loot path within companion priorities; no gear generation, auto-equipping redesign or arbitrary quest selection.",
+      "acceptanceCriteria": [
+        "After a supported kill, loot only an eligible corpse and return to owner within a configured leash/time budget. Compare actual saved inventory changes.",
+        "Full bags, inaccessible corpse, missing loot rights or owner moving away cannot trap the bot in a retry loop. Respect group loot rules; report unsupported roll handling rather than bypass it."
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-007.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-006"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_regroup.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable eligible loot, full-bag/no-rights and regroup cases with inventory snapshots retained locally."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-008",
+      "title": "Bound unreachable-target and owner-loss recovery",
+      "description": "Add timer-bounded pursuit and regroup behavior using existing Turtle movement. No teleport-to-owner shortcut or general transport implementation.",
+      "acceptanceCriteria": [
+        "Unreachable or over-leash targets are abandoned within an explicit tested deadline, and the companion returns to an available owner without selecting unrelated enemies.",
+        "Owner logout, death or map change cancels offensive work and holds safely; owner return can resume the current valid follow goal. No per-tick expensive full path recomputation."
+      ],
+      "priority": 49,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-008.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-007"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_leash.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable unreachable target, owner logout/rejoin and map mismatch checks; report actual elapsed bounds."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-009",
+      "title": "Support one normal companion death and recovery path",
+      "description": "Implement one head-selected normal recovery path after source inspection: corpse recovery in one supported outdoor area, or accepting a legal player resurrection. The selected path must be explicit; do not attempt both in one worker assignment.",
+      "acceptanceCriteria": [
+        "A dead companion stops offensive work, completes the declared legal recovery path, resumes follow and preserves earned inventory/XP under normal death rules.",
+        "Unavailable/unreachable recovery holds and reports its state with bounded retries; no free resurrection, invented destination or bypass of normal penalties."
+      ],
+      "priority": 50,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-009.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-008"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_recovery.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable death/recovery and unavailable-path fixtures. Any second recovery mechanism is a new story."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-010",
+      "title": "Qualify one useful companion and review commits",
+      "description": "Hosted acceptance gate, not autonomous worker implementation. Use one fresh read-only QA worker after deterministic checks; the human/hosted head supplies in-game observations.",
+      "acceptanceCriteria": [
+        "Review each accepted commit and cumulative diff; run relevant deterministic regressions, then observe recruit/follow, assist/defend, loot/regroup, declared death recovery, dismiss/recall, and saved state across relog/restart.",
+        "Missing client evidence remains pending, never inferred from source tests. Failures become bounded repair assignments; QA never edits source. Clearly list unsupported dungeon/transport/class behaviors."
+      ],
+      "priority": 51,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-010.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-009"
+      ],
+      "allowedScope": [
+        "docs/bots/companion-port-acceptance.md"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Head records commit and image IDs, tests actually run, skipped checks and in-game evidence. No live rollout, push or Jira transition implied."
+      ],
+      "executionMode": "hosted-acceptance",
+      "trackingJiraKey": "KAP-558"
     }
   ],
   "lastReviewed": "2026-09-13",
@@ -920,5 +1259,39 @@
       "role tactics"
     ]
   },
-  "selectionPolicy": "Choose the lowest-priority-number story with passes=false whose dependencies all pass. Execute one story per fresh session."
+  "selectionPolicy": "Hosted head selects the lowest-priority-number false story whose dependencies are accepted. First read companion-port/README.md. executionMode=hosted-acceptance is never an editing worker task. One fresh serialized worker per assignment; no autonomous acceptance, commits, pushes or deployment.",
+  "jiraReconciliation": {
+    "epicKey": "KAP-543",
+    "epicStatus": "In Progress",
+    "epicUpdated": "2026-09-13T10:05:46.182-0500",
+    "report": "docs/bots/ralph/companion-port/jira-reconciliation.md",
+    "knownIssuesRead": [
+      "KAP-544",
+      "KAP-545",
+      "KAP-546",
+      "KAP-547",
+      "KAP-548",
+      "KAP-549",
+      "KAP-550",
+      "KAP-551",
+      "KAP-552",
+      "KAP-553",
+      "KAP-554",
+      "KAP-555",
+      "KAP-556",
+      "KAP-557"
+    ],
+    "childEnumeration": "Unverified: search API failed with Cannot read properties of undefined (reading 'map'); read-issue responses omit parent and comments.",
+    "externalWrites": false,
+    "acceptancePolicy": "Local passes flags are existing bounded evidence, not Jira closure or full epic acceptance. No flags changed by this reconciliation."
+  },
+  "companionPortTracking": {
+    "jiraKey": "KAP-558",
+    "jiraUrl": "https://parkenstein.atlassian.net/browse/KAP-558",
+    "jiraStatus": "To Do",
+    "epicKey": "KAP-543",
+    "parentSubmitted": true,
+    "parentReadbackVerified": false,
+    "notes": "One tracking story for the README wave. Creation submitted parent KAP-543; connector readback omits parent. Individual local cards remain bounded assignments, not separate Jira issues."
+  }
 }

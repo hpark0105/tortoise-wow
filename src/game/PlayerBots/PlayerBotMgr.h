@@ -36,10 +36,13 @@ struct PlayerBotEntry
     uint32 loginGeneration; // increments on every session creation (TW-009, AC2)
     uint32 followSeq; // TW-014: monotonic follow-goal sequence (0 = no goal yet)
     uint32 ownerAccountId; // TW-014: human account allowed to command this bot (0 = unowned)
+    uint32 partySeq; // CMP-010: invalidates pending recruit/recall work
+    uint32 pendingPartySeq; // sequence captured by an asynchronous recall
+    uint32 pendingPartyLeaderGuid; // human leader to revalidate after login
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
     {}
 };
 
@@ -114,6 +117,24 @@ class PlayerBotMgr
         bool BotFollow(Player* issuer, const std::string& botName);
         bool BotStop(Player* issuer, const std::string& botName);
 
+        // NEXT-002 (post-MVP): deterministic party-invite handling for
+        // socketless companion sessions. A bot session never answers the
+        // queued SMSG_GROUP_INVITE, so the invite would stick forever and
+        // block every later invite ("already in a group"). Called from
+        // WorldSession::HandleGroupInviteOpcode right after the invite
+        // packet is queued: an owned companion accepts an invite from its
+        // owner (mirroring the client accept path) and declines every
+        // other invite (mirroring the decline path, including
+        // SMSG_GROUP_DECLINE to the inviter). Non-roster players are
+        // unaffected. Every outcome is logged.
+        void HandlePartyInvite(Player* issuer, Player* invitee);
+        // CMP-010: normal Group membership for an owned companion. Recruit
+        // requires an online bot; recall may queue its login. Dismiss keeps
+        // durable ownership and invalidates pending recall work.
+        bool BotRecruit(Player* issuer, const std::string& botName);
+        bool BotDismiss(Player* issuer, const std::string& botName);
+        bool BotRecall(Player* issuer, const std::string& botName);
+
         uint32 GenBotAccountId() { return ++_maxAccountId; }
         PlayerBotStats& GetStats(){ return m_stats; }
         void Start() { enable = true; }
@@ -167,9 +188,30 @@ class PlayerBotMgr
         };
         void UpdateFollowScript();
         PlayerBotEntry* FindBotByName(const std::string& name) const;
+        bool CompletePartyRecruit(Player* issuer, PlayerBotEntry* entry, uint32 sequence);
+        bool ValidatePartyOwner(Player* issuer, PlayerBotEntry* entry, const char* action) const;
         std::vector<FollowScriptEvent> m_followScript;
         uint32 m_followScriptStartMs;
         size_t m_followScriptIdx;
+
+        // NEXT-002 (post-MVP) lab-only deterministic party-invite script,
+        // armed from PlayerBot.PartyInviteScript (default empty = disabled).
+        // Events are semicolon-separated
+        // <delayMs>:<inviterGuid>:<inviteeName>; the clock starts when
+        // every inviter is online and each delivery sends a real
+        // CMSG_GROUP_INVITE through the inviter's session, so the full
+        // invite setup and the HandlePartyInvite settlement both run the
+        // normal path.
+        struct PartyInviteScriptEvent
+        {
+            uint32 delayMs;
+            uint32 inviterGuid;
+            std::string inviteeName;
+        };
+        void UpdatePartyInviteScript();
+        std::vector<PartyInviteScriptEvent> m_partyInviteScript;
+        uint32 m_partyInviteScriptStartMs;
+        size_t m_partyInviteScriptIdx;
 
         bool enable;
         uint32 AllocateReservedBotAccount(); // TW-010: fresh id in reserved range (>= 1e9)

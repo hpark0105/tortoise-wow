@@ -11,7 +11,9 @@
 #include "Opcodes.h"
 #include "Config/Config.h"
 #include "Chat.h"
+#include "Group.h"
 #include "Player.h"
+#include "Group.h"
 #include "MasterPlayer.h"
 #include "PlayerBotAI.h"
 #include "Anticheat.h"
@@ -90,6 +92,8 @@ PlayerBotMgr::PlayerBotMgr()
     m_staleProbeOldGen = 0;
     m_followScriptStartMs = 0;
     m_followScriptIdx = 0;
+    m_partyInviteScriptStartMs = 0;
+    m_partyInviteScriptIdx = 0;
 }
 
 PlayerBotMgr::~PlayerBotMgr()
@@ -184,6 +188,47 @@ void PlayerBotMgr::LoadConfig()
         }
         if (!m_followScript.empty() && confDebug)
             sLog.outString("[PlayerBot][FollowScript] armed events:%u (TW-014 lab script)", (uint32)m_followScript.size());
+    }
+    // NEXT-002 (post-MVP) lab-only deterministic party-invite script
+    // (default off). Events are semicolon-separated
+    // <delayMs>:<inviterGuid>:<inviteeName>; the clock starts when every
+    // inviter is online. Each event delivers a real CMSG_GROUP_INVITE
+    // through the inviter's session so the full invite path runs.
+    m_partyInviteScript.clear();
+    m_partyInviteScriptStartMs = 0;
+    m_partyInviteScriptIdx = 0;
+    {
+        std::string scriptToken = sConfig.GetStringDefault("PlayerBot.PartyInviteScript", "");
+        size_t pos = 0;
+        while (pos <= scriptToken.size())
+        {
+            size_t semi = scriptToken.find(';', pos);
+            if (semi == std::string::npos)
+                semi = scriptToken.size();
+            std::string ev = scriptToken.substr(pos, semi - pos);
+            pos = semi + 1;
+            if (ev.empty())
+                continue;
+            size_t c1 = ev.find(':');
+            size_t c2 = (c1 == std::string::npos) ? std::string::npos : ev.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos)
+            {
+                sLog.outError("Playerbot: party-invite-script event malformed; skipped: %s", ev.c_str());
+                continue;
+            }
+            PartyInviteScriptEvent pe;
+            pe.delayMs = (uint32)atoi(ev.substr(0, c1).c_str());
+            pe.inviterGuid = (uint32)atoi(ev.substr(c1 + 1, c2 - c1 - 1).c_str());
+            pe.inviteeName = ev.substr(c2 + 1);
+            if (pe.inviterGuid == 0 || pe.inviteeName.empty())
+            {
+                sLog.outError("Playerbot: party-invite-script event incomplete; skipped: %s", ev.c_str());
+                continue;
+            }
+            m_partyInviteScript.push_back(pe);
+        }
+        if (!m_partyInviteScript.empty() && confDebug)
+            sLog.outString("[PlayerBot][PartyInviteScript] armed events:%u (NEXT-002 lab script)", (uint32)m_partyInviteScript.size());
     }
     // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
     // login-completion delivery; never set outside the Docker lab.
@@ -441,6 +486,21 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
     player->setAI(e->ai);
     e->ai->SetPlayer(player);
     e->ai->OnPlayerLogin();
+
+    // CMP-010: a recall may have queued this login. Revalidate every mutable
+    // condition after the bot is actually in-world; a newer dismiss/recruit
+    // changes partySeq and makes this completion stale.
+    if (e->pendingPartyLeaderGuid)
+    {
+        uint32 const leaderGuid = e->pendingPartyLeaderGuid;
+        uint32 const sequence = e->pendingPartySeq;
+        e->pendingPartyLeaderGuid = 0;
+        e->pendingPartySeq = 0;
+        Player* leader = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, leaderGuid));
+        if (!CompletePartyRecruit(leader, e, sequence))
+            sLog.outError("party recall completion rejected bot:%s guid:%u leader:%u seq:%u",
+                          e->name.c_str(), e->playerGUID, leaderGuid, sequence);
+    }
 }
 
 void PlayerBotMgr::Update(uint32 diff)
@@ -482,6 +542,9 @@ void PlayerBotMgr::Update(uint32 diff)
     // TW-014 (KAP-557): deterministic follow/stop script (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateFollowScript();
+    // NEXT-002 (post-MVP): deterministic party-invite script (lab-only,
+    // config-gated; cheap state check when disabled).
+    UpdatePartyInviteScript();
     if (!((m_elapsedTime - m_lastUpdate) > confUpdateDiff))
         return; //Pas besoin d'update
 
@@ -1341,6 +1404,200 @@ bool PlayerBotMgr::BotStop(Player* issuer, const std::string& botName)
     return true;
 }
 
+bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const char* action) const
+{
+    if (!issuer || !issuer->GetSession() || !e)
+        return false;
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("party %s rejected unowned bot:%s issuer:%u", action, e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("party %s rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      action, e->name.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    return true;
+}
+
+bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint32 sequence)
+{
+    if (!ValidatePartyOwner(issuer, e, "recruit"))
+        return false;
+    if (sequence != e->partySeq)
+    {
+        sLog.outError("party recruit rejected stale bot:%s seq:%u current:%u",
+                      e->name.c_str(), sequence, e->partySeq);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->session)
+    {
+        sLog.outError("party recruit rejected offline bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
+    Player* bot = sObjectAccessor.FindPlayer(botGuid);
+    if (!bot || bot->GetSession() != e->session)
+    {
+        sLog.outError("party recruit rejected missing in-world bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (issuer->IsInCombat() || bot->IsInCombat())
+    {
+        sLog.outError("party recruit rejected combat bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_GROUP) && issuer->GetTeam() != bot->GetTeam())
+    {
+        sLog.outError("party recruit rejected faction bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (issuer->HandleHardcoreInteraction(bot, true) != Player::HardcoreInteractionResult::Allowed)
+    {
+        sLog.outError("party recruit rejected hardcore bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+
+    Group* group = issuer->GetGroup();
+    if (group && group->isBGGroup())
+    {
+        sLog.outError("party recruit rejected battleground bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (group && !group->IsLeader(issuer->GetObjectGuid()))
+    {
+        sLog.outError("party recruit rejected not-leader bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (bot->GetGroup())
+    {
+        if (bot->GetGroup() == group && group && group->IsLeader(issuer->GetObjectGuid()))
+        {
+            sLog.outString("party recruit already-member bot:%s guid:%u leader:%u seq:%u",
+                           e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), sequence);
+            return true;
+        }
+        sLog.outError("party recruit rejected already-grouped bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (group && group->IsFull())
+    {
+        sLog.outError("party recruit rejected full bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+
+    bool created = false;
+    if (!group)
+    {
+        group = new Group;
+        if (!group->Create(issuer->GetObjectGuid(), issuer->GetName()))
+        {
+            delete group;
+            sLog.outError("party recruit rejected create-failed bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+            return false;
+        }
+        sObjectMgr.AddGroup(group);
+        created = true;
+    }
+    if (!group->AddMember(bot->GetObjectGuid(), bot->GetName()))
+    {
+        if (created)
+            group->Disband(true, issuer->GetObjectGuid());
+        sLog.outError("party recruit rejected add-failed bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    group->BroadcastGroupUpdate();
+    sLog.outString("party recruit accepted bot:%s guid:%u leader:%u seq:%u group:%u",
+                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), sequence, group->GetId());
+    return true;
+}
+
+bool PlayerBotMgr::BotRecruit(Player* issuer, const std::string& botName)
+{
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!ValidatePartyOwner(issuer, e, "recruit"))
+        return false;
+    ++e->partySeq;
+    e->pendingPartyLeaderGuid = 0;
+    e->pendingPartySeq = 0;
+    return CompletePartyRecruit(issuer, e, e->partySeq);
+}
+
+bool PlayerBotMgr::BotRecall(Player* issuer, const std::string& botName)
+{
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!ValidatePartyOwner(issuer, e, "recall"))
+        return false;
+    ++e->partySeq;
+    e->pendingPartyLeaderGuid = issuer->GetGUIDLow();
+    e->pendingPartySeq = e->partySeq;
+    if (e->state == PB_STATE_ONLINE)
+    {
+        uint32 const sequence = e->pendingPartySeq;
+        e->pendingPartyLeaderGuid = 0;
+        e->pendingPartySeq = 0;
+        return CompletePartyRecruit(issuer, e, sequence);
+    }
+    if (e->state == PB_STATE_OFFLINE && !AddBot(e->playerGUID))
+    {
+        e->pendingPartyLeaderGuid = 0;
+        e->pendingPartySeq = 0;
+        sLog.outError("party recall rejected login bot:%s issuer:%u seq:%u",
+                      e->name.c_str(), issuer->GetGUIDLow(), e->partySeq);
+        return false;
+    }
+    sLog.outString("party recall queued bot:%s guid:%u leader:%u seq:%u",
+                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq);
+    return true;
+}
+
+bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
+{
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!ValidatePartyOwner(issuer, e, "dismiss"))
+        return false;
+    bool const recallPending = e->pendingPartyLeaderGuid != 0;
+    uint32 const pendingSequence = e->pendingPartySeq;
+    ++e->partySeq;
+    Group* group = issuer->GetGroup();
+    if (recallPending &&
+        (!group || !group->IsMember(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID)))))
+    {
+        // Keep the captured request until login completes so it is rejected
+        // by the same sequence check used for every asynchronous recall.
+        sLog.outString("party dismiss cancelled pending recall bot:%s guid:%u leader:%u pending:%u current:%u",
+                       e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), pendingSequence, e->partySeq);
+        return true;
+    }
+    e->pendingPartyLeaderGuid = 0;
+    e->pendingPartySeq = 0;
+    if (!group || group->isBGGroup() || !group->IsLeader(issuer->GetObjectGuid()) ||
+        !group->IsMember(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID))))
+    {
+        sLog.outError("party dismiss rejected membership bot:%s issuer:%u seq:%u",
+                      e->name.c_str(), issuer->GetGUIDLow(), e->partySeq);
+        return false;
+    }
+    ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
+    Player* bot = sObjectAccessor.FindPlayer(botGuid);
+    if (issuer->IsInCombat() || (bot && bot->IsInCombat()))
+    {
+        sLog.outError("party dismiss rejected combat bot:%s issuer:%u seq:%u",
+                      e->name.c_str(), issuer->GetGUIDLow(), e->partySeq);
+        return false;
+    }
+    if (bot && e->ai)
+        e->ai->FollowStop();
+    group->RemoveMember(botGuid, GROUP_KICK);
+    DeleteBot(e->playerGUID); // bench through the normal save/logout path
+    sLog.outString("party dismiss accepted bot:%s guid:%u leader:%u seq:%u",
+                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq);
+    return true;
+}
+
 void PlayerBotMgr::UpdateFollowScript()
 {
     if (m_followScript.empty() || m_followScriptIdx >= m_followScript.size())
@@ -1402,5 +1659,158 @@ void PlayerBotMgr::UpdateFollowScript()
             }
         }
         ++m_followScriptIdx;
+    }
+}
+// ---------------------------------------------------------------------------
+// NEXT-002 (post-MVP): party-invite handling for socketless companion
+// sessions.
+//
+// A bot session never reads world packets, so an SMSG_GROUP_INVITE left in
+// its queue sticks forever: the bot can never accept or decline, and every
+// later invite fails with "already in a group". HandlePartyInvite is called
+// from HandleGroupInviteOpcode right after the invite packet is queued and
+// before the inviter's result, and settles the pending invite:
+//
+//   - owned companion + inviter is the owner: accept, mirroring the
+//     client's HandleGroupAcceptOpcode path exactly (remove the invite,
+//     create the group when it is new, add the companion as a member,
+//     broadcast the group update);
+//   - every other invite to a roster bot (intruder, unowned bot): decline,
+//     mirroring HandleGroupDeclineOpcode exactly (the leader is fetched
+//     first because UninviteFromGroup may delete the group, then
+//     SMSG_GROUP_DECLINE is sent to the inviter).
+//
+// Non-roster players are not touched; every outcome is logged.
+// ---------------------------------------------------------------------------
+void PlayerBotMgr::HandlePartyInvite(Player* issuer, Player* invitee)
+{
+    if (!issuer || !invitee)
+        return;
+    std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(invitee->GetObjectGuid().GetCounter());
+    if (it == m_bots.end())
+        return; // not a roster bot: normal client behaviour applies
+    PlayerBotEntry* const bot = it->second;
+    Group* group = invitee->GetGroupInvite();
+    if (!group)
+        return; // no pending invite to settle
+
+    uint32 const inviterAcc = issuer->GetSession() ? issuer->GetSession()->GetAccountId() : 0;
+
+    if (bot->ownerAccountId && inviterAcc == bot->ownerAccountId)
+    {
+        // Accept: mirror of WorldSession::HandleGroupAcceptOpcode.
+        if (group->GetLeaderGuid() == invitee->GetObjectGuid())
+        {
+            sLog.outError("party invite ignored self-invite bot:%s guid:%u",
+                          bot->name.c_str(), invitee->GetObjectGuid().GetCounter());
+            return;
+        }
+        // remove from invites in any case (same as the client path)
+        group->RemoveInvite(invitee);
+        if (group->IsFull())
+        {
+            sLog.outError("party invite declined full-group bot:%s guid:%u leader:%u",
+                          bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                          group->GetLeaderGuid().GetCounter());
+            return;
+        }
+        if (!group->HandleHardcoreInteraction(invitee))
+        {
+            sLog.outError("party invite declined hardcore bot:%s guid:%u leader:%u",
+                          bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                          group->GetLeaderGuid().GetCounter());
+            return;
+        }
+        Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+        // forming a new group, create it (persisted immediately)
+        if (!group->IsCreated())
+        {
+            if (leader)
+                group->RemoveInvite(leader);
+            if (!group->Create(group->GetLeaderGuid(), group->GetLeaderName()))
+            {
+                sLog.outError("party invite failed group-create bot:%s guid:%u leader:%u",
+                              bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                              group->GetLeaderGuid().GetCounter());
+                return;
+            }
+            sObjectMgr.AddGroup(group);
+        }
+        // the companion's group is set inside AddMember
+        if (!group->AddMember(invitee->GetObjectGuid(), invitee->GetName()))
+        {
+            sLog.outError("party invite failed add-member bot:%s guid:%u leader:%u",
+                          bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                          group->GetLeaderGuid().GetCounter());
+            return;
+        }
+        group->BroadcastGroupUpdate();
+        sLog.outString("party invite accepted bot:%s guid:%u leader:%u group:%u inviter-acc:%u",
+                       bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                       group->GetLeaderGuid().GetCounter(), group->GetId(), inviterAcc);
+        return;
+    }
+
+    // Decline: mirror of WorldSession::HandleGroupDeclineOpcode. The leader
+    // must be fetched before UninviteFromGroup, which may delete the group.
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    invitee->UninviteFromGroup();
+    if (leader && leader->GetSession())
+    {
+        WorldPacket data(SMSG_GROUP_DECLINE, 10);
+        data << invitee->GetName();
+        leader->GetSession()->SendPacket(&data);
+    }
+    sLog.outString("party invite declined not-owner bot:%s guid:%u inviter:%u acc:%u owner:%u",
+                   bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                   issuer->GetObjectGuid().GetCounter(), inviterAcc, bot->ownerAccountId);
+}
+
+void PlayerBotMgr::UpdatePartyInviteScript()
+{
+    if (m_partyInviteScript.empty() || m_partyInviteScriptIdx >= m_partyInviteScript.size())
+        return;
+
+    if (m_partyInviteScriptStartMs == 0)
+    {
+        // The clock starts only once every inviter is online; earlier, their
+        // sessions do not exist yet and the invites would be delivered into
+        // nothing.
+        for (size_t i = 0; i < m_partyInviteScript.size(); ++i)
+        {
+            PartyInviteScriptEvent const& ev = m_partyInviteScript[i];
+            std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(ev.inviterGuid);
+            if (it == m_bots.end() || it->second->state != PB_STATE_ONLINE)
+                return;
+        }
+        m_partyInviteScriptStartMs = WorldTimer::getMSTime();
+        if (confDebug)
+            sLog.outString("[PlayerBot][PartyInviteScript] started events:%u", (uint32)m_partyInviteScript.size());
+        return;
+    }
+
+    uint32 const now = WorldTimer::getMSTime() - m_partyInviteScriptStartMs;
+    while (m_partyInviteScriptIdx < m_partyInviteScript.size() &&
+           m_partyInviteScript[m_partyInviteScriptIdx].delayMs <= now)
+    {
+        PartyInviteScriptEvent const& ev = m_partyInviteScript[m_partyInviteScriptIdx];
+        std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(ev.inviterGuid);
+        WorldSession* sess = (it != m_bots.end()) ? it->second->session : nullptr;
+        if (!sess)
+            sLog.outError("[PlayerBot][PartyInviteScript] inviter %u unavailable; event skipped", ev.inviterGuid);
+        else
+        {
+            // Deliver a real invite through the inviter's session (the same
+            // path a client packet takes): the full invite setup runs, the
+            // SMSG_GROUP_INVITE is queued for the invitee, and the
+            // HandlePartyInvite hook (GroupHandler.cpp) settles it.
+            WorldPacket data(CMSG_GROUP_INVITE, 16);
+            data << ev.inviteeName;
+            sess->HandleGroupInviteOpcode(data);
+            if (confDebug)
+                sLog.outString("[PlayerBot][PartyInviteScript] invite at %u inviter:%u invitee:%s",
+                               ev.delayMs, ev.inviterGuid, ev.inviteeName.c_str());
+        }
+        ++m_partyInviteScriptIdx;
     }
 }
