@@ -588,8 +588,8 @@
         "Scenario: Reject or handle the failure path\nGiven a bot cannot load or resource thresholds are exceeded\nWhen this condition is detected\nThen new logins back off and the report identifies the achieved count without repeatedly recreating identities"
       ],
       "priority": 31,
-      "passes": false,
-      "notes": "Run a 30-minute ten-bot observation after prior gates; no 50+ load or live rollout. Record actual actions separately from online status.",
+      "passes": true,
+      "notes": "Accepted 2026-09-13 by hosted Codex: ten distinct owned sessions remained online for 1800.8s in a disposable port-free lab; 1548 wander actions, 153 resource samples, 359 processing-telemetry windows, and no crash. World CPU mean/p95/max 36.08/50.32/62.09%; memory 1.065 -> 1.267 GiB. Full report: docs/bots/cohort-ten.md.",
       "dependsOn": [
         "TW-011",
         "TW-012"
@@ -601,7 +601,7 @@
       "jiraKey": "KAP-556",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "To Do",
+      "jiraStatus": "Done locally; Jira transition pending",
       "milestone": "post-mvp",
       "validation": []
     },

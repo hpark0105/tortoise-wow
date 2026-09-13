@@ -686,3 +686,11 @@ cross-ref 23891 on KAP-549):
   queued once, and `[PlayerBot][Login] 'Companion' GUID:2 Acc:1000000000`.
   Database and all three personal services are healthy. Operator in-game
   follow/stop and gameplay observation remain the final human validation.
+- TW-013/KAP-556 accepted (hosted Codex, 2026-09-13): the port-free ten-bot
+  cohort ran for 1800.8s with 10 unique logins, 10 ownership rows, 10 online
+  DB rows, 1548 autonomous wander actions, 153 resource samples, 359 tick
+  telemetry windows, and no crash. World CPU mean/p95/max was
+  36.08/50.32/62.09%; memory moved 1.065 -> 1.267 GiB. Processing p95 median
+  was 16ms and max 67ms; intermittent p99 reached the 250ms overflow bucket,
+  which remains a scale-test signal. The disposable containers and volumes
+  were removed. Full report: docs/bots/cohort-ten.md.
