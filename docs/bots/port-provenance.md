@@ -87,3 +87,220 @@ implementation uses native APIs and a flat priority policy in `PlayerBotAI::Upda
 rather than a generic strategy/action engine. This keeps the companion
 self-contained within the existing two-file `PlayerBotMgr` + `PlayerBotAI`
 structure without introducing a framework.
+
+## Upstream code as body-knowledge for the LLM brain
+
+The mod-playerbots source is not just a design reference for our
+deterministic fallback. It is the **complete mechanical knowledge base**
+that our C++ "body" needs, and the **class skill data** that feeds the
+LLM "brain."
+
+### 1. Mechanical execution (C++ body)
+
+The upstream code contains validated implementations of every physical
+action the bot can perform. We do not copy these, but we use them as the
+specification for our intent validation layer in `PlayerBotAI`:
+
+| Intent | Upstream validation sequence (specification) |
+|--------|----------------------------------------------|
+| `Attack` | `AttackAction::Attack`: in-world, not flying, PvP-prohibited zone check, not friendly, not dead, LOS, valid attack target, not already attacking same target |
+| `CastSpell` | `CastSpellAction::isPossible`: has spell, off cooldown, in range, valid target, not in vehicle (if ground spell) |
+| `Kite` | `MovementActions`: maintain distance by moving away while maintaining threat; use `MovePoint` with pathing |
+| `Follow` | `FollowAction::Execute`: distance check vs. `followDistance`, dead-follow guard, transport handling (skip) |
+| `Hold` | `StayActionBase::Stay`: clear last movement, stop moving, clear chase/follow unit states |
+| `Loot` | `LootAction`: in range, corpse not looted, party ownership check |
+| `Resurrect` | `ReviveFromCorpseAction`: at corpse, can cast, mana available |
+
+These validation sequences become the **safety layer** in our C++ engine.
+Every intent the LLM proposes passes through these checks before execution.
+
+### 2. Class skill knowledge (LLM context)
+
+The per-class strategy files define complete combat rotations with
+priority-ordered triggers. This is the "skill knowledge" the LLM uses to
+make informed decisions. We extract this into a structured format for the
+personality service:
+
+**Source: `src/Ai/Class/Warrior/ArmsWarriorStrategy.cpp`**
+
+Default rotation (fallback when no trigger fires):
+```
+bladestorm > mortal strike > sunder armor > melee
+```
+
+Conditional triggers (priority order, higher fires first):
+```
+ACTION_EMERGENCY:
+  critical health        -> intimidating shout
+  medium health          -> enraged regeneration
+  almost full health     -> retaliation (2+ melee attackers)
+
+ACTION_INTERRUPT:
+  victory rush           -> victory rush (kill proc)
+  shattering throw       -> shattering throw (break DS/IB, 30yd)
+
+ACTION_HIGH + 10:
+  enemy out of melee     -> charge
+  battle stance needed   -> switch to battle stance
+
+ACTION_HIGH + 9:
+  battle shout available -> battle shout (buff)
+
+ACTION_HIGH + 8:
+  rend available         -> rend (DoT)
+  rend on attacker       -> rend on attacker (defensive DoT)
+
+ACTION_HIGH + 5:
+  target critical health -> execute
+  sudden death proc      -> execute
+
+ACTION_HIGH + 4:
+  overpower / TfB proc   -> overpower (bonus strike)
+
+ACTION_HIGH + 3:
+  mortal strike ready    -> mortal strike
+
+ACTION_HIGH + 2:
+  bloodrage ready        -> bloodrage (burst CD)
+  death wish ready       -> death wish (burst CD)
+
+ACTION_HIGH + 1:
+  high rage available    -> slam (rage > ~50)
+
+ACTION_HIGH:
+  hamstring available    -> piercing howl (AoE CC)
+
+ACTION_DEFAULT:
+  (default rotation above)
+```
+
+**Source: `src/Ai/Class/Warrior/WarriorTriggers.cpp`** (trigger conditions)
+
+Each trigger has a condition function that checks game state. Examples:
+- "mortal strike": spell known, off cooldown, target alive, in melee range
+- "high rage available": `bot->GetRageValue() > threshold`
+- "target critical health": `target->HealthPct() < 20`
+- "critical health": `bot->HealthPct() < 30`
+- "almost full health": `bot->HealthPct() > 80` AND 2+ melee attackers
+- "shattering throw trigger": enemy within 25yd has DS/IB/BoP aura
+
+### 3. How this feeds the LLM
+
+The personality service receives a **class knowledge block** as part of
+the system prompt. For a level 12 Arms Warrior companion:
+
+```
+You are playing an Arms Warrior in World of Warcraft (Turtle WoW 1.18.1).
+
+Your rotation priority (highest to lowest):
+1. EMERGENCY: If your HP is below 30%, use Intimidating Shout. If below 50%, use Enraged Regeneration.
+2. INTERRUPT: If Victory Rush is off cooldown, cast it. If an enemy has Divine Shield/Ice Block within 30yd, use Shattering Throw.
+3. If target is out of melee range, Charge.
+4. Maintain Battle Shout buff. Apply Rend if off cooldown.
+5. If target is below 20% HP, use Execute.
+6. If Overpower/Taste for Blood procced, use Overpower.
+7. Use Mortal Strike when off cooldown.
+8. If Bloodrage or Death Wish is ready, use it for burst.
+9. Spend excess rage (>50) on Slam or Heroic Strike.
+10. Default: Bladestorm > Mortal Strike > Sunder Armor > Melee auto-attack.
+
+Your personality stage: NOOB (reckless)
+- You charge into combat without thinking
+- You use burst CDs (Bloodrage, Death Wish) too eagerly
+- You ignore defensive triggers until it's too late
+- You say enthusiastic things: "LET'S GO!", "EASY!", "one more!"
+- You sometimes pull multiple mobs and get overwhelmed
+- You are learning: start paying attention to HP, save defensives for emergencies
+```
+
+As the bot progresses to LEARNING stage, the personality service modifies
+the prompt:
+```
+Your personality stage: LEARNING
+- You now kite when HP is below 50% instead of fighting through
+- You save Bloodrage for when you have Mortal Strike up
+- You use Intimidating Shout proactively at 40% instead of 30%
+- You check for multiple enemies before charging
+- You are calmer: "stun first", "backing up", "got this"
+```
+
+### 4. Config parameters (physical constraints)
+
+From `PlayerbotAIConfig.h`, these are the physical constants our C++
+engine uses (not LLM-decided):
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `followDistance` | 20.0f | Max distance before follow triggers |
+| `reactDistance` | 50.0f | Distance at which bot reacts to enemies |
+| `reactDelay` | 1500ms | Delay between AI ticks |
+| `meleeDistance` | 2.0f | Melee attack range |
+| `spellDistance` | 30.0f | Max spell range |
+| `sightDistance` | 50.0f | Detection range |
+| `fleeDistance` | 40.0f | Distance to flee when low HP |
+| `tooCloseDistance` | 5.0f | Minimum comfortable distance |
+| `aoeRadius` | 8.0f | AoE ability radius |
+| `maxWaitForMove` | 30000ms | Max wait for pathing |
+| `sitDelay` | 10000ms | Delay before sitting when idle |
+| `lootDistance` | 2.0f | Distance to loot a corpse |
+
+These become constants in our C++ engine. The LLM does not override them;
+it works within them.
+
+### 5. What we do NOT use from upstream
+
+| Upstream feature | Reason to exclude |
+|-----------------|-------------------|
+| `Transport` / boarding logic | Complex, AzerothCore-specific, not needed for companion |
+| `Formation` system | Multi-bot formation; we have one companion |
+| `RandomPlayerbotMgr` | Population management; out of scope |
+| `Dungeon` / `Raid` / `World` strategy trees | Instance-specific content; companion starts in open world |
+| `BisListMgr` / `RandomItemMgr` | Gear scoring; not relevant to companion behavior |
+| `TravelMgr` | Travel routing; companion follows owner, doesn't travel independently |
+| `PlayerbotDungeonRepository` | Dungeon-specific data; future scope |
+| Full `MovementActions.cpp` (105KB) | Contains BG/dungeon/vehicle logic; we extract only kiting/fleeing patterns |
+
+### 6. Extraction plan for class knowledge
+
+To feed the LLM, we extract the per-class strategies into a structured
+JSON/YAML format at build time (or as static data files):
+
+```yaml
+# data/bot-knowledge/warrior-arms.yaml
+class: warrior
+spec: arms
+level_range: [1, 60]
+rotation:
+  default: [bladestorm, mortal_strike, sunder_armor, melee]
+  triggers:
+    - name: critical_health
+      priority: EMERGENCY
+      condition: "self_hp_pct < 0.30"
+      action: cast(intimidating_shout)
+    - name: victory_rush
+      priority: INTERRUPT
+      condition: "spell_off_cooldown(victory_rush)"
+      action: cast(victory_rush)
+    # ... (full trigger list)
+personality_modifiers:
+  NOOB:
+    risk: 0.9
+    rotation_mod: "uses burst CDs without checking rotation priority"
+    expressions: ["LET'S GO!", "EASY!", "one more!", "oooops"]
+    mistakes: ["charges into 3+ mobs", "wastes Bloodrage on trash", "ignores HP until 10%"]
+  LEARNING:
+    risk: 0.6
+    rotation_mod: "starts saving burst for priority targets"
+    expressions: ["stun first", "backing up", "got this"]
+    lessons: ["check for adds before pulling", "save Intimidating Shout for real danger"]
+  # ... (COMPETENT, VETERAN)
+```
+
+This file lives in the personality service (Python sidecar), not in the
+C++ game server. The C++ server only knows the intent vocabulary and
+validation rules. The LLM reads the class knowledge + personality stage
+and produces intents.
+
+This keeps the game server lean and the "brain" (LLM + knowledge) in a
+separate, updatable process. New classes or specs can be added by dropping
+a new YAML file into the personality service without rebuilding the server.
