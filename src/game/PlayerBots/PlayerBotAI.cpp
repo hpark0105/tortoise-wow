@@ -417,6 +417,44 @@ Creature* PlayerBotAI::FindQuestGiver() const
     NearestQuestGiverCheck check(me, _questId, 50.0f);
     MaNGOS::CreatureLastSearcher<NearestQuestGiverCheck> searcher(found, check);
     Cell::VisitGridObjects(me, searcher, 50.0f);
+    if (!found && sPlayerBotMgr.IsDebugEnabled())
+    {
+        // MVP-006 debug: distinguish "no giver in grid" from "giver in
+        // grid but not offering the quest" for the declared quest's giver
+        // entry (2079, Conservator Ilthalaine).
+        class GiverProbe
+        {
+        public:
+            GiverProbe(Player const* obj, uint32 questId) : i_obj(obj), i_questId(questId) {}
+            WorldObject const& GetFocusObject() const { return *i_obj; }
+            bool operator()(Creature const* u)
+            {
+                if (u->GetEntry() == 2079)
+                {
+                    if (u->IsAlive() && u->HasQuest(i_questId))
+                        ++i_withQuest;
+                    if (u->IsAlive())
+                        ++i_alive;
+                    else
+                        ++i_dead;
+                }
+                return false;
+            }
+            uint32 i_alive = 0;
+            uint32 i_dead = 0;
+            uint32 i_withQuest = 0;
+            GiverProbe(GiverProbe const&);
+        private:
+            Player const* const i_obj;
+            uint32 const i_questId;
+        };
+        GiverProbe probe(me, _questId);
+        Creature* unused = nullptr;
+        MaNGOS::CreatureLastSearcher<GiverProbe> probeSearcher(unused, probe);
+        Cell::VisitGridObjects(me, probeSearcher, 50.0f);
+        sLog.outString("[PlayerBot] quest giver search empty GUID:%u quest:%u alive2079:%u dead2079:%u withQuest:%u",
+                       me->GetGUIDLow(), _questId, probe.i_alive, probe.i_dead, probe.i_withQuest);
+    }
     return found;
 }
 
@@ -483,7 +521,37 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
     // the normal quest APIs.
     if (_questPhase == 2)
     {
-        if (me->CanCompleteQuest(_questId))
+        if (sPlayerBotMgr.IsDebugEnabled())
+        {
+            if (_questDebugTimer <= diff)
+            {
+                _questDebugTimer = 5000;
+                if (QuestStatusData const* qStatus = me->GetQuestStatusData(_questId))
+                {
+                    Quest const* qInfo = sObjectMgr.GetQuestTemplate(_questId);
+                    sLog.outString("[PlayerBot] quest state GUID:%u quest:%u status:%u c0:%u c1:%u c2:%u c3:%u cancomplete:%u incombat:%u flags:%u",
+                                   me->GetGUIDLow(), _questId, qStatus->m_status,
+                                   qStatus->m_creatureOrGOcount[0], qStatus->m_creatureOrGOcount[1],
+                                   qStatus->m_creatureOrGOcount[2], qStatus->m_creatureOrGOcount[3],
+                                   (uint32)me->CanCompleteQuest(_questId), (uint32)me->IsInCombat(),
+                                   qInfo ? qInfo->GetSpecialFlags() : 0xFFFFFFFF);
+                    if (qInfo)
+                        sLog.outString("[PlayerBot] quest req GUID:%u quest:%u r0:%u/%u r1:%u/%u r2:%u/%u r3:%u/%u",
+                                       me->GetGUIDLow(), _questId,
+                                       qInfo->ReqCreatureOrGOId[0], qInfo->ReqCreatureOrGOCount[0],
+                                       qInfo->ReqCreatureOrGOId[1], qInfo->ReqCreatureOrGOCount[1],
+                                       qInfo->ReqCreatureOrGOId[2], qInfo->ReqCreatureOrGOCount[2],
+                                       qInfo->ReqCreatureOrGOId[3], qInfo->ReqCreatureOrGOCount[3]);
+                }
+                else
+                    sLog.outString("[PlayerBot] quest state GUID:%u quest:%u status:missing cancomplete:%u incombat:%u",
+                                   me->GetGUIDLow(), _questId,
+                                   (uint32)me->CanCompleteQuest(_questId), (uint32)me->IsInCombat());
+            }
+            else
+                _questDebugTimer -= diff;
+        }
+        if (me->CanCompleteQuest(_questId) || me->GetQuestStatus(_questId) == QUEST_STATUS_COMPLETE)
         {
             _questPhase = 3;
             _questObjectiveGuid = ObjectGuid();
@@ -504,6 +572,10 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
                                        me->GetGUIDLow(), _questId,
                                        objective->GetGUIDLow(), objective->GetEntry());
                 }
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] quest attack GUID:%u quest:%u target:%u dist:%.2f",
+                                   me->GetGUIDLow(), _questId, objective->GetGUIDLow(),
+                                   me->GetDistance(objective));
                 me->Attack(objective, true);
                 me->GetMotionMaster()->MoveChase(objective);
                 return true;
@@ -518,6 +590,10 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
         giver = me->GetMap()->GetCreature(_questGiverGuid);
     if (!giver || !giver->IsAlive())
     {
+        if (sPlayerBotMgr.IsDebugEnabled() && _questGiverGuid)
+            sLog.outString("[PlayerBot] quest giver lost GUID:%u quest:%u guid:%u null:%u dead:%u",
+                           me->GetGUIDLow(), _questId, _questGiverGuid.GetCounter(),
+                           giver ? 0 : 1, (giver && !giver->IsAlive()) ? 1 : 0);
         _questGiverGuid = ObjectGuid();
         if (_questScanTimer <= diff)
         {
@@ -538,7 +614,12 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
 
     if (!me->IsWithinDistInMap(giver, 2.5f, true, SizeFactor::None))
     {
-        me->GetMotionMaster()->MoveChase(giver);
+        // Player chase is a no-op unless the player has the chased
+        // unit as victim (ChaseMovementGenerator::_lostTarget), and a
+        // bot never attacks its quest giver. Path-find to the giver
+        // position instead, the same pattern idle wander uses.
+        me->GetMotionMaster()->MovePoint(0, giver->GetPositionX(), giver->GetPositionY(),
+                                        giver->GetPositionZ(), MOVE_PATHFINDING);
         return true;
     }
 

@@ -46,6 +46,7 @@ class PlayerBotAI: public PlayerAI
         ObjectGuid _questGiverGuid;
         ObjectGuid _questObjectiveGuid;
         uint32 _questScanTimer = 0;
+        uint32 _questDebugTimer = 0;
         uint8 _questDenyCount = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();

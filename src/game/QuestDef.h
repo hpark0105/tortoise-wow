@@ -218,6 +218,7 @@ class Quest
         uint32 GetQuestFlags() const { return m_QuestFlags; }
         bool HasQuestFlag(QuestFlags flag) const { return (m_QuestFlags & flag) != 0; }
         bool HasSpecialFlag(QuestSpecialFlags flag) const { return (m_SpecialFlags & flag) != 0; }
+        uint32 GetSpecialFlags() const { return m_SpecialFlags; }
         void SetSpecialFlag(QuestSpecialFlags flag) { m_SpecialFlags |= flag; }
 
         // table data accessors:

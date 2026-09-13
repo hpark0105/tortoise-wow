@@ -381,3 +381,55 @@ cross-ref 23891 on KAP-549):
   direct-read fallback, no sync or derived-write counts. Personal server
   untouched.
 - Next dependency-ready slice: MVP-006 (docker/test_bot_quest.py).
+- MVP-006 accepted (local-Qwen park-head, 2026-09-13): declared quest 456
+  proven end-to-end in two disposable port-free labs (python
+  docker/test_bot_quest.py -v -> 7/7 in 305s; evidence
+  local/tortoise-bot-quest-f124f3312705-20260913T091317Z flow and
+  local/tortoise-bot-quest-11b08f30a9da-20260913T090951Z fail-closed,
+  gitignored). Flow lab: Questbot GUID:500104 accepted quest 456 from
+  seeded NPC 2079, killed 7x2031 + 4x1984 through normal PlayerBotAI
+  combat, the core auto-completed the quest on the final kill credit,
+  the bot turned it in through the normal APIs and was rewarded:
+  "quest rewarded GUID:500104 quest:456 xpBefore:648 xpAfter:818"
+  (+170 quest XP); the DB row persists with rewarded=1 and the XP delta
+  saved (0 -> 818); no [CRASH]. Fail-closed lab (no giver): quest init
+  phase:1 only, zero acceptance/credit/reward lines, quest=none xp=0
+  across the 90s quiet window; no [CRASH].
+- MVP-006 root causes (both fixed in src/game/PlayerBots/PlayerBotAI.cpp,
+  plus debug-gated instrumentation):
+  1. Player chase is a no-op unless the chased unit is the player's
+     victim: ChaseMovementGenerator<Player>::Update bails via
+     _lostTarget() when GetVictim() != target, and a bot never attacks
+     its quest giver. The bot therefore froze out of giver range after
+     one random wander (reproduced 3x with fresh instrumentation).
+     Quest-giver pursuit now uses a pathfinding MovePoint to the giver's
+     position, the same pattern idle wander already used successfully.
+  2. The core KilledMonsterCredit auto-completes quests (CanCompleteQuest
+     -> CompleteQuest) on the final kill credit, and CanCompleteQuest
+     then returns false for the already-complete quest, so the bot's
+     phase-2->3 transition never fired ("quest objective complete" never
+     logged; the earlier "DB status=1" was COMPLETE, not INCOMPLETE).
+     Phase 2 now also transitions on GetQuestStatus == QUEST_STATUS_
+     COMPLETE; phase 3 then rewards through the normal APIs.
+- Quest-state schema correction (tests): this fork has no
+  characters.questlog column; quest state lives in
+  tw_char.character_queststatus and the fork QuestStatus enum is
+  COMPLETE=1, UNAVAILABLE=2, INCOMPLETE=3 (the save writes m_status
+  verbatim, and a rewarded row persists with rewarded=1 rather than
+  being deleted). test_bot_quest.py / test_bot_restart.py now query that
+  table (status IN (1,3)) and wait on rewarded=1 for persistence.
+- Observability added (all behind PLAYERBOT_DEBUG): 5s "quest state"
+  (status/counts/cancomplete/incombat/loaded special flags), "quest req"
+  (loaded required objectives), per-tick "quest attack", "quest giver
+  lost", and "quest giver search empty" (counts alive/dead 2079 in
+  50yd). Head-approved one-line public GetSpecialFlags() getter in
+  QuestDef.h (observability only, no behavior change).
+- Gates: docker compose build world (tortoise-local:dev
+  sha256:ecdd1fff...); python -m py_compile both test modules OK; docker
+  compose config --quiet OK; git diff --check clean. Retrieval remains
+  operator-paused (embedding container work is post-MVP); bounded
+  direct-read fallback, no sync or derived-write counts. Personal server
+  untouched.
+- Next dependency-ready slice: MVP-007 (docker/test_bot_restart.py;
+  Restbot GUID:500105, loot + quest earn, clean stop, restart comparison).
+

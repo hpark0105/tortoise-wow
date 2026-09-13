@@ -422,8 +422,8 @@
         "Scenario: Fail closed outside the declared quest\nGiven a quest is unsupported or prerequisites fail\nWhen progression is requested\nThen the bot does not fabricate credit or rewards"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": "Small MVP work item. Full card: docs/bots/ralph/mvp/mvp-006.md",
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): declared quest 456 proven end-to-end in two disposable labs (python docker/test_bot_quest.py -v, 7/7 in 305s). Flow lab (Questbot GUID:500104): accepted from seeded NPC 2079, killed 7x2031 + 4x1984 via normal combat, core auto-completed on final credit, bot turned in and was rewarded: 'quest rewarded GUID:500104 quest:456 xpBefore:648 xpAfter:818'; DB row persisted with rewarded=1 and XP saved (0 -> 818); no [CRASH]. Fail-closed lab (no giver): init only, no credit/reward, quest=none xp=0 over 90s; no [CRASH]. Fixes in PlayerBotAI: player chase is a no-op without the chased unit as victim (ChaseMovementGenerator::_lostTarget), so quest-giver pursuit now uses a pathfinding MovePoint; phase 2->3 also transitions on GetQuestStatus==COMPLETE because the core auto-completes and CanCompleteQuest then returns false. Test schema correction: no characters.questlog in this fork; character_queststatus.status uses the fork enum (COMPLETE=1, INCOMPLETE=3) written verbatim, rewarded rows persist with rewarded=1. Debug-gated quest state/req/attack/giver-loss lines added; head-approved one-line GetSpecialFlags() getter in QuestDef.h (observability only). Evidence under gitignored local/. Full card: docs/bots/ralph/mvp/mvp-006.md",
       "dependsOn": [
         "MVP-005"
       ],
