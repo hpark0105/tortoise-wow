@@ -487,6 +487,15 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
     e->ai->SetPlayer(player);
     e->ai->OnPlayerLogin();
 
+    // A recalled bot may have been saved in a dead state (health=0, corpse
+    // pending). Restore it to full health before any party recruit can run.
+    if (player->IsDead())
+    {
+        player->ResurrectPlayer(1.0f, false);
+        sLog.outString("[PlayerBot][Login] resurrected dead bot:%s guid:%u",
+                       e->name.c_str(), e->playerGUID);
+    }
+
     // CMP-010: a recall may have queued this login. Revalidate every mutable
     // condition after the bot is actually in-world; a newer dismiss/recruit
     // changes partySeq and makes this completion stale.
