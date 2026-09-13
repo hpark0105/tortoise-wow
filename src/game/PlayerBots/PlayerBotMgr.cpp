@@ -829,7 +829,7 @@ bool PlayerBotMgr::AddRandomBot()
 {
     uint32 availableChance = 0;
     for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
-        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot)
+        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot && it->second->ownerAccountId == 0)  // PORT-002
             availableChance += it->second->chance;
     if (!availableChance)
         return false;
@@ -842,8 +842,8 @@ bool PlayerBotMgr::AddRandomBot()
         if (it->second->state != PB_STATE_OFFLINE)
             continue;
 
-        if (it->second->customBot)
-            continue;
+        if (it->second->customBot || it->second->ownerAccountId != 0)
+            continue;  // PORT-002: owned companions managed by recruit/recall only
 
         uint32 chance = it->second->chance;
 
@@ -893,15 +893,21 @@ bool PlayerBotMgr::DeleteBot(uint32 playerGUID)
 
 bool PlayerBotMgr::DeleteRandomBot()
 {
-    if (m_stats.onlineCount < 1)
+    // PORT-002: count only ambient (non-owned, non-custom, non-chat) bots
+    // that are online. Owned companions are managed exclusively by recruit/recall.
+    uint32 eligibleCount = 0;
+    for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
+        if (!it->second->customBot && !it->second->isChatBot && it->second->ownerAccountId == 0 && it->second->state == PB_STATE_ONLINE)
+            eligibleCount++;
+    if (eligibleCount < 1)
         return false;
 
-    uint32 idDelete = urand(1, m_stats.onlineCount);
+    uint32 idDelete = urand(1, eligibleCount);
     uint32 onlinePassed = 0;
     std::map<uint32, PlayerBotEntry*>::iterator iter;
     for (iter = m_bots.begin(); iter != m_bots.end(); iter++)
     {
-        if (!iter->second->customBot && !iter->second->isChatBot && iter->second->state == PB_STATE_ONLINE)
+        if (!iter->second->customBot && !iter->second->isChatBot && iter->second->ownerAccountId == 0 && iter->second->state == PB_STATE_ONLINE)
         {
             onlinePassed++;
             if (onlinePassed == idDelete)
