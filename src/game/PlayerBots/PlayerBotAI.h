@@ -7,6 +7,7 @@
 struct PlayerBotEntry;
 class WorldSession;
 class PlayerBotAI;
+class Creature;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 
@@ -32,7 +33,29 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
+        ObjectGuid _lootTargetGuid;
+        uint8 _lootRetryCount = 0;
+        bool _obsAlive = true;
+        uint32 _obsTimer = 0;
+        // MVP-006: one declared supported quest progressed through the
+        // normal quest APIs (accept, objective credit, turn-in). Phase:
+        // 0 off, 1 seek giver (accept), 2 await objective, 3 seek
+        // finisher (turn-in), 4 done.
+        uint32 _questId = 0;
+        uint8 _questPhase = 0;
+        ObjectGuid _questGiverGuid;
+        ObjectGuid _questObjectiveGuid;
+        uint32 _questScanTimer = 0;
+        uint8 _questDenyCount = 0;
         uint8 _lastLevel = 0;
+        bool TryLootDefeatedTarget();
+        void RememberLootTarget(Unit* unit);
+        Creature* GetAliveHeldTarget() const;
+        void ClearTarget();
+        void InitQuestState();
+        bool UpdateQuestPhases(uint32 diff);
+        Creature* FindQuestGiver() const;
+        Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
         uint32 SelectOffensiveSpell(Unit* target) const;
         void AutoEquipForLevel();

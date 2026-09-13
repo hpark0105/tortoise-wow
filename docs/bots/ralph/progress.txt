@@ -345,3 +345,39 @@ cross-ref 23891 on KAP-549):
   discovery because Docker lab modules inspected unavailable local images.
   Added image-missing skips to the target-policy, provision-commit, and
   telemetry labs; py_compile and diff checks pass. Commit `d38c5f3` pushed.
+- MVP-005 accepted (local-Qwen park-head, 2026-09-13): normal corpse loot
+  proved end-to-end. python docker/test_bot_loot.py -v -> 1/1 in 62.2s on a
+  disposable port-free project (evidence
+  local/tortoise-bot-loot-84ba9b30938b-20260913T072427Z, gitignored). Lootbot
+  (GUID 500102) killed seeded Kobold Vermin 2500002 via normal PlayerBotAI
+  combat and looted item 117 through the core handlers: "corpse loot stored
+  GUID:500102 item:117 before:0 after:1"; no [CRASH].
+- PlayerBotAI combat refactor (uncommitted from prior session, now proven):
+  hold target by GUID across 2s combat ticks instead of re-selecting via
+  SelectNearestTarget every tick (re-selection dropped the target mid-fight
+  after an out-of-range opening Attack); idle wander suppressed while a held
+  target or 30yd hostile exists; TryLootDefeatedTarget alive-branch no longer
+  clears the held target; PLAYERBOT_DEBUG=1 heartbeat/loot observability.
+- Root cause of the earlier 0-slot loot: fresh lab DBs ship an EMPTY legacy
+  tw_world.migrations table (base dump), so the C++ DB Auto-Updater replayed
+  all 149 sql/database_updates files at world start; 20260510092659_world.sql
+  REPLACEs creature_template and reset entry 6 loot_id 990006 -> 6 before
+  ObjectMgr loaded reference data. Secondary gotcha: a failed update makes
+  mangosd block on std::getline(std::cin) (hang, not crash), and AutoUpdater
+  hashes are UPPERCASE SHA-1 with case-sensitive key lookup.
+- Fix: docker/init-db-updates.sh applies the ordered update files at db init
+  and records uppercase SHA-1 rows in each db's migrations table (mirrors
+  AutoUpdater.cpp, incl. legacy-table Module ALTER); mounted as
+  20-apply-database-updates.sh in both the lab helper (write_compose) and the
+  personal compose.yaml. The loot test now asserts the world auto-updater is a
+  no-op. Post-init db query confirms the seed survives (loot_id=990006).
+- Gates: bash -n init-db-updates.sh OK (mariadb:10.11); python -m py_compile
+  test_bot_provision.py/test_bot_loot.py OK; docker compose config --quiet OK;
+  git diff --check clean. No C++ rebuild needed (image tortoise-local:dev
+  2026-09-13T06:20Z postdates the C++ edits). Provision-suite regression
+  (shared-helper consumer) re-run pending in same session.
+- No Jira change; prd.json MVP-005 passes=true with evidence notes. Retrieval
+  remains operator-paused (embedding container work is post-MVP); bounded
+  direct-read fallback, no sync or derived-write counts. Personal server
+  untouched.
+- Next dependency-ready slice: MVP-006 (docker/test_bot_quest.py).

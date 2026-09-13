@@ -30,6 +30,7 @@ PlayerBotMgr::PlayerBotMgr()
     confUpdateDiff = 10000;
     enable = false;
     confDebug = false;
+    confQuestId = 0;
     forceLogoutDelay = true;
 
     /* Time */
@@ -57,6 +58,11 @@ void PlayerBotMgr::LoadConfig()
     forceLogoutDelay = sConfig.GetBoolDefault("PlayerBot.ForceLogoutDelay", true);
     confProvisionName = sConfig.GetStringDefault("PlayerBot.Provision", "");
     confTestLoginGuids = sConfig.GetStringDefault("PlayerBot.TestLogin", "");
+    // MVP-006: one declared quest the companion progresses through the
+    // normal quest APIs (accept, objective credit, turn-in).
+    confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
+    if (confQuestId)
+        sLog.outString("Playerbot: declared quest %u enabled (MVP-006)", confQuestId);
     // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
     // login-completion delivery; never set outside the Docker lab.
     m_staleProbeGuid = 0;

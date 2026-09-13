@@ -392,8 +392,8 @@
         "Scenario: Respect ownership and capacity\nGiven loot is unavailable, reserved, or inventory is full\nWhen the bot tries to loot\nThen it does not duplicate or take the item illegally"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": "Small MVP work item. Full card: docs/bots/ralph/mvp/mvp-005.md",
+      "passes": true,
+      "notes": "Accepted 2026-09-13: held-target combat + normal corpse loot proved in a disposable lab (python docker/test_bot_loot.py -v, 1/1 in 62.2s). Bot Lootbot GUID:500102 killed seeded Kobold Vermin 2500002 via normal combat and looted item 117 through SendLoot/Unit::Kill paths: 'corpse loot stored GUID:500102 item:117 before:0 after:1'. Root cause of the earlier 0-slot loot: fresh lab DBs replayed all 149 sql/database_updates files at world start (base dump ships an empty legacy migrations table), clobbering the seeded creature_template.loot_id; fixed by docker/init-db-updates.sh applying+recording updates (SHA-1, uppercase) at db init. Full card: docs/bots/ralph/mvp/mvp-005.md",
       "dependsOn": [
         "MVP-004"
       ],

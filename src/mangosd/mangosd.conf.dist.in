@@ -2054,6 +2054,9 @@ PlayerBot.MinBots = 0
 PlayerBot.MaxBots = 0
 PlayerBot.Refresh = 10000
 PlayerBot.ForceLogoutDelay = 1
+# MVP-006: one declared quest the companion progresses through the normal
+# quest APIs (accept, objective, turn-in). 0 = disabled (default).
+PlayerBot.QuestId = 0
 
 MailSpam.ExpireSecs = 30
 MailSpam.MaxMails = 5

@@ -23,6 +23,7 @@ services:
       - database:/var/lib/mysql
       - ./sql:/bootstrap/sql:ro
       - ./docker/init-db.sh:/docker-entrypoint-initdb.d/10-tortoise.sh:ro
+      - ./docker/init-db-updates.sh:/docker-entrypoint-initdb.d/20-apply-database-updates.sh:ro
       - ./docker:/ops:ro
       - ./local/backups:/backups
     healthcheck:

@@ -10,6 +10,10 @@ The claim that TW-011 is ?the only remaining integration proof? is too optimisti
 
 A foundation persistence gate ends at MVP-008. A playable companion MVP additionally requires owner-safe target selection (MVP-003) and TW-014 follow/stop. One fixed Human Warrior is acceptable for this first demo. Race/class/appearance configuration is a later story before multi-role companions.
 
+## Current status (2026-09-13)
+
+MVP-001 through MVP-005 pass (see ../progress.txt and ../prd.json). MVP-006 is the active slice; MVP-007/008 and TW-014 remain.
+
 ## Execution order
 
 1. MVP-001 save-boundary rejection.

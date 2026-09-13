@@ -99,6 +99,7 @@ class PlayerBotMgr
         bool IsPermanentBot(uint32 playerGuid);
         bool IsChatBot(uint32 playerGuid);
         bool IsDebugEnabled() const { return confDebug; }
+        uint32 GetQuestId() const { return confQuestId; }
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
         // TW-007 (contract C4): only verified persistent (roster) bots may save,
@@ -127,6 +128,7 @@ class PlayerBotMgr
         bool confDebug;
         std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
+        uint32 confQuestId; // MVP-006: one declared supported quest (0 = disabled)
         bool forceLogoutDelay;
 
         // MVP-002 (KAP-552) lab-only stale-completion probe, armed from
