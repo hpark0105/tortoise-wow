@@ -674,3 +674,15 @@ cross-ref 23891 on KAP-549):
   with Turtle addons enabled; `python docker/test_bot_population.py -v`
   passed 4/4 in 238.286s for exact zero, capacity-clamped one, and exact ten
   without refresh churn or crashes. Full card: ralph/mvp/tw-012.md.
+- Personal MVP deployment (hosted Codex, 2026-09-13): created and verified
+  `local/backups/tortoise-20260913T124937Z.sql` plus its SHA-256 sidecar
+  before deployment; account online count was zero. Added explicit opt-in
+  Compose passthrough for the bot settings (commit fbcd7bc). The reviewed
+  image verified 158/158 DBC files, the character auto-updater applied
+  `20260913120000_character.sql`, and native provisioning created Companion
+  GUID 2 on reserved account 1000000000. Bound its human owner to account 4
+  (Parkenstein), then deployed the TW-012 image. Final live markers:
+  idempotent provisioning no-op, effective range 1..1, world ready, login
+  queued once, and `[PlayerBot][Login] 'Companion' GUID:2 Acc:1000000000`.
+  Database and all three personal services are healthy. Operator in-game
+  follow/stop and gameplay observation remain the final human validation.
