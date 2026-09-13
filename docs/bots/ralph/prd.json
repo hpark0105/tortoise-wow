@@ -1,4 +1,4 @@
-{
+﻿{
   "project": "Tortoise-WoW Living World",
   "branchName": "feature/kap-543-bot-living-world",
   "description": "Preserve completed persistence foundations; next qualify one useful Turtle companion by small, provenance-reviewed Playerbots behavior ports. Hosted Codex governs dispatch, review, commits and acceptance.",
@@ -938,7 +938,7 @@
         "Scenario: Approve modular behavior boundaries\nGiven the current Turtle bot engine and pinned upstream evidence\nWhen PORT-001 proposes the minimal architecture\nThen lifecycle and persistence, immutable observations, behavior policies, action selection, and Turtle action execution have explicit responsibilities and dependency directions\nAnd tank/healer/DPS and quest policies can propose typed intents without owning sessions or database writes\nAnd an optional personality/planner adapter can only propose bounded typed goals or preferences and cannot execute game actions\nAnd hosted Codex approves exact interfaces and file paths before implementation."
       ],
       "priority": 41,
-      "passes": false,
+      "passes": true,
       "notes": "Card: docs/bots/ralph/companion-port/port-001.md. Follow companion-port/README.md; hosted acceptance only.",
       "dependsOn": [],
       "allowedScope": [
