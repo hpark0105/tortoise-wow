@@ -1,4 +1,4 @@
-"""CMP-010 disposable runtime proof for owned companion party lifecycle."""
+﻿"""CMP-010 disposable runtime proof for owned companion party lifecycle."""
 import os
 import time
 import unittest
@@ -100,7 +100,10 @@ class BotPartyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         p.IMAGE = os.environ.get("CMP010_LAB_IMAGE", "tortoise-local:dev")
-        p.command(["docker", "image", "inspect", p.IMAGE])
+        try:
+            p.command(["docker", "image", "inspect", p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{p.IMAGE} image not present; build it first")
         cls.personal_before = cls._personal_state()
         world = p.world_env_for("")
         world.update(PLAYERBOT_MIN_BOTS="0", PLAYERBOT_MAX_BOTS="0",
