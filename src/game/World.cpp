@@ -201,6 +201,12 @@ void World::Shutdown()
     });
 
 	sGuildMgr.SaveGuildBanks();
+    // Bots own socketless sessions that KickAll() cannot drive into the
+    // disconnected flow; mark every bot OFFLINE so the UpdateSessions call
+    // below logs each one out through its normal save + RemoveFromWorld
+    // path before the world unloads grids (a bot left in an unloaded grid
+    // crashes the visibility cleanup on a dangling pointer).
+    sPlayerBotMgr.DeleteAll();
     sWorld.KickAll();                                       // save and kick all players
     sWorld.UpdateSessions(1);                               // real players unload required UpdateSessions call
     if (m_charDbWorkerThread && m_charDbWorkerThread->joinable())

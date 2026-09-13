@@ -62,6 +62,13 @@ DELETE FROM tw_world.creature_loot_template WHERE entry=990006;
 INSERT INTO tw_world.creature_loot_template
  (entry,item,ChanceOrQuestChance,groupid,mincountOrRef,maxcount,condition_id)
  VALUES (990006,117,100,0,1,1,0);
+-- Lab isolation: remove natural creatures around the spawn so the seeded
+-- creatures are the only ones in the box during the earn phase. A natural
+-- hostile could otherwise kill the seeded kobold itself; a non-player kill
+-- clears the corpse's player-damage credit and the core then refuses the
+-- bot's loot (MVP-005 isolates the same way for its loot proof).
+DELETE FROM tw_world.creature WHERE map = 0
+  AND position_x BETWEEN -8990 AND -8910 AND position_y BETWEEN -170 AND -110;
 INSERT INTO tw_world.creature
  (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,
   spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)
@@ -94,13 +101,14 @@ def _state(base, env):
     if not out:
         return None
     lvl, xp, money, mapid, zone, x, y, z = out.split("\t")
+    # item_instance owns the ownership link (owner_guid); character_inventory
+    # only maps instance guid -> bag/slot in this fork.
     items = []
-    for ig in p.db_exec(base, env,
-                        "SELECT item_guid FROM character_inventory "
-                        "WHERE owner_guid = %d AND item = %d ORDER BY item_guid"
-                        % (BOT_GUID, ITEM_ID)).strip().splitlines():
-        items.append(p.db_exec(base, env,
-                               "SELECT entry, count FROM item_instance WHERE guid = %s" % ig).strip())
+    for row in p.db_exec(base, env,
+                         "SELECT guid, itemEntry, count FROM item_instance "
+                         "WHERE owner_guid = %d AND itemEntry = %d ORDER BY guid"
+                         % (BOT_GUID, ITEM_ID)).strip().splitlines():
+        items.append(row)
     return {
         "level": int(lvl), "xp": int(xp), "money": int(money),
         "map": int(mapid), "zone": int(zone),
@@ -140,6 +148,12 @@ class BotRestartTests(unittest.TestCase):
             cls.logs = p.wait_for(cls.base, cls.env,
                                   lambda text: "quest rewarded GUID:%d quest:%s" % (BOT_GUID, QUEST_ID) in text,
                                   deadline=420)
+            # The quest phase machine preempts the normal combat loop, so the
+            # bot kills and loots the declared kobold only after the quest is
+            # rewarded; gate the clean stop on both earnings being in the log.
+            cls.logs = p.wait_for(cls.base, cls.env,
+                                  lambda text: "corpse loot stored GUID:%d item:%d before:0 after:1" % (BOT_GUID, ITEM_ID) in text,
+                                  deadline=240)
             # Let the rewarded state land in a periodic save before the
             # clean stop; the row persists afterwards with rewarded=1.
             end = time.monotonic() + 60
@@ -148,6 +162,10 @@ class BotRestartTests(unittest.TestCase):
             # Clean stop performs the logout save; the DB state right after
             # the stop is the pre-restart snapshot.
             p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
+            (cls.evidence / "world.log").write_text(
+                p.command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
+                          env=cls.env, timeout=60),
+                encoding="utf-8")
             cls.s1 = _state(cls.base, cls.env)
             self_assert = _quest_in_log(cls.base, cls.env)
             (cls.evidence / "questlog_after_stop.txt").write_text(
@@ -199,6 +217,10 @@ class BotRestartTests(unittest.TestCase):
     def test_state_matches_across_restart(self):
         self.assertIsNotNone(self.s1)
         self.assertIsNotNone(self.s2)
+        # The recorded pre-restart snapshot must contain the earned item; an
+        # empty items list on both sides would be a vacuous match (the clean
+        # stop must actually save the post-earn state).
+        self.assertEqual(len(self.s1["items"]), 1, "earned item not recorded in pre-restart snapshot")
         for key in ("level", "xp", "money", "map", "zone", "items", "ownership", "roster"):
             self.assertEqual(self.s2[key], self.s1[key], "%s changed across restart" % key)
         x1, y1, z1 = self.s1["pos"]
@@ -209,6 +231,10 @@ class BotRestartTests(unittest.TestCase):
     def test_world_stayed_healthy(self):
         self.assertNotIn("[CRASH]", self.logs)
         self.assertNotIn("[CRASH]", self.logs_restart)
+        # The clean stop itself must complete without a fatal signal; the
+        # full post-stop phase-1 log is captured in world.log evidence.
+        world_log = (self.evidence / "world.log").read_text(encoding="utf-8")
+        self.assertNotIn("Received SIGSEGV", world_log, "clean stop crashed the world")
 
 
 if __name__ == "__main__":

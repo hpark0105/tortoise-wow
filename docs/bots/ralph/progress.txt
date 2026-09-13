@@ -433,3 +433,69 @@ cross-ref 23891 on KAP-549):
 - Next dependency-ready slice: MVP-007 (docker/test_bot_restart.py;
   Restbot GUID:500105, loot + quest earn, clean stop, restart comparison).
 
+- MVP-007 accepted (local-Qwen park-head, 2026-09-13): exact earned state
+  preserved across a clean world restart, proven in a disposable port-free
+  lab (python docker/test_bot_restart.py -v -> 4/4 in 132.6s; evidence
+  local/tortoise-bot-restart-8af716bec00f-20260913T100008Z, gitignored).
+  Restbot GUID:500105 legitimately earned quest 456 (7x 2031 + 4x 1984
+  through normal PlayerBotAI combat; core auto-complete on the final
+  credit; turn-in rewarded: "quest rewarded GUID:500105 quest:456
+  xpBefore:648 xpAfter:818") and item 117 from the deterministic seeded
+  Kobold corpse (loot template 990006: "corpse loot stored
+  GUID:500105 item:117 before:0 after:1"). The clean stop (SIGTERM) then
+  logged the bot out through its normal logout path ("[PlayerBot]
+  [Logout] 'Restbot' GUID:500105 Acc:1000500105"), saved everything and
+  halted cleanly ("Halting process...", no SIGSEGV in the full post-stop
+  log). Post-restart + relogin DB snapshot matched the pre-restart
+  snapshot exactly: level 3, xp 836 (818 quest + 18 Kobold), money 100035,
+  map 0 / zone 12, identical position, the item 117 instance (guid 12,
+  count 1), ownership 1000500105 v2 and roster 1; the quest row persisted
+  (character_queststatus status IN (1,3), rewarded=1). No [CRASH].
+- MVP-007 root causes (both fixed):
+  1. Lab isolation gap (docker/): the earn phase left natural creatures
+     alive around the spawn (the MVP-005 loot lab deletes them in its
+     seed; the restart seed deleted them only after the clean stop). A
+     natural hostile killed the seeded Kobold itself: with zero player
+     damage, Creature::IsLootAllowedDueToDamageOrigin() is false (player
+     damage must exceed 35% of damage taken), Unit::Kill clears the loot
+     recipient, and Player::SendLoot silently refuses the corpse ("corpse
+     loot denied ... eligible:0 recipient:0 recipfound:0"). The DB
+     auto-updater was verified a no-op in the lab ("Found 146 possible
+     migrations for world" but no "Attempting to execute update"),
+     so seed clobbering was excluded. Fixed in
+     docker/test_bot_restart.py: the seed now removes natural creatures
+     in the spawn box before inserting the seeded pack (MVP-005 pattern),
+     and the clean stop is gated on both earnings (quest rewarded AND
+     corpse loot stored) because the quest phase machine preempts the
+     combat loop, so the bot kills and loots the Kobold only after the
+     quest reward.
+  2. Core shutdown crash (src/; latent on the personal server too): bot
+     sessions are created with a null socket, so
+     WorldSession::KickPlayer() (m_Socket ? CloseSocket : nothing) is a
+     no-op for them and World::Shutdown() left bots in the world;
+     Map::UnloadAll then unloader-removed the still-online bot Player and
+     crashed the visibility cleanup (SIGSEGV in Player::IsInVisibleList
+     via Camera::UpdateVisibilityForOwner) before the final save ran,
+     losing the post-reward state (Kobold XP + looted item). Fixed in
+     src/game/World.cpp: World::Shutdown() now calls
+     sPlayerBotMgr.DeleteAll() (previously never called anywhere) before
+     KickAll(); it marks every bot entry PB_STATE_OFFLINE and the
+     existing WorldSession::Update branch
+     (m_bot && state == PB_STATE_OFFLINE -> LogoutPlayer(true)) logs each
+     bot out through the normal save + RemoveFromWorld path in the
+     UpdateSessions(1) call that follows, so a clean stop with a bot
+     online saves the bot and halts cleanly.
+- Test hardening (docker/test_bot_restart.py): the pre-restart snapshot
+  must contain exactly one item 117 instance (an empty-both items list is
+  a vacuous match), the full post-stop phase-1 log is captured to evidence
+  as world.log, and the health test asserts the clean-stop log has no
+  "Received SIGSEGV". _state() also fixed to read item_instance
+  (guid, itemEntry, count WHERE owner_guid/itemEntry) - this fork's
+  character_inventory has no item_guid column.
+- Gates: docker compose build world (tortoise-local:dev
+  sha256:f3dc289f...); python -m py_compile docker/test_bot_restart.py
+  OK; docker compose config --quiet OK; git diff --check clean. Retrieval
+  remains operator-paused (embedding container work is post-MVP); bounded
+  direct-read fallback, no sync or derived-write counts. Personal server
+  untouched.
+- Next dependency-ready slice: MVP-008 (isolated restore comparison).
