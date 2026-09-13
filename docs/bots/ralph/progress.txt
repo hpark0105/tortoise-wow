@@ -732,3 +732,13 @@ cross-ref 23891 on KAP-549):
 - Retrieval remains operator-paused (embedding-container work is
   post-MVP); bounded direct-read fallback, no sync or derived-write
   counts.
+- Jira sync (park-head local-Qwen, 2026-09-13): write access confirmed
+  (identity Hung Yuk Park). Commented and transitioned To Do -> In
+  Progress on KAP-543 (epic), KAP-554, KAP-555, KAP-556 and KAP-557 with
+  dev-complete summaries and bounded evidence pointers (comment ids
+  23922-23926; transitions accepted). The board exposes READY FOR QA
+  only from In Progress, and the QA handoff (READY FOR QA -> IN QA with
+  a park-agent QA worker) is a hosted-head flow that park-head must not
+  run, so the stories stay In Progress until the operator's in-game
+  validation; a later session then runs the formal QA path to Done.
+  NEXT-001 has no Jira story (not created; tracked in prd.json only).

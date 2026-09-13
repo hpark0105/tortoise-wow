@@ -522,7 +522,7 @@
       "jiraKey": "KAP-554",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "Done locally (head-accepted 2026-09-13); Jira transition pending (read-only Jira access this session)",
+      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
       "milestone": "mvp",
       "validation": []
     },
@@ -549,7 +549,7 @@
       "jiraKey": "KAP-557",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "Done locally (head-accepted 2026-09-13); Jira transition pending (read-only Jira access this session)",
+      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
       "milestone": "mvp",
       "validation": []
     },
@@ -575,7 +575,7 @@
       "jiraKey": "KAP-555",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "Done locally; Jira transition pending",
+      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
       "milestone": "post-mvp",
       "validation": []
     },
@@ -601,7 +601,7 @@
       "jiraKey": "KAP-556",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "Done locally; Jira transition pending",
+      "jiraStatus": "In Progress on Jira (commented 2026-09-13); Done pending operator in-game validation",
       "milestone": "post-mvp",
       "validation": []
     },
