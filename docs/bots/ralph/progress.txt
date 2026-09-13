@@ -665,3 +665,12 @@ cross-ref 23891 on KAP-549):
   bounded direct-read fallback and produced no sync/derived-write counts.
   A fresh `park-agent` QA worker could not start because the still-open
   standalone `park-head` process held the single-model mutex.
+- TW-012/KAP-555 accepted (hosted Codex, 2026-09-13): fixed exact population
+  normalization and reconciliation after the live one-bot deploy exposed
+  the old 1..1 -> 0..1 rewrite. The manager now clamps to roster capacity,
+  counts loading plus online sessions, does not remove a bot already at its
+  target, chooses only from offline weighted candidates, and uses valid
+  1-based random indices for add/delete. `docker compose build world` passed
+  with Turtle addons enabled; `python docker/test_bot_population.py -v`
+  passed 4/4 in 238.286s for exact zero, capacity-clamped one, and exact ten
+  without refresh churn or crashes. Full card: ralph/mvp/tw-012.md.

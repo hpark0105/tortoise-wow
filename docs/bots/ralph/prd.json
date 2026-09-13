@@ -562,8 +562,8 @@
         "Scenario: Reject or handle the failure path\nGiven the requested target exceeds valid roster capacity or a login fails\nWhen this condition is detected\nThen actual capacity is reported without underflow, a fake online count or an unbounded retry"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": "Compile; empty/single/full roster, min=max and failure-boundary tests. Preserve a separate random-range mode only if explicitly required.",
+      "passes": true,
+      "notes": "Accepted 2026-09-13 by hosted Codex: exact zero, one/capacity-clamped, and ten-bot targets passed in disposable runtime labs (4/4 in 238.286s). Reconciliation counts online plus loading sessions, exact min=max targets do not churn, and weighted add/delete indices are bounded. Full card: docs/bots/ralph/mvp/tw-012.md.",
       "dependsOn": [
         "TW-002",
         "TW-009"
@@ -575,7 +575,7 @@
       "jiraKey": "KAP-555",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "To Do",
+      "jiraStatus": "Done locally; Jira transition pending",
       "milestone": "post-mvp",
       "validation": []
     },

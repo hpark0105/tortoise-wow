@@ -280,12 +280,14 @@ void PlayerBotMgr::Load()
     }
 
     // 5- Check config/DB
-    if (confMinBots >= m_bots.size() && !m_bots.empty())
-        confMinBots = m_bots.size() - 1;
-    if (confMaxBots > m_bots.size())
-        confMaxBots = m_bots.size();
-    if (confMaxBots <= confMinBots)
-        confMaxBots = confMinBots + 1;
+    // TW-012: clamp both ends to real roster capacity while preserving exact
+    // boundaries. The old >= / +1 normalization changed a one-bot 1..1
+    // request into 0..1 and could produce a target above capacity.
+    uint32 const capacity = (uint32)m_bots.size();
+    confMinBots = std::min(confMinBots, capacity);
+    confMaxBots = std::min(confMaxBots, capacity);
+    if (confMaxBots < confMinBots)
+        confMaxBots = confMinBots;
 
     // 6- Start initial bots
     if (enable)
@@ -556,17 +558,19 @@ Toutes les X minutes, ajoute ou enleve un bot.
 */
 bool PlayerBotMgr::AddOrRemoveBot()
 {
-    uint32 alea = urand(confMinBots, confMaxBots);
+    uint32 const target = confMinBots == confMaxBots
+        ? confMinBots : urand(confMinBots, confMaxBots);
+    uint32 const active = m_stats.onlineCount + m_stats.loadingCount;
     /*
     10 --- --- --- --- --- --- --- --- --- --- 20 bots
                 NumActuel
     [alea ici : remove    ][    ici, add    ]
     */
-    if (alea > m_stats.onlineCount)
+    if (target > active)
         return AddRandomBot();
-    else
+    if (target < active)
         return DeleteRandomBot();
-
+    return false;
 }
 
 bool PlayerBotMgr::AddBot(PlayerBotAI* ai)
@@ -705,7 +709,14 @@ bool PlayerBotMgr::AddBot(uint32 playerGUID, bool chatBot)
 
 bool PlayerBotMgr::AddRandomBot()
 {
-    uint32 alea = urand(0, totalChance);
+    uint32 availableChance = 0;
+    for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
+        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot)
+            availableChance += it->second->chance;
+    if (!availableChance)
+        return false;
+
+    uint32 alea = urand(1, availableChance);
     std::map<uint32, PlayerBotEntry*>::iterator it;
     bool done = false;
     for (it = m_bots.begin(); it != m_bots.end() && !done; it++)
@@ -718,13 +729,15 @@ bool PlayerBotMgr::AddRandomBot()
 
         uint32 chance = it->second->chance;
 
-        if (chance >= alea)
+        if (chance < alea)
+            alea -= chance;
+        else
         {
-            AddBot(it->first);
-            done = true;
+            done = AddBot(it->first);
+            // A selected bot whose login is rejected must not trigger an
+            // unbounded same-tick retry; the next paced refresh may retry.
+            break;
         }
-
-        alea -= chance;
     }
 
     return done;
@@ -765,7 +778,7 @@ bool PlayerBotMgr::DeleteRandomBot()
     if (m_stats.onlineCount < 1)
         return false;
 
-    uint32 idDelete = urand(0, m_stats.onlineCount);
+    uint32 idDelete = urand(1, m_stats.onlineCount);
     uint32 onlinePassed = 0;
     std::map<uint32, PlayerBotEntry*>::iterator iter;
     for (iter = m_bots.begin(); iter != m_bots.end(); iter++)
