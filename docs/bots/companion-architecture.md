@@ -733,3 +733,151 @@ the world server's existing load (pathfinding, VMAP, combat).
 4. LLM model: park_llama 7B? (13B option for multi-player)
 5. Companion cap: 5 per player, 20 total?
 6. World bot names: random per-race name generator?
+
+## Personality stages (parameterized)
+
+Personality stages are defined in a YAML config file, not hardcoded.
+This allows adding stages, renaming them, adjusting risk curves, or
+creating entirely different progression models without code changes.
+
+    # data/bot-knowledge/stages.yaml
+    # Defines the personality progression model.
+    # The LLM reads this to understand stage behavior.
+    # The C++ engine reads risk_modifier for deterministic fallback tuning.
+
+    stages:
+      - id: noob
+        name: "Noob"
+        order: 0
+        risk_multiplier: 1.0        # final_risk = personality.base_risk * this
+        rotation_quality: none      # none | basic | full | optimized
+        expression_frequency: 0.8   # probability of expressing per event (0-1)
+        mistake_rate: 0.6           # probability of making a personality mistake
+        target_selection: nearest   # nearest | weakest | threat_aware | optimal
+        progression:
+          min_encounters: 20
+          min_survival_rate: 0.5    # at least 50% of encounters survived
+          description: "Survived enough encounters to start learning patterns"
+
+      - id: learning
+        name: "Learning"
+        order: 1
+        risk_multiplier: 0.7
+        rotation_quality: basic     # 2-3 ability sequences
+        expression_frequency: 0.5
+        mistake_rate: 0.3
+        target_selection: weakest
+        progression:
+          min_encounters: 50
+          min_survival_rate: 0.7
+          max_deaths: 10
+          description: "Consistently surviving, starting to use proper sequences"
+
+      - id: competent
+        name: "Competent"
+        order: 2
+        risk_multiplier: 0.4
+        rotation_quality: full      # full class rotation with situational swaps
+        expression_frequency: 0.3
+        mistake_rate: 0.1
+        target_selection: threat_aware
+        progression:
+          min_encounters: 150
+          min_avg_dps_percentile: 75  # top 25% DPS for level/class
+          max_rotation_violations_per_encounter: 1
+          description: "Full rotation, situational awareness, rare mistakes"
+
+      - id: veteran
+        name: "Veteran"
+        order: 3
+        risk_multiplier: 0.2
+        rotation_quality: optimized  # minimal waste, pre-pulls, positioning
+        expression_frequency: 0.2
+        mistake_rate: 0.0
+        target_selection: optimal
+        progression:
+          # Terminal stage: no further progression
+          description: "Optimal play, mentor tone, essentially error-free"
+
+    # Custom stage models can replace this file entirely.
+    # Example: a 2-stage model (rookie / pro) for simpler bots,
+    # or a 6-stage model with "tilted" and "on_fire" states.
+
+The C++ engine reads `risk_multiplier` and `target_selection` for the
+deterministic fallback. The LLM reads the full stage definition (including
+`rotation_quality`, `expression_frequency`, `mistake_rate`, and
+`progression.description`) to shape its behavior and narration.
+
+To add a custom personality progression:
+1. Create a new YAML file (e.g., `data/bot-knowledge/stages_custom.yaml`)
+2. Set `AiPlayerbot.PersonalityStageConfig` to point to it
+3. No code changes required
+
+### LLM event triggers (parameterized)
+
+The triggers that cause LLM queries are also configurable:
+
+    # data/bot-knowledge/triggers.yaml
+    triggers:
+      - name: combat_start
+        condition: "in_combat == false AND has_hostile_target == true"
+        cooldown_ms: 5000
+        priority: 10
+      - name: combat_end
+        condition: "in_combat == true AND current_target_dead == true"
+        cooldown_ms: 5000
+        priority: 10
+      - name: low_hp
+        condition: "self_hp_pct < 0.30"
+        cooldown_ms: 30000
+        priority: 20        # higher = more urgent, jumps queue
+        hp_threshold: 0.30  # adjustable
+      - name: owner_low_hp
+        condition: "owner_hp_pct < 0.30"
+        cooldown_ms: 30000
+        priority: 20
+        hp_threshold: 0.30
+      - name: level_up
+        condition: "level_changed == true"
+        cooldown_ms: 60000
+        priority: 5
+      - name: death
+        condition: "self_dead == true"
+        cooldown_ms: 0       # always fires
+        priority: 30
+      - name: stage_check
+        condition: "encounters_since_last_check >= 20"
+        cooldown_ms: 0
+        priority: 1
+        check_interval_encounters: 20
+      - name: idle_in_combat_zone
+        condition: "idle_seconds > 60 AND zone_has_hostiles == true"
+        cooldown_ms: 60000
+        priority: 2
+        idle_threshold_s: 60
+      - name: owner_says
+        condition: "owner_chat_to_bot == true"
+        cooldown_ms: 2000
+        priority: 15
+
+The C++ engine evaluates these conditions each tick (cheap boolean checks).
+When a trigger fires and its cooldown has expired, it enqueues an LLM query
+with the trigger name as `situation.type`. The personality service uses the
+trigger name to select the appropriate prompt template.
+
+To add a new trigger (e.g., "near_quest_giver"):
+1. Add an entry to triggers.yaml
+2. Add the corresponding prompt template in personality-service/prompts.py
+3. No C++ changes needed (the condition evaluator is generic)
+
+### Rate limits and capacity (parameterized)
+
+    # In world server config or personality-service config
+    AiPlayerbot.LlmQueryRateLimitPer5s = 1        # per bot
+    AiPlayerbot.LlmQueryRateLimitPerMin = 10      # per bot
+    AiPlayerbot.LlmBatchSize = 5                  # max companions per batch call
+    AiPlayerbot.LlmBatchIntervalMs = 10000        # batch every 10s
+    AiPlayerbot.LlmTimeoutMs = 5000               # per-request timeout
+    AiPlayerbot.LlmMaxConcurrentRequests = 2      # to personality service
+    AiPlayerbot.LlmQueueDropPolicy = "expression_first"
+        # When queue is full: drop expression triggers before combat triggers
