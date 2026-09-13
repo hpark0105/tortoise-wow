@@ -600,3 +600,50 @@ cross-ref 23891 on KAP-549):
   (backup first), operator in-game validation (.botfollow/.botstop with an
   owned companion; set bot_ownership.owner_account_id to the operator
   account for the provisioned bot).
+- Handoff checkpoint (park-head local-Qwen session, 2026-09-13): operator
+  paused and is handing off to hosted Codex. Verified on disk: HEAD c361c39,
+  5 commits ahead of origin, worktree clean (?? .idea/ is the user's);
+  tortoise-local:dev sha256:62050951a3776c5ad7f19ac2ef22763259fb582276176d18e2dfa9fb6863414b
+  == committed worktree; mvp cards 001-009 + companion-scenarios.md all
+  present; prd.json passes:true for every MVP slice (TW-012/TW-013/NEXT-001
+  remain open, post-MVP). Personal server
+  (tortoise-local-{db,realmd,world}-1) up ~47h on the PRE-deploy image;
+  volume tortoise-local_database untouched.
+- Personal-server facts verified this session: account DB is tw_logon (NOT
+  tw_realmd); table account (singular) with an online column; single account
+  id 4 PARKENSTEIN, 0 online at check time, so the deploy window is safe.
+- Interrupted and discarded: the MVP-006 regression lab (python
+  docker/test_bot_quest.py -v) was started 2026-09-13 ~06:52 (project
+  tortoise-bot-quest-a3c09e47c27a) and was force-torn-down at the operator
+  pause: lab containers and its two disposable lab volumes removed, personal
+  server and volumes verified untouched afterwards. No evidence was
+  collected; the lab MUST be re-run fresh.
+- Resume order for the next head (hosted Codex):
+  1. python docker/test_bot_quest.py -v (expect pass), then python
+     docker/test_bot_restart.py -v (expect pass). Both exercise the paths
+     TW-014 touched (UpdateAI preemption, PlayerBotMgr::Load SELECT,
+     shutdown). On pass append a one-line progress note + commit.
+  2. Deploy the personal server (already user-authorized this project):
+     ./docker/backup.ps1 FIRST; re-check SELECT SUM(online) FROM
+     tw_logon.account == 0; $env:BUILD_JOBS="2"; docker compose build world
+     (expect a cache no-op vs sha256:62050951a377...); docker compose up -d;
+     verify the world log: 158 DBC hashes verified, clean start, and the
+     mangosd auto-updater applied
+     sql/database_updates/character/20260913120000_character.sql (new row in
+     tw_char.migrations; owner_account_id column present in bot_ownership).
+  3. Operator in-game validation: log in as PARKENSTEIN (account id 4); bind
+     a provisioned bot with UPDATE tw_char.bot_ownership SET
+     owner_account_id = 4 WHERE char_guid = <bot guid>; (bot relog or world
+     restart so PlayerBotMgr::Load re-reads it); then .botfollow <botname> /
+     .botstop <botname> in-game, plus the normal combat/XP, corpse-loot and
+     quest checks. Known follow-up (not an MVP gate): MVP-001 finding F1 -
+     the save-boundary guard is in-memory only.
+- Session gotchas for the next head: retrieval remains operator-paused
+  (embedding-container work is explicitly post-MVP) - declare the bounded
+  direct-read fallback and never claim a sync occurred; this fork's account
+  DB is tw_logon/account (see above); PowerShell 5.1 has no ||, no &&, and
+  no < stdin redirection for native commands (use: Get-Content x.sql |
+  docker exec -i ...); .env is NOT auto-loaded in fresh shells (parse lines
+  and Set-Item env: name value); each shell command runs in a fresh session;
+  python unittest -v buffers stdout until the process exits, so poll
+  docker ps / process liveness instead of the log.
