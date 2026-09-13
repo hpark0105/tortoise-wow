@@ -5,6 +5,23 @@ base data, then the world server's ordered migrations. Optional custom features
 belong under `modules/`; the image builds discovered modules statically.
 Gameplay rates come from the upstream config. Character transfers and player
 bots are disabled initially.
+
+The world service accepts these optional `.env` settings for the playable
+companion implementation. Defaults keep bots disabled:
+
+```dotenv
+PLAYERBOT_ENABLE=1
+PLAYERBOT_MIN_BOTS=1
+PLAYERBOT_MAX_BOTS=1
+PLAYERBOT_PROVISION=Companion
+PLAYERBOT_DEBUG=1
+PLAYERBOT_QUEST_ID=0
+PLAYER_SAVE_INTERVAL=60000
+```
+
+`PLAYERBOT_PROVISION` is a new bot character name. It must differ from an
+existing player character name. Keep `PLAYERBOT_QUEST_ID=0` for ordinary play;
+quest 456 is the single bounded automated quest used by the MVP lab.
 The build explicitly enables `-DALLOW_TURTLE_ADDONS=ON` for Turtle client addon
 support, as required for this installation.
 
