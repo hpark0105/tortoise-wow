@@ -479,8 +479,8 @@
         "Scenario: Protect the personal volume\nGiven source or target identity is not the expected disposable project\nWhen restore or cleanup is requested\nThen the operation stops before changing any volume"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": "Small MVP work item. Full card: docs/bots/ralph/mvp/mvp-008.md",
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): exact earned state proven to survive an isolated backup restore in two disposable port-free labs (python docker/test_bot_restore.py -v, 8/8 in 226.4s). Lab A (Restorebot GUID:500106) earned quest 456 (rewarded) + item 117, clean stop (no SIGSEGV), snapshot S1: level 3, xp 872, money 100035, item 117 instance, quest row status=1 rewarded=1 with persisted 7x2031+4x1984 mobcounts, ownership 1000500106 v2, roster 1; the lab db then backed up through /ops/backup.sh (the personal backup.ps1 script) with a sha256 sidecar. Lab B (separate project, fresh db) imported it through /ops/restore-check.sh (the personal test-restore.ps1 script): filename guard + sha256 + import + bootstrap check, then rows matched S1 exactly before the world ran. Restored world run: the bot re-logged and resumed from saved quest state (quest init phase:3), reached the restored quest giver, and the core fail-closed on re-reward (quest reward denied; no second quest rewarded, no double XP); state after the run still matched S1 (position within 50 yd of wander). restore-check.sh rejected a foreign filename before touching the db; the personal server containers' StartedAt was unchanged. Harness: write_compose/boot_lab gained optional extra db volumes (docker/ -> /ops ro, evidence backups -> /backups rw|ro) with module-level bind helpers. Full card: docs/bots/ralph/mvp/mvp-008.md",
       "dependsOn": [
         "MVP-007"
       ],
@@ -509,8 +509,8 @@
         "Scenario: Reject or handle the failure path\nGiven the save or backup is incomplete\nWhen this condition is detected\nThen the check fails with bounded evidence and cannot overwrite the personal volume"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": "Real game/save integration required; compare complete relevant state, not only table existence. Do not use fabricated SQL rewards as gameplay proof.",
+      "passes": true,
+      "notes": "Complete 2026-09-13: restart proof (MVP-007) and isolated restore proof (MVP-008) both head-accepted in disposable labs - earned XP, item and quest state match across restart, backup and restore, with fail-closed re-reward protection and personal-volume protection. Evidence and full cards: docs/bots/ralph/progress.txt, docs/bots/ralph/mvp/mvp-007.md, docs/bots/ralph/mvp/mvp-008.md. Original constraint honored: real game/save integration only, complete relevant state compared (not table existence), no fabricated SQL rewards as gameplay proof.",
       "dependsOn": [
         "TW-010",
         "MVP-008"
@@ -522,7 +522,7 @@
       "jiraKey": "KAP-554",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "To Do",
+      "jiraStatus": "Done locally (head-accepted 2026-09-13); Jira transition pending (read-only Jira access this session)",
       "milestone": "mvp",
       "validation": []
     },

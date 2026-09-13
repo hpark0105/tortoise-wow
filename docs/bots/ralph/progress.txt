@@ -499,3 +499,55 @@ cross-ref 23891 on KAP-549):
   direct-read fallback, no sync or derived-write counts. Personal server
   untouched.
 - Next dependency-ready slice: MVP-008 (isolated restore comparison).
+
+- MVP-008 accepted (local-Qwen park-head, 2026-09-13): exact earned state
+  proven to survive an isolated backup restore (python
+  docker/test_bot_restore.py -v -> 8/8 in 226.4s; evidence
+  local/tortoise-bot-restore-a-82f3f08f56ce-20260913T102918Z (Lab A) and
+  local/tortoise-bot-restore-b-5ac46df00818-20260913T103100Z (Lab B),
+  gitignored). Lab A (Restorebot GUID:500106) earned the MVP-007 state
+  (quest 456 "quest rewarded GUID:500106 quest:456 xpBefore:630
+  xpAfter:800" + "corpse loot stored GUID:500106 item:117 before:0
+  after:1"), clean stop (no SIGSEGV), snapshot S1 (level 3, xp 872, money
+  100035, item 117 instance guid 12, quest row status=1 rewarded=1 with
+  persisted mobcounts 7x2031 + 4x1984, ownership 1000500106 v2, roster
+  1); the lab's own db then ran /ops/backup.sh (the personal
+  backup.ps1 script) -> tortoise-20260913T103051Z.sql + sha256 in Lab A's
+  evidence dir. Lab B (separate port-free project, fresh db) imported it
+  through /ops/restore-check.sh (the personal test-restore.ps1 script):
+  filename guard + sha256 OK, import + "Database bootstrap and local
+  realm checks passed", and the row comparison matched S1 exactly before
+  the world ran. Lab B world run (declared quest enabled): the restored
+  bot re-logged and resumed from the saved quest state ("quest init
+  GUID:500106 quest:456 phase:3"), walked to the restored quest giver,
+  and the core fail-closed on re-reward ("quest reward denied GUID:500106
+  quest:456") - no second "quest rewarded", no double XP; state after the
+  run still matched S1 exactly (position within 50 yd from normal
+  wander). Guard: restore-check.sh rejected a foreign filename before
+  touching the db. Personal-volume protection: uuid-named port-free lab
+  projects (teardown verifies project labels + no port bindings),
+  backup/restore only touch lab containers and lab evidence dirs, and the
+  personal containers' StartedAt was unchanged across the run.
+- MVP-008 design note (vs the session handoff): the handoff expected the
+  restored bot to resume at quest phase 2 and be re-rewarded; source
+  verification showed a rewarded non-repeatable quest persists as
+  COMPLETE with rewarded=1 (Player::RewardQuest), so the correct
+  fail-closed expectation - and the one asserted - is phase 3 plus
+  "quest reward denied" (core CanRewardQuest already-rewarded check).
+- Harness change (docker/test_bot_provision.py): write_compose/boot_lab
+  accept optional extra db volumes; bind/bind_abs are module-level
+  helpers. The backup lab mounts docker/ read-only at /ops and its
+  evidence backups dir rw at /backups; the restore lab mounts the same
+  with /backups read-only. Backward compatible; existing lab tests
+  unchanged.
+- Gates: docker compose build world (no core change; tortoise-local:dev
+  sha256:f3dc289f... from the MVP-007 build); python -m py_compile
+  docker/test_bot_restore.py and docker/test_bot_provision.py; docker
+  compose config --quiet; git diff --check clean. Retrieval remains
+  operator-paused (embedding container work is post-MVP); bounded
+  direct-read fallback, no sync or derived-write counts. Personal server
+  untouched.
+- TW-011/KAP-554 is now complete (restart proof MVP-007 + isolated
+  restore proof MVP-008, both head-accepted). Next dependency-ready
+  slice: TW-014/KAP-557 deterministic owner-only follow/stop; this
+  completes the playable companion MVP.

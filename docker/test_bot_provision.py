@@ -88,18 +88,31 @@ def world_env_for(name):
             "PLAYERBOT_PROVISION": name}
 
 
-def write_compose(evidence, world_env):
-    bind = lambda source, target: {"type": "bind", "source": str(ROOT / source),
-                                   "target": target, "read_only": True}
+def bind(source, target):
+    """Read-only bind mount from a repository-relative source."""
+    return {"type": "bind", "source": str(ROOT / source), "target": target,
+            "read_only": True}
+
+
+def bind_abs(source, target, read_only=True):
+    """Bind mount from an absolute host path (e.g. a lab evidence dir)."""
+    return {"type": "bind", "source": str(Path(source)), "target": target,
+            "read_only": read_only}
+
+
+def write_compose(evidence, world_env, extra_db_volumes=None):
+    db_volumes = ["database:/var/lib/mysql", bind("sql", "/bootstrap/sql"),
+                  bind("docker/init-db.sh", "/docker-entrypoint-initdb.d/10-tortoise.sh"),
+                  bind("docker/init-db-updates.sh", "/docker-entrypoint-initdb.d/20-apply-database-updates.sh")]
+    if extra_db_volumes:
+        db_volumes += extra_db_volumes
     (evidence / "compose.json").write_text(json.dumps({
         "services": {
             "db": {
                 "image": "mariadb:10.11",
                 "environment": {"MARIADB_ROOT_PASSWORD": "${BOT_LAB_ROOT_PASSWORD:?}",
                                 "DB_PASSWORD": "${BOT_LAB_DB_PASSWORD:?}"},
-                "volumes": ["database:/var/lib/mysql", bind("sql", "/bootstrap/sql"),
-                            bind("docker/init-db.sh", "/docker-entrypoint-initdb.d/10-tortoise.sh"),
-                            bind("docker/init-db-updates.sh", "/docker-entrypoint-initdb.d/20-apply-database-updates.sh")],
+                "volumes": db_volumes,
                 "healthcheck": {"test": ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"],
                                 "interval": "5s", "timeout": "5s", "retries": 120,
                                 "start_period": "5m"},
@@ -127,8 +140,8 @@ def wait_for(base, env, pred, deadline=600):
     raise RuntimeError("world did not reach the expected state")
 
 
-def boot_lab(project, evidence, world_env, seed_sql=None):
-    write_compose(evidence, world_env)
+def boot_lab(project, evidence, world_env, seed_sql=None, extra_db_volumes=None):
+    write_compose(evidence, world_env, extra_db_volumes)
     env = dict(os.environ, BOT_LAB_ROOT_PASSWORD=secrets.token_hex(24),
                BOT_LAB_DB_PASSWORD=secrets.token_hex(24))
     base = ["-f", str(evidence / "compose.json"), "-p", project]

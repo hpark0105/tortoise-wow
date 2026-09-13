@@ -12,7 +12,7 @@ A foundation persistence gate ends at MVP-008. A playable companion MVP addition
 
 ## Current status (2026-09-13)
 
-MVP-001 through MVP-007 pass (see ../progress.txt and ../prd.json). MVP-008 is the active slice; TW-014 remains.
+MVP-001 through MVP-008 pass (see ../progress.txt and ../prd.json). TW-014 is the active slice and completes the playable companion MVP.
 
 ## Execution order
 
