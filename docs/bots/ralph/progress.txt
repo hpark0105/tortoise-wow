@@ -694,3 +694,41 @@ cross-ref 23891 on KAP-549):
   was 16ms and max 67ms; intermittent p99 reached the 250ms overflow bucket,
   which remains a scale-test signal. The disposable containers and volumes
   were removed. Full report: docs/bots/cohort-ten.md.
+- NEXT-001 accepted (park-head local-Qwen, 2026-09-13): configurable
+  native bot identity. The PlayerBot.Provision setting now accepts
+  `Name` (legacy Human male Warrior) or
+  `Name,race,class,gender,skin,face,hairStyle,hairColor,facialHair`
+  (eight values 0..255). The identity is persisted on
+  bot_provision_state via the idempotent additive migration
+  sql/database_updates/character/20260913190000_character.sql
+  (defaults equal the legacy identity, so existing markers stay
+  consistent); Player::Create and the homebind receive the spec, and a
+  spec conflicting with an existing marker is rejected before any
+  mutation (fail closed).
+- Resumed from hosted Codex WIP (session ran out of tokens): the parser,
+  conflict guard, marker read/write, spec-driven Player::Create,
+  migration and docker/test_bot_identity_spec.py were already in the
+  worktree. Verified the Create argument order against Player.h
+  (skin, face, hairStyle, hairColor, facialHair), confirmed the raw
+  PlayerBot.Provision config flows unsplit into ProvisionPersistentBot,
+  and normalized 34 LF lines back to CRLF in PlayerBotMgr.cpp.
+- Gates: docker compose build world passed with -DALLOW_TURTLE_ADDONS=ON
+  (tortoise-local:dev
+  sha256:95ebacf6cad068e1cc0bcd6022be3d0fcc1fd408b89611817087ea18cebfdaab);
+  python -m py_compile docker/test_bot_identity_spec.py OK; git diff --check
+  clean. `python docker/test_bot_identity_spec.py -v` -> 4/4 in 80.525s in
+  one disposable, port-free project (gitignored evidence:
+  local/tortoise-bot-spec-98615ec264d5-20260913T144739Z): a female Dwarf
+  Hunter Specbot was created with character/marker/homebind values equal
+  to the matching playercreateinfo row; a changed appearance for the same
+  name was rejected ("conflicts with its existing marker") with the row
+  unchanged; the illegal Human Shaman spec was rejected with no character
+  created; no [CRASH] in any of the three world runs; lab containers and
+  volumes removed, personal server untouched.
+- Deploy note: the personal server stays on the TW-012 image until the
+  operator's in-game MVP validation; the NEXT-001 migration is additive
+  and idempotent and will be applied by the auto-updater on the next
+  deploy.
+- Retrieval remains operator-paused (embedding-container work is
+  post-MVP); bounded direct-read fallback, no sync or derived-write
+  counts.

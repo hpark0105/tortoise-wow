@@ -18,6 +18,52 @@
 #include <cctype>
 #include <cstdlib>
 
+namespace
+{
+struct BotIdentitySpec
+{
+    std::string name;
+    uint8 race = RACE_HUMAN;
+    uint8 playerClass = CLASS_WARRIOR;
+    uint8 gender = GENDER_MALE;
+    uint8 skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0;
+};
+
+bool ParseBotIdentitySpec(std::string const& value, BotIdentitySpec& spec)
+{
+    std::vector<std::string> fields;
+    size_t pos = 0;
+    while (pos <= value.size())
+    {
+        size_t comma = value.find(',', pos);
+        if (comma == std::string::npos)
+            comma = value.size();
+        fields.push_back(value.substr(pos, comma - pos));
+        pos = comma + 1;
+    }
+    if (fields.size() != 1 && fields.size() != 9)
+        return false;
+    spec.name = fields[0];
+    if (fields.size() == 1)
+        return true;
+    uint8* outputs[] = {&spec.race, &spec.playerClass, &spec.gender, &spec.skin,
+                        &spec.face, &spec.hairStyle, &spec.hairColor, &spec.facialHair};
+    for (size_t i = 1; i < fields.size(); ++i)
+    {
+        if (fields[i].empty())
+            return false;
+        for (size_t k = 0; k < fields[i].size(); ++k)
+            if (fields[i][k] < '0' || fields[i][k] > '9')
+                return false;
+        unsigned long parsed = strtoul(fields[i].c_str(), nullptr, 10);
+        if (parsed > 255)
+            return false;
+        *outputs[i - 1] = (uint8)parsed;
+    }
+    return true;
+}
+}
+
 PlayerBotMgr sPlayerBotMgr;
 
 PlayerBotMgr::PlayerBotMgr()
@@ -898,20 +944,33 @@ uint32 PlayerBotMgr::AllocateReservedBotAccount()
 
 void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
 {
+    BotIdentitySpec spec;
+    if (!ParseBotIdentitySpec(name, spec))
+    {
+        sLog.outError("Playerbot provisioning: invalid identity spec; expected Name or Name,race,class,gender,skin,face,hairStyle,hairColor,facialHair");
+        return;
+    }
+    std::string const& characterName = spec.name;
+    if (!sObjectMgr.GetPlayerInfo(spec.race, spec.playerClass) ||
+        (spec.gender != GENDER_MALE && spec.gender != GENDER_FEMALE))
+    {
+        sLog.outError("Playerbot provisioning: identity spec for '%s' has an invalid race/class/gender combination", characterName.c_str());
+        return;
+    }
     // Identity sanity: WoW 1.x character names are letters-only (2..12). Digits
     // would later be rejected by CheckPlayerName at login (the fixture bug fixed
     // for TW-006/TW-007), so provisioning enforces the same rule up front.
-    if (name.size() < 2 || name.size() > 12)
+    if (characterName.size() < 2 || characterName.size() > 12)
     {
-        sLog.outError("Playerbot provisioning: name '%s' has invalid length; not provisioned", name.c_str());
+        sLog.outError("Playerbot provisioning: name '%s' has invalid length; not provisioned", characterName.c_str());
         return;
     }
-    for (size_t i = 0; i < name.size(); ++i)
+    for (size_t i = 0; i < characterName.size(); ++i)
     {
-        char c = name[i];
+        char c = characterName[i];
         if ((c < 'a' || c > 'z') && (c < 'A' || c > 'Z'))
         {
-            sLog.outError("Playerbot provisioning: name '%s' is not letters-only; not provisioned", name.c_str());
+            sLog.outError("Playerbot provisioning: name '%s' is not letters-only; not provisioned", characterName.c_str());
             return;
         }
     }
@@ -919,7 +978,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     // --- Resolve the character (idempotency / resumability key) ---
     uint32 guid = 0;
     uint32 account = 0;
-    QueryResult *qr = CharacterDatabase.PQuery("SELECT guid, account FROM characters WHERE name = '%s' LIMIT 1", name.c_str());
+    QueryResult *qr = CharacterDatabase.PQuery("SELECT guid, account FROM characters WHERE name = '%s' LIMIT 1", characterName.c_str());
     if (qr)
     {
         Field *f = qr->Fetch();
@@ -935,9 +994,10 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     uint32 provisionGuid = 0;
     uint32 provisionAccount = 0;
     uint32 provisionPhase = 0;
+    BotIdentitySpec markerSpec;
     QueryResult *pq = CharacterDatabase.PQuery(
-        "SELECT char_guid, account_id, phase FROM bot_provision_state WHERE character_name = '%s'",
-        name.c_str());
+        "SELECT char_guid, account_id, phase, race_id, class_id, gender_id, skin_id, face_id, hair_style_id, hair_color_id, facial_hair_id FROM bot_provision_state WHERE character_name = '%s'",
+        characterName.c_str());
     if (pq)
     {
         Field *f = pq->Fetch();
@@ -945,19 +1005,38 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         provisionGuid = f[0].GetUInt32();
         provisionAccount = f[1].GetUInt32();
         provisionPhase = f[2].GetUInt32();
+        markerSpec.name = characterName;
+        markerSpec.race = f[3].GetUInt8();
+        markerSpec.playerClass = f[4].GetUInt8();
+        markerSpec.gender = f[5].GetUInt8();
+        markerSpec.skin = f[6].GetUInt8();
+        markerSpec.face = f[7].GetUInt8();
+        markerSpec.hairStyle = f[8].GetUInt8();
+        markerSpec.hairColor = f[9].GetUInt8();
+        markerSpec.facialHair = f[10].GetUInt8();
         delete pq;
+    }
+
+    if (hasProvisionState && (markerSpec.race != spec.race ||
+        markerSpec.playerClass != spec.playerClass || markerSpec.gender != spec.gender ||
+        markerSpec.skin != spec.skin || markerSpec.face != spec.face ||
+        markerSpec.hairStyle != spec.hairStyle || markerSpec.hairColor != spec.hairColor ||
+        markerSpec.facialHair != spec.facialHair))
+    {
+        sLog.outError("Playerbot provisioning: identity spec for '%s' conflicts with its existing marker; rejected, nothing modified", characterName.c_str());
+        return;
     }
 
     if (hasProvisionState && guid && (provisionGuid != guid || provisionAccount != account))
     {
-        sLog.outError("Playerbot provisioning: marker for '%s' disagrees with character identity; rejected, nothing modified", name.c_str());
+        sLog.outError("Playerbot provisioning: marker for '%s' disagrees with character identity; rejected, nothing modified", characterName.c_str());
         return;
     }
 
     // C3: never adopt a character owned by a real (non-bot) account.
     if (guid != 0 && account < 1000000000u)
     {
-        sLog.outError("Playerbot provisioning: name '%s' maps to character guid %u owned by a non-bot account %u; not adopted (C3)", name.c_str(), guid, account);
+        sLog.outError("Playerbot provisioning: name '%s' maps to character guid %u owned by a non-bot account %u; not adopted (C3)", characterName.c_str(), guid, account);
         return;
     }
 
@@ -992,23 +1071,23 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     {
         if (boundAccount != account || account < 1000000000u || provisionVersion != 2)
         {
-            sLog.outError("Playerbot provisioning: '%s' (guid %u) has an inconsistent binding (bound=%u owner=%u version=%u); rejected, nothing modified (fail closed)", name.c_str(), guid, boundAccount, account, provisionVersion);
+            sLog.outError("Playerbot provisioning: '%s' (guid %u) has an inconsistent binding (bound=%u owner=%u version=%u); rejected, nothing modified (fail closed)", characterName.c_str(), guid, boundAccount, account, provisionVersion);
             return;
         }
         if (hasRoster)
         {
-            sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) already provisioned; idempotent no-op", name.c_str(), guid, account);
+            sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) already provisioned; idempotent no-op", characterName.c_str(), guid, account);
             return;
         }
         // Consistent binding but a missing roster row: complete the roster only.
         if (!CharacterDatabase.PExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid))
         {
-            sLog.outError("Playerbot provisioning: roster completion failed for '%s' (guid %u); not provisioned", name.c_str(), guid);
+            sLog.outError("Playerbot provisioning: roster completion failed for '%s' (guid %u); not provisioned", characterName.c_str(), guid);
             return;
         }
         if (!sObjectMgr.GetPlayerDataByGUID(guid))
             sObjectMgr.LoadPlayerCacheData(guid);
-        sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (roster row added to existing binding)", name.c_str(), guid, account);
+        sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (roster row added to existing binding)", characterName.c_str(), guid, account);
         return;
     }
 
@@ -1023,7 +1102,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     {
         if (hasBinding || hasRoster || account < 1000000000u)
         {
-            sLog.outError("Playerbot provisioning: incomplete marker for '%s' has published ownership state; rejected, nothing modified", name.c_str());
+            sLog.outError("Playerbot provisioning: incomplete marker for '%s' has published ownership state; rejected, nothing modified", characterName.c_str());
             return;
         }
         Player::DeleteFromDB(ObjectGuid(HIGHGUID_PLAYER, guid), account, false, true);
@@ -1032,10 +1111,10 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         delete remaining;
         if (stillExists)
         {
-            sLog.outError("Playerbot provisioning: cleanup of incomplete native character '%s' (guid %u) failed; retry stopped", name.c_str(), guid);
+            sLog.outError("Playerbot provisioning: cleanup of incomplete native character '%s' (guid %u) failed; retry stopped", characterName.c_str(), guid);
             return;
         }
-        sLog.outString("Playerbot provisioning: cleaned incomplete native character '%s' (guid %u); retrying reserved identity", name.c_str(), guid);
+        sLog.outString("Playerbot provisioning: cleaned incomplete native character '%s' (guid %u); retrying reserved identity", characterName.c_str(), guid);
         cleanedIncompleteCharacter = true;
         guid = 0;
         account = 0;
@@ -1046,7 +1125,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     // never upgraded implicitly.
     if (guid != 0 && (!hasProvisionState || provisionPhase != 2))
     {
-        sLog.outError("Playerbot provisioning: unbound character '%s' (guid %u) has no completed native provision marker; rejected, nothing modified", name.c_str(), guid);
+        sLog.outError("Playerbot provisioning: unbound character '%s' (guid %u) has no completed native provision marker; rejected, nothing modified", characterName.c_str(), guid);
         return;
     }
 
@@ -1059,7 +1138,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
             account = provisionAccount;
             if (provisionPhase != 1)
             {
-                sLog.outError("Playerbot provisioning: ready marker for '%s' has no character; rejected, nothing modified", name.c_str());
+                sLog.outError("Playerbot provisioning: ready marker for '%s' has no character; rejected, nothing modified", characterName.c_str());
                 return;
             }
             // If no character ever reached MyISAM, the core generator did not
@@ -1075,7 +1154,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
                         "UPDATE bot_provision_state SET char_guid = %u WHERE char_guid = %u AND account_id = %u AND phase = 1",
                         coreGuid, guid, account)))
                 {
-                    sLog.outError("Playerbot provisioning: could not reserve a core guid for retrying '%s'; not provisioned", name.c_str());
+                    sLog.outError("Playerbot provisioning: could not reserve a core guid for retrying '%s'; not provisioned", characterName.c_str());
                     return;
                 }
                 guid = coreGuid;
@@ -1086,10 +1165,12 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
             account = AllocateReservedBotAccount();
             guid = sObjectMgr.GeneratePlayerLowGuid();
             if (!guid || !CharacterDatabase.DirectPExecute(
-                    "INSERT INTO bot_provision_state (char_guid, account_id, character_name, phase) VALUES (%u, %u, '%s', 1)",
-                    guid, account, name.c_str()))
+                    "INSERT INTO bot_provision_state (char_guid, account_id, character_name, phase, race_id, class_id, gender_id, skin_id, face_id, hair_style_id, hair_color_id, facial_hair_id) VALUES (%u, %u, '%s', 1, %u, %u, %u, %u, %u, %u, %u, %u)",
+                    guid, account, characterName.c_str(), spec.race, spec.playerClass,
+                    spec.gender, spec.skin, spec.face, spec.hairStyle, spec.hairColor,
+                    spec.facialHair))
             {
-                sLog.outError("Playerbot provisioning: could not reserve native identity for '%s'; not provisioned", name.c_str());
+                sLog.outError("Playerbot provisioning: could not reserve native identity for '%s'; not provisioned", characterName.c_str());
                 return;
             }
         }
@@ -1099,9 +1180,9 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         WorldSession provisionSession(account, nullptr, SEC_PLAYER, 0, LOCALE_enUS, "<BOT-PROVISION>", 0);
         provisionSession.SetBot(&provisionEntry);
         Player nativePlayer(&provisionSession);
-        if (!nativePlayer.Create(guid, name, RACE_HUMAN, CLASS_WARRIOR, GENDER_MALE, 0, 0, 0, 0, 0))
+        if (!nativePlayer.Create(guid, characterName, spec.race, spec.playerClass, spec.gender, spec.skin, spec.face, spec.hairStyle, spec.hairColor, spec.facialHair))
         {
-            sLog.outError("Playerbot provisioning: native Player::Create failed for '%s'; marker retained for retry", name.c_str());
+            sLog.outError("Playerbot provisioning: native Player::Create failed for '%s'; marker retained for retry", characterName.c_str());
             return;
         }
         nativePlayer.SetCinematic(1);
@@ -1110,27 +1191,27 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         nativeMaster.Create(&nativePlayer);
         if (!nativePlayer.SaveToDB(false, true, true))
         {
-            sLog.outError("Playerbot provisioning: native save failed for '%s'; incomplete marker retained, no roster published", name.c_str());
+            sLog.outError("Playerbot provisioning: native save failed for '%s'; incomplete marker retained, no roster published", characterName.c_str());
             return;
         }
         if (!CharacterDatabase.BeginTransaction())
         {
-            sLog.outError("Playerbot provisioning: cannot begin native action save for '%s'; incomplete marker retained", name.c_str());
+            sLog.outError("Playerbot provisioning: cannot begin native action save for '%s'; incomplete marker retained", characterName.c_str());
             return;
         }
         nativeMaster.SaveActions();
         if (!CharacterDatabase.CommitTransactionDirect())
         {
-            sLog.outError("Playerbot provisioning: native action save failed for '%s'; incomplete marker retained", name.c_str());
+            sLog.outError("Playerbot provisioning: native action save failed for '%s'; incomplete marker retained", characterName.c_str());
             return;
         }
-        PlayerInfo const* info = sObjectMgr.GetPlayerInfo(RACE_HUMAN, CLASS_WARRIOR);
+        PlayerInfo const* info = sObjectMgr.GetPlayerInfo(spec.race, spec.playerClass);
         if (!info || !CharacterDatabase.DirectPExecute(
                 "INSERT INTO character_homebind (guid,map,zone,position_x,position_y,position_z) VALUES (%u,%u,%u,%f,%f,%f)",
                 guid, info->mapId, info->areaId, info->positionX, info->positionY, info->positionZ) ||
             !CharacterDatabase.DirectPExecute("UPDATE bot_provision_state SET phase = 2 WHERE char_guid = %u AND account_id = %u", guid, account))
         {
-            sLog.outError("Playerbot provisioning: native home/action state incomplete for '%s'; marker retained, no roster published", name.c_str());
+            sLog.outError("Playerbot provisioning: native home/action state incomplete for '%s'; marker retained, no roster published", characterName.c_str());
             return;
         }
 
@@ -1139,12 +1220,12 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         if (!CharacterDatabase.DirectPExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account) ||
             !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid))
         {
-            sLog.outError("Playerbot provisioning: native character '%s' saved but roster publication failed; retry will resume", name.c_str());
+            sLog.outError("Playerbot provisioning: native character '%s' saved but roster publication failed; retry will resume", characterName.c_str());
             return;
         }
         sObjectMgr.InsertPlayerInCache(&nativePlayer);
         sObjectMgr.UpdatePlayerCachedPosition(&nativePlayer);
-        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u); bound (provision_version=2)", name.c_str(), guid, account);
+        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u); bound (provision_version=2)", characterName.c_str(), guid, account);
         return;
     }
 
@@ -1152,12 +1233,12 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     if (!CharacterDatabase.DirectPExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account) ||
         (!hasRoster && !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid)))
     {
-        sLog.outError("Playerbot provisioning: native-ready orphan completion failed for '%s' (guid %u); retryable", name.c_str(), guid);
+        sLog.outError("Playerbot provisioning: native-ready orphan completion failed for '%s' (guid %u); retryable", characterName.c_str(), guid);
         return;
     }
     if (!sObjectMgr.GetPlayerDataByGUID(guid))
         sObjectMgr.LoadPlayerCacheData(guid);
-    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (native-ready character); bound (provision_version=2)", name.c_str(), guid, account);
+    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (native-ready character); bound (provision_version=2)", characterName.c_str(), guid, account);
 }
 
 // ---------------------------------------------------------------------------

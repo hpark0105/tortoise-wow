@@ -614,8 +614,8 @@
         "Scenario: Reject an illegal or changed identity\nGiven an illegal combination or a specification that conflicts with an existing marker\nWhen provisioning runs\nThen it fails closed without replacing or mutating the existing character"
       ],
       "priority": 40,
-      "passes": false,
-      "notes": "Post-MVP. Keep the first playable demo as one Human Warrior. Full card: docs/bots/ralph/mvp/next-001.md",
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): the provision config now accepts Name or Name,race,class,gender,skin,face,hairStyle,hairColor,facialHair; the identity is persisted on bot_provision_state (additive idempotent migration 20260913190000_character.sql) and Player::Create plus homebind receive the spec. A 4/4 disposable lab (80.525s) proved a configured female Dwarf Hunter, fail-closed rejection of a changed spec, and rejection of an illegal race/class combination with no character created. Jira story not created. Full card: docs/bots/ralph/mvp/next-001.md",
       "dependsOn": [
         "TW-011"
       ],

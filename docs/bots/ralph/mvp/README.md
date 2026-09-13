@@ -26,7 +26,7 @@ MVP-001 through MVP-009 pass (see ../progress.txt and ../prd.json), including TW
 8. MVP-008 isolated restore comparison; this completes TW-011/KAP-554.
 9. TW-014/KAP-557 deterministic owner-only follow/stop; this completes the playable companion MVP.
 
-TW-012 now passes. TW-013 and class/race configuration follow the MVP. The 50/100/250/500 population stages and LLM party planning remain later epic milestones.
+TW-012, TW-013 and NEXT-001 (configured native bot identity) now pass. The 50/100/250/500 population stages and LLM party planning remain later epic milestones.
 
 ## Worker rule
 
