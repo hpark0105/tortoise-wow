@@ -647,3 +647,21 @@ cross-ref 23891 on KAP-549):
   and Set-Item env: name value); each shell command runs in a fresh session;
   python unittest -v buffers stdout until the process exits, so poll
   docker ps / process liveness instead of the log.
+- Hosted Codex handoff review (2026-09-13): reviewed the six local-head
+  commits `5474d1f..3c81291` against the MVP cards and current source.
+  Fresh disposable regressions passed: `python docker/test_bot_quest.py -v`
+  7/7 in 319.398s (evidence `local/tortoise-bot-quest-e7ffc7ce87f1-`
+  `20260913T123801Z` and `local/tortoise-bot-quest-68e2b513f23b-`
+  `20260913T124133Z`), and `python docker/test_bot_restart.py -v` 4/4 in
+  113.465s (evidence `local/tortoise-bot-restart-952d05422ed1-`
+  `20260913T124326Z`). `docker compose build world` was a cache-clean pass
+  and retained `-DALLOW_TURTLE_ADDONS=ON`; Python compilation, Compose
+  validation, and `git diff --check` passed. No disposable containers or
+  volumes remained, and the personal server was untouched during review.
+  Clarification: TW-014 proves owner-authorized follow/stop; WoW party
+  membership, role tactics, and LLM planning remain post-MVP work.
+  Retrieval registration/current commit were verified, but embeddings were
+  unhealthy with no indexed branch/commit, so review used the required
+  bounded direct-read fallback and produced no sync/derived-write counts.
+  A fresh `park-agent` QA worker could not start because the still-open
+  standalone `park-head` process held the single-model mutex.
