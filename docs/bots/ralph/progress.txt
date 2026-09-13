@@ -742,3 +742,17 @@ cross-ref 23891 on KAP-549):
   run, so the stories stay In Progress until the operator's in-game
   validation; a later session then runs the formal QA path to Done.
   NEXT-001 has no Jira story (not created; tracked in prd.json only).
+- Hosted Codex upstream review (2026-09-13): reviewed the current AzerothCore
+  organization, official getting-started guide, maintained external
+  mod-playerbots project, AzerothGhost, AutoBalance, AHBot, SoloCraft, Keira3
+  and Solo LFG. Decision: keep the Turtle 1.18.1 core; use bounded behavior,
+  orchestration and diagnostics patterns only. Added
+  docs/bots/azerothcore-reference-review.md and Ralph post-MVP cards CMP-010
+  through CMP-014, POP-020/021 and LLM-010. REF-001 records the completed
+  source-selection spike. A fresh hosted rerun of
+  `python docker/test_bot_identity_spec.py -v` also passed NEXT-001 4/4 in
+  90.515s. Fresh park-agent delegation remained unavailable because the
+  standalone park-head process still held the single-model mutex; no worker
+  review is claimed for this entry. Post-change retrieval sync returned an
+  MCP error after the service wait; no embedding or derived-write counts are
+  claimed.

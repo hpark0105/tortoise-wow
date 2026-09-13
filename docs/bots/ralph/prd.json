@@ -635,9 +635,280 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "post-mvp"
+    },
+    {
+      "id": "REF-001",
+      "title": "Record applicable AzerothCore and playerbots design references",
+      "description": "Rank upstream projects by useful behavior, validation patterns, compatibility and licensing risk without changing the Turtle core.",
+      "acceptanceCriteria": [
+        "Scenario: Select bounded upstream references\nGiven the Turtle 1.18.1 living-world requirements\nWhen current AzerothCore and maintained playerbots projects are reviewed\nThen useful controller, population, load-test and operations patterns are mapped to local work with direct source URLs",
+        "Scenario: Reject incompatible reuse\nGiven a project requires AzerothCore 3.3.5a APIs, schemas or protocol\nWhen applicability is assessed\nThen it is recorded as design-only or rejected rather than added as a runtime dependency"
+      ],
+      "priority": 41,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 by hosted Codex. Ranked review and resulting boundaries: docs/bots/azerothcore-reference-review.md. The official azerothcore/mod-playerbots is not ready; maintained mod-playerbots requires its custom WotLK core. AzerothGhost informs scaled scenario orchestration only. No upstream code imported.",
+      "dependsOn": [
+        "NEXT-001"
+      ],
+      "allowedScope": [
+        "docs/bots/azerothcore-reference-review.md",
+        "docs/bots/ralph/"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "post-mvp",
+      "validation": [
+        "source URLs opened 2026-09-13",
+        "git diff --check"
+      ]
+    },
+    {
+      "id": "CMP-010",
+      "title": "Use real party membership for an owned companion roster",
+      "description": "Recruit, dismiss and recall an owned companion through normal Group state while keeping durable owner authority.",
+      "acceptanceCriteria": [
+        "Scenario: Recruit an owned companion into the player's party\nGiven an online human owner and an online owned companion\nWhen the owner recruits the companion\nThen the normal Group system contains both players, the human remains leader, and the binding survives companion logout and recall",
+        "Scenario: Reject an unsafe roster change\nGiven combat, a full party, a foreign owner, or a stale roster sequence\nWhen recruit, dismiss, or recall is requested\nThen the request is rejected without changing the group or ownership rows"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-010.md",
+      "dependsOn": [
+        "TW-014",
+        "NEXT-001",
+        "REF-001"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Commands/",
+        "sql/database_updates/character/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-010.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "focused disposable group lifecycle lab"
+      ]
+    },
+    {
+      "id": "CMP-011",
+      "title": "Add deterministic assist, defend and attack commands",
+      "description": "Create a typed observation-trigger-action seam for owner-authorized party combat commands.",
+      "acceptanceCriteria": [
+        "Scenario: Execute an owner-selected party action\nGiven an owned companion in the owner party\nWhen the owner issues assist, defend, or attack-marked-target\nThen the controller selects only a legal hostile target and normal game systems execute it",
+        "Scenario: Reject an invalid action\nGiven a stale goal, foreign command, friendly target, missing target or unreachable target\nWhen the command reaches the world thread\nThen it is rejected and cannot resume after stop"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-011.md",
+      "dependsOn": [
+        "CMP-010",
+        "MVP-003"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Commands/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-011.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "focused disposable command authorization and target-safety lab"
+      ]
+    },
+    {
+      "id": "CMP-012",
+      "title": "Implement one legal tank threat policy",
+      "description": "Make one declared tank class establish and recover threat during a small normal pull.",
+      "acceptanceCriteria": [
+        "Scenario: Tank a declared small pull\nGiven a supported tank class with learned legal abilities and normal gear\nWhen the party starts a declared two-creature pull\nThen the tank establishes threat before damage companions engage and reacts when a non-tank holds threat",
+        "Scenario: Avoid an unsafe pull\nGiven no healer resources, an uncontrolled extra target or an unreachable enemy\nWhen the tank evaluates the pull\nThen it waits, recovers or stops with a bounded reason"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-012.md",
+      "dependsOn": [
+        "CMP-011"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-012.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "declared tank-class two-creature pull lab"
+      ]
+    },
+    {
+      "id": "CMP-013",
+      "title": "Implement one legal healer triage policy",
+      "description": "Make one declared healer class prioritize party survival, range and mana through normal spells.",
+      "acceptanceCriteria": [
+        "Scenario: Heal a declared small pull\nGiven a supported healer class in the owner party\nWhen party health falls during combat\nThen the healer prioritizes survival using learned legal spells while respecting range, line of sight and mana",
+        "Scenario: Recover before the next pull\nGiven low mana, no legal heal or an unreachable party member\nWhen the healer evaluates readiness\nThen the party waits or reports the blocker instead of starting another pull"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-013.md",
+      "dependsOn": [
+        "CMP-011"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-013.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "declared healer-class resource and triage lab"
+      ]
+    },
+    {
+      "id": "CMP-014",
+      "title": "Implement damage assist and pull discipline",
+      "description": "Make one declared damage class assist the tank without extra pulls or breaking controlled targets.",
+      "acceptanceCriteria": [
+        "Scenario: Assist the party tank\nGiven a supported damage class and established tank target\nWhen the damage companion enters combat\nThen it attacks that target with learned legal abilities and does not pull an unselected nearby enemy",
+        "Scenario: Preserve control and stop authority\nGiven a controlled target or owner stop command\nWhen an offensive action is considered\nThen the companion does not damage the controlled target and no invalidated action resumes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-014.md",
+      "dependsOn": [
+        "CMP-011",
+        "CMP-012"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-014.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "declared damage-class pull-discipline lab"
+      ]
+    },
+    {
+      "id": "POP-020",
+      "title": "Maintain independent regional activity and report it",
+      "description": "Assign ambient bots across regions, pace activity and expose real active/reduced/parked counts without following the human.",
+      "acceptanceCriteria": [
+        "Scenario: Maintain activity away from the human\nGiven persistent bots assigned across at least six zones\nWhen the human remains in one zone for sixty minutes\nThen configured remote-zone floors remain active and meaningful actions succeed in three human-free zones",
+        "Scenario: Degrade under load without hiding it\nGiven world processing exceeds a configured threshold\nWhen optional work is reduced\nThen new logins pause first, required activity remains, and status reports requested, active, reduced-detail and parked counts"
+      ],
+      "priority": 50,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/pop-020.md",
+      "dependsOn": [
+        "TW-013"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/pop-020.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P3",
+      "validation": [
+        "sixty-minute multi-zone disposable activity lab"
+      ]
+    },
+    {
+      "id": "POP-021",
+      "title": "Qualify fifty active bots for thirty minutes",
+      "description": "Run the first staged scale gate with paced activation, regional work and structured resource evidence.",
+      "acceptanceCriteria": [
+        "Scenario: Sustain the first scaled cohort\nGiven 50 valid persistent bots and a zero-bot baseline\nWhen bots activate at a bounded rate and run for thirty minutes\nThen 50 achieved sessions, regional actions, saves, world processing, memory, database writes and failures are reported",
+        "Scenario: Report lower achieved capacity\nGiven login failures or a resource threshold breach\nWhen the stage cannot sustain 50\nThen activation backs off and the run fails with the achieved count and limiting measurement"
+      ],
+      "priority": 51,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/pop-021.md",
+      "dependsOn": [
+        "POP-020"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/ralph/post-mvp/pop-021.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P3",
+      "validation": [
+        "thirty-minute 50-active disposable cohort"
+      ]
+    },
+    {
+      "id": "LLM-010",
+      "title": "Add a bounded local shared party-planner transport",
+      "description": "Send one coalesced versioned party observation to park-llama and offer only current schema-valid steps to deterministic controllers.",
+      "acceptanceCriteria": [
+        "Scenario: Accept one current bounded party plan\nGiven a versioned immutable observation and available park-llama service\nWhen one shared request returns before its deadline\nThen schema-valid allowlisted steps with matching versions are offered to the deterministic controller",
+        "Scenario: Continue without the model\nGiven the model is busy, offline, slow, malformed or stale\nWhen validation fails\nThen no returned action executes and deterministic follow, combat and recovery continue"
+      ],
+      "priority": 60,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/llm-010.md; related park-llama concurrency card: docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md",
+      "dependsOn": [
+        "CMP-012",
+        "CMP-013",
+        "CMP-014"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/llm-010.md",
+        "C:/Users/hpark/WebstormProjects/park-llama"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P4",
+      "validation": [
+        "schema and stale-response tests",
+        "thirty-minute model-offline companion run"
+      ]
     }
   ],
-  "lastReviewed": "2026-09-12",
+  "lastReviewed": "2026-09-13",
   "mvpDefinition": {
     "foundationGate": "One owned bot earns XP, loot, and supported quest progress through normal game paths; the exact state survives restart and isolated restore.",
     "playableCompanion": "The foundation gate plus owner-safe targeting and deterministic owner-only follow/stop with no LLM dependency.",

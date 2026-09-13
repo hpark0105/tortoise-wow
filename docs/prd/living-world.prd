@@ -271,6 +271,14 @@ P3 and P4 can be developed independently after the action boundary is stable. On
 
 Source checks: `src/game/PlayerBots/PlayerBotMgr.cpp`, `PlayerBotAI.cpp`, `PlayerBotAI.h`, `docker/server.py`, `modules/README.md`, and existing `docker/bots.md`. This PRD supersedes the older feasibility note's proposed scale while retaining its warnings about unproven behavior.
 
+The 2026-09-13 upstream review in `docs/bots/azerothcore-reference-review.md`
+compares AzerothCore's current repositories and official getting-started guide.
+Its useful inputs are the maintained playerbots strategy/role model,
+AzerothGhost's paced scenario orchestration, AutoBalance diagnostics, and
+database-driven event/action behavior. These remain design and test references:
+AzerothCore targets 3.3.5a, the maintained playerbots module requires a custom
+WotLK core fork, and neither is a drop-in dependency for Turtle 1.18.1.
+
 Retrieval registration and Docker services are present, but the first code-index snapshot was not available during this draft; the initial sync call timed out. Bounded current-source reads were used instead, without claiming indexed evidence. A fresh local worker completed a read-only source review with verified file hashes; the head independently checked its useful lifecycle/scaling findings and excluded unsupported claims about guaranteed player aggression, account-row creation and dominant resource bottlenecks. No bot implementation or live configuration changes belong to this planning task.
 
 Version 0.4 adds the technical plan using directly verified current launcher source. SHA256: `park-models.ps1` = `144c0e58b1f0bfb44935befe5f312818feb4b828000b208b1204574c3fc7387a`; `park-agent.ps1` = `13c55d7593f030df25c78aa2253e4307197f010a0ebd0a3b41ab9d6f4fcf0e53`. A fresh bounded local review was attempted with a versioned evidence card, but the launcher rejected it because another session owned the shared model; no worker review is claimed for this revision. The head reviewed the plan directly. Retrieval/index synchronization is deferred while the operator works on the embedding containers; no new sync was started and no embedding/derived-write counts or token savings are claimed for this revision.
