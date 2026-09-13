@@ -551,3 +551,52 @@ cross-ref 23891 on KAP-549):
   restore proof MVP-008, both head-accepted). Next dependency-ready
   slice: TW-014/KAP-557 deterministic owner-only follow/stop; this
   completes the playable companion MVP.
+- TW-014/MVP-009 accepted (local-Qwen park-head, 2026-09-13): deterministic
+  owner-only follow/stop for one owned companion. `python
+  docker/test_bot_follow.py -v` -> 10/10 in 264.2s in one disposable,
+  port-free project (gitignored evidence:
+  local/tortoise-bot-follow-ff2cc8744240-20260913T113637Z). Three seeded
+  roster bots (owner 500110, companion 500111 with owner binding, intruder
+  500120) in an emptied spawn box; the lab-only PlayerBot.FollowScript
+  replayed nine events through the real chat path
+  (ProcessChatMessageAfterSecurityCheck -> .botfollow/.botstop, SEC_PLAYER):
+  goal 1 accepted from a 32 yd seed and reached within 1.80 yd, stop
+  invalidated the goal exactly once, intruder follow and stop rejected with
+  the not-owner audit line (acc 1000500120 vs owner 1000500110), re-follows
+  (seq 2/3) reached again (1.90/1.92), the stale seq-2 delivery after the
+  seq-2 stop was rejected by the sequence guard
+  ("goal rejected stale seq:2 current:2") with no resume, and the clean
+  shutdown with all three bots online produced no SIGSEGV. DB same-save-tick
+  samples during the first window closed 28.42 -> 6.25 -> 0.00 yd; ownership
+  rows intact; personal containers untouched.
+- TW-014 design note (vs the session handoff plan): the handoff's ownership
+  check (entry accountId == issuer account) cannot work in this fork -
+  contract C2 gives every bot its own reserved session account (one session
+  per account; character account must equal the binding; reserved range >=
+  1e9), so a companion on the owner's account could never log in while the
+  owner is online. The human-owner relationship is therefore a new additive
+  binding, bot_ownership.owner_account_id (NULL = unowned; not unique), via
+  idempotent migration
+  sql/database_updates/character/20260913120000_character.sql. Fresh labs
+  get it from the initdb hook; the personal db from mangosd's auto-updater
+  at world start. Also recorded: fork API differences (Unit::CombatStop,
+  MotionMaster::empty, LANG_UNIVERSAL) and that stops do not bump the
+  follow seq - the stale guard rejects seq <= current, which is exactly the
+  "old goal delivered after stop" case.
+- Scope note: allowedScope src/game/PlayerBots + src/game/Commands +
+  docs/bots/companion-scenarios.md honored for product code; unavoidable
+  minimal touches outside it: two Chat.cpp table entries, three Chat.h
+  handler decls (the command surface physically lives there), the lab
+  (docker/test_bot_follow.py) and its server.py env mapping, and the
+  additive migration above. Full design/procedure/result card:
+  docs/bots/companion-scenarios.md + docs/bots/ralph/mvp/mvp-009.md.
+- Gates: docker compose build world (tortoise-local:dev
+  sha256:62050951a377...); python -m py_compile docker/test_bot_follow.py
+  OK; docker compose config --quiet OK; git diff --check clean. Retrieval
+  remains operator-paused (embedding container work is post-MVP); bounded
+  direct-read fallback, no sync or derived-write counts.
+- TW-014/KAP-557 is complete; the playable companion MVP (KAP-543) is
+  complete. Remaining: lab-suite regression sanity, personal-server deploy
+  (backup first), operator in-game validation (.botfollow/.botstop with an
+  owned companion; set bot_ownership.owner_account_id to the operator
+  account for the provisioned bot).

@@ -24,6 +24,11 @@ class PlayerBotAI: public PlayerAI
         virtual void SendFakePacket(uint16 /*opcode*/) {} // ai has scheduled delayed response to opcode
         virtual void UpdateAI(const uint32 /*diff*/) override; // Handle delayed teleports
         virtual void OnPlayerLogin();
+        // TW-014 (KAP-557): owner-directed follow/stop goal. While active
+        // the follow state machine preempts normal behavior; a goal whose
+        // seq is at or below the current one is stale and never resumes.
+        void FollowGoal(uint32 leaderGuid, uint32 seq);
+        void FollowStop();
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         // Helpers
@@ -48,9 +53,16 @@ class PlayerBotAI: public PlayerAI
         uint32 _questScanTimer = 0;
         uint32 _questDebugTimer = 0;
         uint8 _questDenyCount = 0;
+        // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
+        bool _following = false;
+        uint32 _followSeq = 0;
+        uint32 _followLeaderGuid = 0;
+        bool _followReached = false;
+        uint32 _followDebugTimer = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberLootTarget(Unit* unit);
+        bool UpdateFollow(uint32 diff);
         Creature* GetAliveHeldTarget() const;
         void ClearTarget();
         void InitQuestState();

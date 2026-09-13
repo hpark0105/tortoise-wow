@@ -535,8 +535,8 @@
         "Scenario: Reject or handle the failure path\nGiven a different player commands the bot or an old goal is delivered after stop\nWhen this condition is detected\nThen the command is rejected and the bot does not resume the invalidated goal"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": "Compile and isolated command/ownership tests; local in-game follow, range, stop and relog checks. No combat-role or natural-language scope in this story.",
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): deterministic owner-only follow/stop proven in a disposable lab (python docker/test_bot_follow.py -v -> 10/10 in 264.2s) - owner follow pathfinds and holds within 2 yd of the owner from a 32 yd seed, stop invalidates the current goal immediately, foreign-player commands are rejected (not-owner audit line), and a stale goal delivered after stop is rejected by the sequence guard without resuming; DB same-save-tick samples, ownership rows, clean shutdown and personal-volume protection all verified. Design and full evidence: docs/bots/companion-scenarios.md, docs/bots/ralph/mvp/mvp-009.md. Schema: additive migration 20260913120000_character.sql (bot_ownership.owner_account_id, NULL = unowned). No combat-role or natural-language scope in this story.",
       "dependsOn": [
         "TW-011",
         "MVP-003"
@@ -549,7 +549,7 @@
       "jiraKey": "KAP-557",
       "issueType": "Story",
       "headReviewRequired": true,
-      "jiraStatus": "To Do",
+      "jiraStatus": "Done locally (head-accepted 2026-09-13); Jira transition pending (read-only Jira access this session)",
       "milestone": "mvp",
       "validation": []
     },

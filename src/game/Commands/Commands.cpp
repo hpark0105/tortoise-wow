@@ -52,6 +52,7 @@
 #include "PathFinder.h"                                    
 #include "Pet.h"
 #include "Player.h"
+#include "PlayerBotMgr.h"
 #include "ChatTranslator.hpp"
 #include "PointMovementGenerator.h"
 #include "QuestDef.h"
@@ -19338,4 +19339,50 @@ bool ChatHandler::HandleAccountGetNameCommand(char* args)
     PSendSysMessage("Account %u is named '%s'.", accountId, pData->Username.c_str());
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// TW-014 (KAP-557): owner-only companion follow/stop (.botfollow/.botstop).
+// The single token is the companion's character name; ownership is enforced
+// in PlayerBotMgr against the bot_ownership binding (party membership is not
+// required). SendSysMessage is safe for socketless bot sessions:
+// WorldSession::SendPacket null-guards the socket.
+// ---------------------------------------------------------------------------
+bool ChatHandler::HandleBotFollowCommand(char* args)
+{
+    return HandleBotFollowStopCommand(args, true);
+}
+
+bool ChatHandler::HandleBotStopCommand(char* args)
+{
+    return HandleBotFollowStopCommand(args, false);
+}
+
+bool ChatHandler::HandleBotFollowStopCommand(char* args, bool follow)
+{
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::string botName(args ? args : "");
+    size_t const end = botName.find_first_of(" \t\r\n");
+    if (end != std::string::npos)
+        botName = botName.substr(0, end);
+    if (botName.empty())
+    {
+        PSendSysMessage(follow ? "Usage: .botfollow <botname>" : "Usage: .botstop <botname>");
+        return false;
+    }
+
+    bool ok = follow ? sPlayerBotMgr.BotFollow(p, botName) : sPlayerBotMgr.BotStop(p, botName);
+    if (!ok)
+    {
+        SendSysMessage(follow ? "Bot follow rejected." : "Bot stop rejected.");
+        SetSentErrorMessage(true);
+    }
+    return ok;
 }

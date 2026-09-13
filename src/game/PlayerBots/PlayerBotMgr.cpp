@@ -15,6 +15,8 @@
 #include "MasterPlayer.h"
 #include "PlayerBotAI.h"
 #include "Anticheat.h"
+#include <cctype>
+#include <cstdlib>
 
 PlayerBotMgr sPlayerBotMgr;
 
@@ -40,6 +42,8 @@ PlayerBotMgr::PlayerBotMgr()
     m_staleProbeGuid = 0;
     m_staleProbeStage = 0;
     m_staleProbeOldGen = 0;
+    m_followScriptStartMs = 0;
+    m_followScriptIdx = 0;
 }
 
 PlayerBotMgr::~PlayerBotMgr()
@@ -63,6 +67,78 @@ void PlayerBotMgr::LoadConfig()
     confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
     if (confQuestId)
         sLog.outString("Playerbot: declared quest %u enabled (MVP-006)", confQuestId);
+    // TW-014 (KAP-557) lab-only deterministic follow/stop script (default
+    // off). Events are relative to the moment every chat-driven issuer is
+    // online; see the FollowScriptEvent doc in PlayerBotMgr.h for formats.
+    m_followScript.clear();
+    m_followScriptStartMs = 0;
+    m_followScriptIdx = 0;
+    {
+        std::string scriptToken = sConfig.GetStringDefault("PlayerBot.FollowScript", "");
+        size_t pos = 0;
+        while (pos <= scriptToken.size())
+        {
+            size_t semi = scriptToken.find(';', pos);
+            if (semi == std::string::npos)
+                semi = scriptToken.size();
+            std::string ev = scriptToken.substr(pos, semi - pos);
+            pos = semi + 1;
+            if (ev.empty())
+                continue;
+            size_t c1 = ev.find(':');
+            if (c1 == std::string::npos)
+            {
+                sLog.outError("Playerbot: follow-script event malformed; skipped: %s", ev.c_str());
+                continue;
+            }
+            uint32 delay = (uint32)atoi(ev.substr(0, c1).c_str());
+            std::string rest = ev.substr(c1 + 1);
+            FollowScriptEvent fe;
+            fe.delayMs = delay;
+            fe.issuerGuid = 0;
+            fe.leaderGuid = 0;
+            fe.seq = 0;
+            if (rest.compare(0, 6, "stale:") == 0)
+            {
+                size_t c2 = rest.find(':', 6);
+                size_t c3 = (c2 == std::string::npos) ? std::string::npos : rest.find(':', c2 + 1);
+                if (c2 == std::string::npos || c3 == std::string::npos)
+                {
+                    sLog.outError("Playerbot: follow-script stale event malformed; skipped: %s", ev.c_str());
+                    continue;
+                }
+                fe.stale = true;
+                fe.text = rest.substr(6, c2 - 6);
+                fe.leaderGuid = (uint32)atoi(rest.substr(c2 + 1, c3 - c2 - 1).c_str());
+                fe.seq = (uint32)atoi(rest.substr(c3 + 1).c_str());
+                if (fe.text.empty() || fe.leaderGuid == 0)
+                {
+                    sLog.outError("Playerbot: follow-script stale event incomplete; skipped: %s", ev.c_str());
+                    continue;
+                }
+            }
+            else
+            {
+                size_t c2 = rest.find(':');
+                if (c2 == std::string::npos)
+                {
+                    sLog.outError("Playerbot: follow-script chat event malformed; skipped: %s", ev.c_str());
+                    continue;
+                }
+                fe.stale = false;
+                fe.issuerGuid = (uint32)atoi(rest.substr(0, c2).c_str());
+                fe.text = rest.substr(c2 + 1);
+                if (fe.issuerGuid == 0 || fe.text.empty())
+                {
+                    sLog.outError("Playerbot: follow-script chat event incomplete; skipped: %s", ev.c_str());
+                    continue;
+                }
+            }
+            m_followScript.push_back(fe);
+        }
+        if (!m_followScript.empty() && confDebug)
+            sLog.outString("[PlayerBot][FollowScript] armed events:%u (TW-014 lab script)", (uint32)m_followScript.size());
+    }
     // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
     // login-completion delivery; never set outside the Docker lab.
     m_staleProbeGuid = 0;
@@ -119,7 +195,7 @@ void PlayerBotMgr::Load()
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
     // Roster rows without a valid bot_ownership binding are quarantined: logged and skipped.
     result = CharacterDatabase.PQuery(
-        "SELECT p.char_guid, p.chance, p.ai, b.account_id, c.account "
+        "SELECT p.char_guid, p.chance, p.ai, b.account_id, c.account, b.owner_account_id "
         "FROM playerbot p "
         "LEFT JOIN bot_ownership b ON b.char_guid = p.char_guid "
         "LEFT JOIN characters c ON c.guid = p.char_guid");
@@ -136,6 +212,8 @@ void PlayerBotMgr::Load()
             uint32 boundAccount = hasBinding ? fields[3].GetUInt32() : 0;
             bool hasCharacter = !fields[4].IsNULL();
             uint32 charOwner = hasCharacter ? fields[4].GetUInt32() : 0;
+            // TW-014: optional human-owner binding (NULL = unowned).
+            uint32 ownerAccount = !fields[5].IsNULL() ? fields[5].GetUInt32() : 0;
 
             if (!hasCharacter)
             {
@@ -155,6 +233,7 @@ void PlayerBotMgr::Load()
                 entry->name = "<Unknown>";
             entry->ai->OnBotEntryLoad(entry);
             entry->persistent = true;
+            entry->ownerAccountId = ownerAccount;
             m_bots[entry->playerGUID] = entry;
             totalChance += chance;
         } while (result->NextRow());
@@ -352,6 +431,9 @@ void PlayerBotMgr::Update(uint32 diff)
     // MVP-002 (KAP-552): deterministic stale-completion probe (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateStaleLoginProbe();
+    // TW-014 (KAP-557): deterministic follow/stop script (lab-only,
+    // config-gated; cheap state check when disabled).
+    UpdateFollowScript();
     if (!((m_elapsedTime - m_lastUpdate) > confUpdateDiff))
         return; //Pas besoin d'update
 
@@ -1063,4 +1145,168 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     if (!sObjectMgr.GetPlayerDataByGUID(guid))
         sObjectMgr.LoadPlayerCacheData(guid);
     sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (native-ready character); bound (provision_version=2)", name.c_str(), guid, account);
+}
+
+// ---------------------------------------------------------------------------
+// TW-014 (KAP-557): deterministic owner-only follow/stop for one owned
+// companion.
+//
+// Commands (SEC_PLAYER, owner-checked): .botfollow <botname>, .botstop
+// <botname>. Ownership is the bot_ownership binding loaded with the roster
+// entry (entry accountId must equal the issuer's session account); party
+// membership is not required and not checked.
+//
+// Lab-only FollowScript: replays owner chat events (through the real chat
+// path) and one stale follow-goal delivery (directly, with an expired seq)
+// so the sequence guard is exercised deterministically.
+// ---------------------------------------------------------------------------
+PlayerBotEntry* PlayerBotMgr::FindBotByName(const std::string& name) const
+{
+    for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
+    {
+        std::string const& n = it->second->name;
+        if (n.size() != name.size())
+            continue;
+        bool same = true;
+        for (size_t i = 0; i < name.size(); ++i)
+            if (tolower((unsigned char)n[i]) != tolower((unsigned char)name[i]))
+            {
+                same = false;
+                break;
+            }
+        if (same)
+            return it->second;
+    }
+    return nullptr;
+}
+
+bool PlayerBotMgr::BotFollow(Player* issuer, const std::string& botName)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("follow rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("follow rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("follow rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("follow rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    ++e->followSeq;
+    e->ai->FollowGoal(issuer->GetGUIDLow(), e->followSeq);
+    sLog.outString("follow accepted bot:%s guid:%u leader:%u seq:%u",
+                   botName.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->followSeq);
+    return true;
+}
+
+bool PlayerBotMgr::BotStop(Player* issuer, const std::string& botName)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("stop rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("stop rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("stop rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("stop rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->ai->FollowStop();
+    sLog.outString("stop accepted bot:%s guid:%u issuer:%u seq:%u",
+                   botName.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->followSeq);
+    return true;
+}
+
+void PlayerBotMgr::UpdateFollowScript()
+{
+    if (m_followScript.empty() || m_followScriptIdx >= m_followScript.size())
+        return;
+
+    if (m_followScriptStartMs == 0)
+    {
+        // The clock starts only once every chat-driven issuer is online;
+        // earlier, their sessions do not exist yet and the commands would
+        // be delivered into nothing.
+        for (size_t i = 0; i < m_followScript.size(); ++i)
+        {
+            FollowScriptEvent const& ev = m_followScript[i];
+            if (ev.stale)
+                continue;
+            std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(ev.issuerGuid);
+            if (it == m_bots.end() || it->second->state != PB_STATE_ONLINE)
+                return;
+        }
+        m_followScriptStartMs = WorldTimer::getMSTime();
+        if (confDebug)
+            sLog.outString("[PlayerBot][FollowScript] started events:%u", (uint32)m_followScript.size());
+        return;
+    }
+
+    uint32 const now = WorldTimer::getMSTime() - m_followScriptStartMs;
+    while (m_followScriptIdx < m_followScript.size() &&
+           m_followScript[m_followScriptIdx].delayMs <= now)
+    {
+        FollowScriptEvent const& ev = m_followScript[m_followScriptIdx];
+        if (ev.stale)
+        {
+            PlayerBotEntry* target = FindBotByName(ev.text);
+            if (!target || !target->ai || target->state != PB_STATE_ONLINE)
+                sLog.outError("[PlayerBot][FollowScript] stale target %s missing or offline; event skipped", ev.text.c_str());
+            else
+            {
+                if (confDebug)
+                    sLog.outString("[PlayerBot][FollowScript] stale delivery at %u bot:%s leader:%u seq:%u",
+                                   ev.delayMs, ev.text.c_str(), ev.leaderGuid, ev.seq);
+                target->ai->FollowGoal(ev.leaderGuid, ev.seq);
+            }
+        }
+        else
+        {
+            std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(ev.issuerGuid);
+            WorldSession* sess = (it != m_bots.end()) ? it->second->session : nullptr;
+            if (!sess)
+                sLog.outError("[PlayerBot][FollowScript] issuer %u unavailable; event skipped", ev.issuerGuid);
+            else
+            {
+                std::string msg = std::string(".") + ev.text;
+                uint32 lang = LANG_UNIVERSAL;
+                uint32 msgType = CHAT_MSG_SAY;
+                sess->ProcessChatMessageAfterSecurityCheck(msg, lang, msgType);
+                if (confDebug)
+                    sLog.outString("[PlayerBot][FollowScript] chat at %u issuer:%u text:%s",
+                                   ev.delayMs, ev.issuerGuid, ev.text.c_str());
+            }
+        }
+        ++m_followScriptIdx;
+    }
 }

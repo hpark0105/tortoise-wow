@@ -25,6 +25,9 @@
 
 namespace
 {
+// TW-014 (KAP-557): the companion holds this range around its owner.
+const float kFollowRange = 2.0f;
+
 // MVP-006: nearest alive creature offering the declared quest within a
 // bounded radius; the search range shrinks as closer matches are found.
 class NearestQuestGiverCheck
@@ -119,6 +122,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     }
 
     if (!me->IsAlive())
+        return;
+
+    // TW-014 (KAP-557): an owner-directed follow goal preempts normal
+    // behavior; while active the bot only pursues its owner.
+    if (UpdateFollow(diff))
         return;
 
     if (TryLootDefeatedTarget())
@@ -1465,4 +1473,89 @@ PlayerBotAI* CreatePlayerBotAI(std::string ainame)
     if (ainame == "PlayerBotFleeingAI")
         return new PlayerBotFleeingAI();
     return new PlayerBotAI();
+}
+
+// ---------------------------------------------------------------------------
+// TW-014 (KAP-557): owner-directed follow/stop. A goal is identified by
+// (leader, seq); a seq at or below the current one is stale and must never
+// resume following (e.g. a delayed delivery of an already-stopped goal).
+// ---------------------------------------------------------------------------
+void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
+{
+    if (!me)
+        return;
+    if (seq <= _followSeq)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Follow] goal rejected stale seq:%u current:%u GUID:%u",
+                           seq, _followSeq, me->GetGUIDLow());
+        return;
+    }
+    if (me->GetVictim())
+        me->CombatStop();
+    _followSeq = seq;
+    _followLeaderGuid = leaderGuid;
+    _following = true;
+    _followReached = false;
+    me->GetMotionMaster()->Clear(false);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Follow] active GUID:%u leader:%u seq:%u",
+                       me->GetGUIDLow(), leaderGuid, seq);
+}
+
+void PlayerBotAI::FollowStop()
+{
+    if (!me)
+        return;
+    _following = false;
+    _followLeaderGuid = 0;
+    _followReached = false;
+    // Invalidate the current goal immediately (TW-014 AC1).
+    me->GetMotionMaster()->Clear(true);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Follow] inactive GUID:%u", me->GetGUIDLow());
+}
+
+bool PlayerBotAI::UpdateFollow(uint32 diff)
+{
+    if (!_following || !me || !me->IsAlive() || !me->IsInWorld() || !me->GetMap())
+        return false;
+
+    // Same-map lookup: a leader on another map (or not in world yet) is
+    // temporarily unavailable; the goal stays active and the bot holds
+    // position instead of dropping it.
+    Player* leader = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!leader || !leader->IsAlive())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled() && _followDebugTimer <= diff)
+        {
+            _followDebugTimer = 5000;
+            sLog.outString("[PlayerBot][Follow] leader unavailable GUID:%u leader:%u null:%u dead:%u",
+                           me->GetGUIDLow(), _followLeaderGuid, leader ? 0 : 1,
+                           (leader && !leader->IsAlive()) ? 1 : 0);
+        }
+        else if (sPlayerBotMgr.IsDebugEnabled())
+            _followDebugTimer -= diff;
+        return true;
+    }
+
+    if (me->GetDistance(leader) > kFollowRange)
+    {
+        // The same path-find-to-position pattern idle wander and the quest
+        // giver pursuit use (a player chase is a no-op without a victim).
+        me->GetMotionMaster()->MovePoint(0, leader->GetPositionX(), leader->GetPositionY(),
+                                         leader->GetPositionZ(), MOVE_PATHFINDING);
+        return true;
+    }
+
+    if (!me->GetMotionMaster()->empty())
+        me->GetMotionMaster()->Clear(false);
+    if (!_followReached)
+    {
+        _followReached = true;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Follow] reached GUID:%u leader:%u dist:%.2f seq:%u",
+                           me->GetGUIDLow(), _followLeaderGuid, me->GetDistance(leader), _followSeq);
+    }
+    return true;
 }

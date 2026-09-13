@@ -34,10 +34,12 @@ struct PlayerBotEntry
     WorldSession* session; // current login session (TW-009, AC2); null when not logging in
     bool loginQueued; // login queued for the current session (TW-009, AC1)
     uint32 loginGeneration; // increments on every session creation (TW-009, AC2)
+    uint32 followSeq; // TW-014: monotonic follow-goal sequence (0 = no goal yet)
+    uint32 ownerAccountId; // TW-014: human account allowed to command this bot (0 = unowned)
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0)
     {}
 };
 
@@ -106,6 +108,12 @@ class PlayerBotMgr
         // and only through a session that uses their approved bound identity.
         bool IsSaveableBot(PlayerBotEntry* e, uint32 sessionAccountId) const;
 
+        // TW-014 (KAP-557): owner-only follow/stop for one owned companion.
+        // Ownership is the bot_ownership binding (the entry accountId);
+        // every outcome, accepted or rejected, is logged.
+        bool BotFollow(Player* issuer, const std::string& botName);
+        bool BotStop(Player* issuer, const std::string& botName);
+
         uint32 GenBotAccountId() { return ++_maxAccountId; }
         PlayerBotStats& GetStats(){ return m_stats; }
         void Start() { enable = true; }
@@ -140,6 +148,28 @@ class PlayerBotMgr
         uint32 m_staleProbeGuid;
         int m_staleProbeStage;
         uint32 m_staleProbeOldGen;
+
+        // TW-014 (KAP-557) lab-only deterministic follow/stop script, armed
+        // from PlayerBot.FollowScript (default empty = disabled). Event
+        // formats (semicolon-separated): chat
+        // <delayMs>:<issuerGuid>:<command text without leading dot>; stale
+        // <delayMs>:stale:<botName>:<leaderGuid>:<seq>. The clock starts
+        // when every chat-driven issuer is online; stale events deliver a
+        // directly expired follow goal to prove the seq guard rejects it.
+        struct FollowScriptEvent
+        {
+            uint32 delayMs;
+            uint32 issuerGuid; // chat events: issuer player guid
+            uint32 leaderGuid; // stale events: leader named by the expired goal
+            uint32 seq;        // stale events: seq carried by the expired goal
+            bool stale;
+            std::string text;  // chat: command text (no dot); stale: bot name
+        };
+        void UpdateFollowScript();
+        PlayerBotEntry* FindBotByName(const std::string& name) const;
+        std::vector<FollowScriptEvent> m_followScript;
+        uint32 m_followScriptStartMs;
+        size_t m_followScriptIdx;
 
         bool enable;
         uint32 AllocateReservedBotAccount(); // TW-010: fresh id in reserved range (>= 1e9)
