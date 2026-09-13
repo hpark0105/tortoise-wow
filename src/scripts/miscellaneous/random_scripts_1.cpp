@@ -6977,6 +6977,11 @@ void AddSC_random_scripts_1()
     newscript->RegisterSelf();
 
     newscript = new Script;
+    newscript->Name = "npc_teslinah";
+    newscript->pQuestAcceptNPC = &QuestAccept_npc_teslinah;
+    newscript->RegisterSelf();
+
+    newscript = new Script;
     newscript->Name = "npc_voldana";
     newscript->pQuestRewardedNPC = &QuestComplete_npc_voldana;
     newscript->RegisterSelf();

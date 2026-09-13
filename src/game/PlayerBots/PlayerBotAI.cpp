@@ -9,6 +9,8 @@
 #include "PlayerBotMgr.h"
 #include "WorldPacket.h"
 #include "Map.h"
+#include "Maps/GridSearchers.h"
+#include "QuestDef.h"
 #include "SpellMgr.h"
 #include "Database/DBCStructure.h"
 #include "Database/DatabaseEnv.h"
@@ -18,6 +20,39 @@
 #include <cmath>
 #include <memory>
 #include <functional>
+#include <vector>
+
+
+namespace
+{
+// TW-014 (KAP-557): the companion holds this range around its owner.
+const float kFollowRange = 2.0f;
+
+// MVP-006: nearest alive creature offering the declared quest within a
+// bounded radius; the search range shrinks as closer matches are found.
+class NearestQuestGiverCheck
+{
+public:
+    NearestQuestGiverCheck(Player const* obj, uint32 questId, float maxRange)
+        : i_obj(obj), i_questId(questId), i_range(maxRange) {}
+    WorldObject const& GetFocusObject() const { return *i_obj; }
+    bool operator()(Creature const* u)
+    {
+        if (!u->IsAlive() || !u->HasQuest(i_questId))
+            return false;
+        if (!i_obj->IsWithinDistInMap(u, i_range))
+            return false;
+        i_range = i_obj->GetDistance(u);
+        return true;
+    }
+    float GetLastRange() const { return i_range; }
+private:
+    Player const* const i_obj;
+    uint32 i_questId;
+    float i_range;
+    NearestQuestGiverCheck(NearestQuestGiverCheck const&);
+};
+}
 
 bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 {
@@ -27,6 +62,12 @@ bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 
 void PlayerBotAI::UpdateAI(const uint32 diff)
 {
+    // TW-008 (AC1): a newly constructed or detached controller has me == nullptr;
+    // check before any dereference. The teleport-ack blocks below stay reachable
+    // for a valid player mid-teleport (AC2).
+    if (!me)
+        return;
+
     if (me->IsBeingTeleportedNear())
     {
         WorldPacket data(MSG_MOVE_TELEPORT_ACK, 10);
@@ -37,7 +78,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (me->IsBeingTeleportedFar())
         me->GetSession()->HandleMoveWorldportAckOpcode();
 
-    if (!me || !me->IsInWorld())
+    if (!me->IsInWorld())
         return;
 
     // Detect manual level changes in case GiveLevel hook missed
@@ -48,7 +89,53 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         AutoEquipForLevel();
     }
 
+    // Bounded lab observability (MVP-005): alive-state transitions plus a
+    // 10 s heartbeat, gated on PlayerBot debug logging.
+    if (sPlayerBotMgr.IsDebugEnabled())
+    {
+        bool const alive = me->IsAlive();
+        if (alive != _obsAlive)
+        {
+            _obsAlive = alive;
+            sLog.outString("[PlayerBot] bot %s GUID:%u hp:%u/%u",
+                           alive ? "alive" : "dead", me->GetGUIDLow(),
+                           me->GetHealth(), me->GetMaxHealth());
+        }
+        if (_obsTimer <= diff)
+        {
+            _obsTimer = 10000;
+            uint32 vguid = 0, vhp = 0, vmax = 0;
+            if (Unit* victim = me->GetVictim())
+            {
+                vguid = victim->GetGUIDLow();
+                vhp = victim->GetHealth();
+                vmax = victim->GetMaxHealth();
+            }
+            sLog.outString("[PlayerBot] state GUID:%u map:%u pos:%.1f/%.1f/%.1f combat:%u victim:%u vhp:%u/%u mhp:%u/%u",
+                           me->GetGUIDLow(), me->GetMapId(),
+                           me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
+                           me->IsInCombat() ? 1 : 0, vguid, vhp, vmax,
+                           me->GetHealth(), me->GetMaxHealth());
+        }
+        else
+            _obsTimer -= diff;
+    }
+
     if (!me->IsAlive())
+        return;
+
+    // TW-014 (KAP-557): an owner-directed follow goal preempts normal
+    // behavior; while active the bot only pursues its owner.
+    if (UpdateFollow(diff))
+        return;
+
+    if (TryLootDefeatedTarget())
+        return;
+
+    // MVP-006: declared quest state machine; while true the bot is
+    // moving for the quest (accept or turn-in) and normal behavior is
+    // skipped for this tick.
+    if (UpdateQuestPhases(diff))
         return;
 
     // Ability usage timer
@@ -57,63 +144,139 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     else
         _abilityTimer = 0;
 
-    // Periodic combat/target check
+    // Combat: hold the current target across ticks. A target can drop out
+    // of SelectNearestTarget detection after an opening swing (reaction or
+    // attackable-state change), so re-selecting it every tick makes the bot
+    // give up mid-fight. Instead the bot pursues the remembered target
+    // directly until it dies (looted via TryLootDefeatedTarget) or runs out
+    // of hold range.
     if (_combatCheckTimer <= diff)
     {
         _combatCheckTimer = 2000;
 
-        if (me->IsInCombat())
+        if (me->IsInCombat() && me->GetVictim())
         {
-            if (Unit* victim = me->GetVictim())
-            {
-                if (!me->CanReachWithMeleeAutoAttack(victim))
-                    me->GetMotionMaster()->MoveChase(victim);
+            // The core paired us with a victim (the mob hit back); fight it
+            // and keep it as the loot candidate.
+            Unit* victim = me->GetVictim();
+            if (victim->GetTypeId() == TYPEID_UNIT)
+                RememberLootTarget(victim);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
+                               me->GetGUIDLow(), victim->GetGUIDLow(), me->GetDistance(victim));
+            if (!me->CanReachWithMeleeAutoAttack(victim))
+                me->GetMotionMaster()->MoveChase(victim);
 
-                // Try casting an offensive spell before melee swing
-                if (_abilityTimer == 0)
+            if (_abilityTimer == 0)
+            {
+                if (uint32 spellId = SelectOffensiveSpell(victim))
                 {
-                    if (uint32 spellId = SelectOffensiveSpell(victim))
-                    {
-                        me->CastSpell(victim, spellId, false);
-                        _abilityTimer = urand(2000, 4000);
-                    }
-                    else
-                        me->Attack(victim, true);
+                    me->CastSpell(victim, spellId, false);
+                    _abilityTimer = urand(2000, 4000);
                 }
                 else
                     me->Attack(victim, true);
             }
             else
-                me->CombatStop();
+                me->Attack(victim, true);
+        }
+        else if (Creature* held = GetAliveHeldTarget())
+        {
+            // A target we picked that stopped being returned by
+            // SelectNearestTarget; keep pursuing it directly.
+            if (me->GetDistance(held) > 35.0f)
+            {
+                ClearTarget();
+            }
+            else if (me->CanReachWithMeleeAutoAttack(held))
+            {
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f hp:%u/%u",
+                                   me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
+                                   held->GetHealth(), held->GetMaxHealth());
+                if (_abilityTimer == 0)
+                {
+                    if (uint32 spellId = SelectOffensiveSpell(held))
+                    {
+                        me->CastSpell(held, spellId, false);
+                        _abilityTimer = urand(2000, 4000);
+                    }
+                    else
+                        me->Attack(held, true);
+                }
+                else
+                    me->Attack(held, true);
+            }
+            else
+            {
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] pursuing GUID:%u target:%u dist:%.2f hp:%u/%u",
+                                   me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
+                                   held->GetHealth(), held->GetMaxHealth());
+                me->GetMotionMaster()->MoveChase(held);
+                me->Attack(held, true);
+            }
         }
         else
         {
             if (Unit* target = me->SelectNearestTarget(30.0f))
             {
-                me->Attack(target, true);
-                me->GetMotionMaster()->MoveChase(target);
+                // Autonomous companions never initiate PvP. A hostile player
+                // may still be the current victim while defending; this guard
+                // applies only to idle target acquisition.
+                if (!target->IsPlayer())
+                {
+                    if (target->GetTypeId() == TYPEID_UNIT)
+                        RememberLootTarget(target);
+                    me->Attack(target, true);
+                    me->GetMotionMaster()->MoveChase(target);
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[PlayerBot] engage GUID:%u target:%u dist:%.2f",
+                                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+                }
+                else if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] autonomous player target skipped GUID:%u target:%u",
+                                   me->GetGUIDLow(), target->GetGUIDLow());
             }
+            else if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] no-target GUID:%u", me->GetGUIDLow());
         }
     }
     else
         _combatCheckTimer -= diff;
 
-    // Random wandering while idle
+    // Random wandering while idle.
     if (!me->IsInCombat())
     {
         if (_wanderTimer <= diff)
         {
-            _wanderTimer = urand(8000, 15000);
-
-            float x = me->GetPositionX();
-            float y = me->GetPositionY();
-            float z = me->GetPositionZ();
-            float radius = frand(8.0f, 20.0f);
-
-            if (Map* map = me->GetMap())
+            // A held or detected hostile is handled by the combat check
+            // above; wandering here would overwrite the chase and lose the
+            // target.
+            if (GetAliveHeldTarget() || me->SelectNearestTarget(30.0f))
             {
-                if (map->GetWalkRandomPosition(nullptr, x, y, z, radius))
-                    me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+                _wanderTimer = urand(2000, 4000);
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] wander-hold GUID:%u", me->GetGUIDLow());
+            }
+            else
+            {
+                _wanderTimer = urand(8000, 15000);
+
+                float x = me->GetPositionX();
+                float y = me->GetPositionY();
+                float z = me->GetPositionZ();
+                float radius = frand(8.0f, 20.0f);
+
+                if (Map* map = me->GetMap())
+                {
+                    if (map->GetWalkRandomPosition(nullptr, x, y, z, radius))
+                    {
+                        me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+                        if (sPlayerBotMgr.IsDebugEnabled())
+                            sLog.outString("[PlayerBot] wander GUID:%u to:%.1f/%.1f", me->GetGUIDLow(), x, y);
+                    }
+                }
             }
         }
         else
@@ -121,11 +284,439 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     }
 }
 
+Creature* PlayerBotAI::GetAliveHeldTarget() const
+{
+    if (!_lootTargetGuid || !me || !me->GetMap())
+        return nullptr;
+    Creature* creature = me->GetMap()->GetCreature(_lootTargetGuid);
+    if (creature && creature->IsAlive())
+        return creature;
+    return nullptr;
+}
+
+void PlayerBotAI::ClearTarget()
+{
+    _lootTargetGuid = ObjectGuid();
+    _lootRetryCount = 0;
+}
+
+bool PlayerBotAI::TryLootDefeatedTarget()
+{
+    if (!_lootTargetGuid || !me->GetMap())
+        return false;
+
+    Creature* creature = me->GetMap()->GetCreature(_lootTargetGuid);
+    if (!creature)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] loot target missing GUID:%u target:%u",
+                           me->GetGUIDLow(), _lootTargetGuid.GetCounter());
+        _lootTargetGuid = ObjectGuid();
+        _lootRetryCount = 0;
+        return false;
+    }
+    if (creature->IsAlive())
+    {
+        // The target is still alive; it is the held combat target that the
+        // combat loop keeps pursuing. Do not clear it here.
+        return false;
+    }
+    float const maxLootDist = me->GetMaxLootDistance(creature);
+    if (!creature->IsWithinDistInMap(me, maxLootDist, true, SizeFactor::None))
+    {
+        me->GetMotionMaster()->MovePoint(0, creature->GetPositionX(), creature->GetPositionY(),
+                                         creature->GetPositionZ(), MOVE_PATHFINDING);
+        return true;
+    }
+
+    ObjectGuid const guid = creature->GetObjectGuid();
+    me->SendLoot(guid, LOOT_CORPSE);
+    if (me->GetLootGuid() == guid)
+    {
+        std::vector<std::pair<uint32, uint32>> itemCounts;
+        uint32 const maxSlot = creature->loot.GetMaxSlotInLootFor(me->GetGUIDLow());
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] corpse loot slots GUID:%u target:%u slots:%u lootid:%u empty:%d",
+                           me->GetGUIDLow(), guid.GetCounter(), maxSlot,
+                           creature->GetLootId(), creature->loot.empty() ? 1 : 0);
+        for (uint32 slot = 0; slot < maxSlot; ++slot)
+            if (LootItem* item = creature->loot.LootItemInSlot(slot, me->GetGUIDLow()))
+                itemCounts.push_back(std::make_pair(item->itemid, me->GetItemCount(item->itemid)));
+        me->AutoStoreLoot(creature->loot);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            for (std::vector<std::pair<uint32, uint32>>::const_iterator itr = itemCounts.begin(); itr != itemCounts.end(); ++itr)
+                sLog.outString("[PlayerBot] corpse loot stored GUID:%u item:%u before:%u after:%u",
+                               me->GetGUIDLow(), itr->first, itr->second, me->GetItemCount(itr->first));
+        me->GetSession()->DoLootRelease(guid);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] corpse loot processed GUID:%u target:%u",
+                           me->GetGUIDLow(), guid.GetCounter());
+        _lootTargetGuid = ObjectGuid();
+        _lootRetryCount = 0;
+        return true;
+    }
+
+    // The core refuses corpse looting silently; log bounded diagnostics and
+    // retry a few times so a transient denial can self-heal.
+    uint32 const attempt = ++_lootRetryCount;
+    if (sPlayerBotMgr.IsDebugEnabled() && (attempt <= 3 || attempt % 5 == 0))
+        sLog.outString("[PlayerBot] corpse loot denied GUID:%u target:%u attempt:%u eligible:%d tapped:%u recipient:%u recipfound:%u slots:%u dist:%.2f maxd:%.2f",
+                       me->GetGUIDLow(), guid.GetCounter(), attempt,
+                       creature->IsLootAllowedDueToDamageOrigin() ? 1 : 0,
+                       creature->IsTappedBy(me) ? 1 : 0,
+                       creature->GetLootRecipientGuid().GetCounter(),
+                       creature->GetLootRecipient() != nullptr ? 1 : 0,
+                       creature->loot.GetMaxSlotInLootFor(me->GetGUIDLow()),
+                       me->GetDistance(creature), maxLootDist);
+    if (attempt >= 5)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] corpse loot giving up GUID:%u target:%u",
+                           me->GetGUIDLow(), guid.GetCounter());
+        _lootTargetGuid = ObjectGuid();
+        _lootRetryCount = 0;
+    }
+    return true;
+}
+
+void PlayerBotAI::RememberLootTarget(Unit* unit)
+{
+    if (!unit)
+        return;
+    ObjectGuid const guid = unit->GetObjectGuid();
+    if (_lootTargetGuid == guid)
+        return;
+    _lootTargetGuid = guid;
+    _lootRetryCount = 0;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot] loot target set GUID:%u target:%u entry:%u hp:%u/%u",
+                       me->GetGUIDLow(), unit->GetGUIDLow(), unit->GetEntry(),
+                       unit->GetHealth(), unit->GetMaxHealth());
+}
+
+void PlayerBotAI::InitQuestState()
+{
+    _questId = sPlayerBotMgr.GetQuestId();
+    _questPhase = 0;
+    _questGiverGuid = ObjectGuid();
+    _questObjectiveGuid = ObjectGuid();
+    _questScanTimer = 0;
+    _questDenyCount = 0;
+    if (!_questId || !me || !sObjectMgr.GetQuestTemplate(_questId))
+        return;
+
+    // Resume from the saved quest log so a restart mid-quest continues
+    // instead of stalling (MVP-007 relies on this).
+    QuestStatus status = me->GetQuestStatus(_questId);
+    if (status == QUEST_STATUS_INCOMPLETE)
+        _questPhase = 2;
+    else if (status == QUEST_STATUS_COMPLETE)
+        _questPhase = 3;
+    else
+        _questPhase = 1;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot] quest init GUID:%u quest:%u phase:%u",
+                       me->GetGUIDLow(), _questId, _questPhase);
+}
+
+Creature* PlayerBotAI::FindQuestGiver() const
+{
+    Creature* found = nullptr;
+    NearestQuestGiverCheck check(me, _questId, 50.0f);
+    MaNGOS::CreatureLastSearcher<NearestQuestGiverCheck> searcher(found, check);
+    Cell::VisitGridObjects(me, searcher, 50.0f);
+    if (!found && sPlayerBotMgr.IsDebugEnabled())
+    {
+        // MVP-006 debug: distinguish "no giver in grid" from "giver in
+        // grid but not offering the quest" for the declared quest's giver
+        // entry (2079, Conservator Ilthalaine).
+        class GiverProbe
+        {
+        public:
+            GiverProbe(Player const* obj, uint32 questId) : i_obj(obj), i_questId(questId) {}
+            WorldObject const& GetFocusObject() const { return *i_obj; }
+            bool operator()(Creature const* u)
+            {
+                if (u->GetEntry() == 2079)
+                {
+                    if (u->IsAlive() && u->HasQuest(i_questId))
+                        ++i_withQuest;
+                    if (u->IsAlive())
+                        ++i_alive;
+                    else
+                        ++i_dead;
+                }
+                return false;
+            }
+            uint32 i_alive = 0;
+            uint32 i_dead = 0;
+            uint32 i_withQuest = 0;
+            GiverProbe(GiverProbe const&);
+        private:
+            Player const* const i_obj;
+            uint32 const i_questId;
+        };
+        GiverProbe probe(me, _questId);
+        Creature* unused = nullptr;
+        MaNGOS::CreatureLastSearcher<GiverProbe> probeSearcher(unused, probe);
+        Cell::VisitGridObjects(me, probeSearcher, 50.0f);
+        sLog.outString("[PlayerBot] quest giver search empty GUID:%u quest:%u alive2079:%u dead2079:%u withQuest:%u",
+                       me->GetGUIDLow(), _questId, probe.i_alive, probe.i_dead, probe.i_withQuest);
+    }
+    return found;
+}
+
+Creature* PlayerBotAI::FindQuestObjectiveTarget() const
+{
+    if (_questPhase != 2)
+        return nullptr;
+    Quest const* qInfo = sObjectMgr.GetQuestTemplate(_questId);
+    if (!qInfo)
+        return nullptr;
+    QuestStatusData const* qStatus = me->GetQuestStatusData(_questId);
+    if (!qStatus || qStatus->m_status != QUEST_STATUS_INCOMPLETE)
+        return nullptr;
+
+    // Nearest alive creature matching an incomplete kill objective.
+    class NearestQuestKillCheck
+    {
+    public:
+        NearestQuestKillCheck(Player const* obj, Quest const* q, QuestStatusData const* status, float maxRange)
+            : i_obj(obj), i_q(q), i_status(status), i_range(maxRange) {}
+        WorldObject const& GetFocusObject() const { return *i_obj; }
+        bool operator()(Creature const* u)
+        {
+            if (!u->IsAlive())
+                return false;
+            int32 const entry = (int32)u->GetEntry();
+            for (uint32 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+            {
+                if (i_q->ReqCreatureOrGOId[i] != entry)
+                    continue;
+                if (i_status->m_creatureOrGOcount[i] >= i_q->ReqCreatureOrGOCount[i])
+                    continue;
+                if (!i_obj->IsWithinDistInMap(u, i_range))
+                    return false;
+                i_range = i_obj->GetDistance(u);
+                return true;
+            }
+            return false;
+        }
+        float GetLastRange() const { return i_range; }
+    private:
+        Player const* const i_obj;
+        Quest const* const i_q;
+        QuestStatusData const* const i_status;
+        float i_range;
+        NearestQuestKillCheck(NearestQuestKillCheck const&);
+    };
+
+    Creature* found = nullptr;
+    NearestQuestKillCheck check(me, qInfo, qStatus, 40.0f);
+    MaNGOS::CreatureLastSearcher<NearestQuestKillCheck> searcher(found, check);
+    Cell::VisitGridObjects(me, searcher, 40.0f);
+    return found;
+}
+
+bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
+{
+    if (_questPhase == 0 || _questPhase == 4)
+        return false;
+
+    // Awaiting the objective: pursue incomplete quest kills through normal
+    // combat (this also covers neutral objective creatures, e.g. quest 456's
+    // Thistle Boars) and watch for completion so the bot turns in through
+    // the normal quest APIs.
+    if (_questPhase == 2)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+        {
+            if (_questDebugTimer <= diff)
+            {
+                _questDebugTimer = 5000;
+                if (QuestStatusData const* qStatus = me->GetQuestStatusData(_questId))
+                {
+                    Quest const* qInfo = sObjectMgr.GetQuestTemplate(_questId);
+                    sLog.outString("[PlayerBot] quest state GUID:%u quest:%u status:%u c0:%u c1:%u c2:%u c3:%u cancomplete:%u incombat:%u flags:%u",
+                                   me->GetGUIDLow(), _questId, qStatus->m_status,
+                                   qStatus->m_creatureOrGOcount[0], qStatus->m_creatureOrGOcount[1],
+                                   qStatus->m_creatureOrGOcount[2], qStatus->m_creatureOrGOcount[3],
+                                   (uint32)me->CanCompleteQuest(_questId), (uint32)me->IsInCombat(),
+                                   qInfo ? qInfo->GetSpecialFlags() : 0xFFFFFFFF);
+                    if (qInfo)
+                        sLog.outString("[PlayerBot] quest req GUID:%u quest:%u r0:%u/%u r1:%u/%u r2:%u/%u r3:%u/%u",
+                                       me->GetGUIDLow(), _questId,
+                                       qInfo->ReqCreatureOrGOId[0], qInfo->ReqCreatureOrGOCount[0],
+                                       qInfo->ReqCreatureOrGOId[1], qInfo->ReqCreatureOrGOCount[1],
+                                       qInfo->ReqCreatureOrGOId[2], qInfo->ReqCreatureOrGOCount[2],
+                                       qInfo->ReqCreatureOrGOId[3], qInfo->ReqCreatureOrGOCount[3]);
+                }
+                else
+                    sLog.outString("[PlayerBot] quest state GUID:%u quest:%u status:missing cancomplete:%u incombat:%u",
+                                   me->GetGUIDLow(), _questId,
+                                   (uint32)me->CanCompleteQuest(_questId), (uint32)me->IsInCombat());
+            }
+            else
+                _questDebugTimer -= diff;
+        }
+        if (me->CanCompleteQuest(_questId) || me->GetQuestStatus(_questId) == QUEST_STATUS_COMPLETE)
+        {
+            _questPhase = 3;
+            _questObjectiveGuid = ObjectGuid();
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] quest objective complete GUID:%u quest:%u",
+                               me->GetGUIDLow(), _questId);
+            return true;
+        }
+        if (!me->IsInCombat())
+        {
+            if (Creature* objective = FindQuestObjectiveTarget())
+            {
+                if (_questObjectiveGuid != objective->GetObjectGuid())
+                {
+                    _questObjectiveGuid = objective->GetObjectGuid();
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[PlayerBot] quest objective target GUID:%u quest:%u target:%u entry:%u",
+                                       me->GetGUIDLow(), _questId,
+                                       objective->GetGUIDLow(), objective->GetEntry());
+                }
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] quest attack GUID:%u quest:%u target:%u dist:%.2f",
+                                   me->GetGUIDLow(), _questId, objective->GetGUIDLow(),
+                                   me->GetDistance(objective));
+                me->Attack(objective, true);
+                me->GetMotionMaster()->MoveChase(objective);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Phases 1 (accept) and 3 (turn-in) need the giver object.
+    Creature* giver = nullptr;
+    if (_questGiverGuid && me->GetMap())
+        giver = me->GetMap()->GetCreature(_questGiverGuid);
+    if (!giver || !giver->IsAlive())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled() && _questGiverGuid)
+            sLog.outString("[PlayerBot] quest giver lost GUID:%u quest:%u guid:%u null:%u dead:%u",
+                           me->GetGUIDLow(), _questId, _questGiverGuid.GetCounter(),
+                           giver ? 0 : 1, (giver && !giver->IsAlive()) ? 1 : 0);
+        _questGiverGuid = ObjectGuid();
+        if (_questScanTimer <= diff)
+        {
+            _questScanTimer = 2000;
+            if (Creature* found = FindQuestGiver())
+            {
+                _questGiverGuid = found->GetObjectGuid();
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] quest giver found GUID:%u quest:%u giver:%u entry:%u",
+                                   me->GetGUIDLow(), _questId,
+                                   found->GetGUIDLow(), found->GetEntry());
+            }
+        }
+        else
+            _questScanTimer -= diff;
+        return false;
+    }
+
+    if (!me->IsWithinDistInMap(giver, 2.5f, true, SizeFactor::None))
+    {
+        // Player chase is a no-op unless the player has the chased
+        // unit as victim (ChaseMovementGenerator::_lostTarget), and a
+        // bot never attacks its quest giver. Path-find to the giver
+        // position instead, the same pattern idle wander uses.
+        me->GetMotionMaster()->MovePoint(0, giver->GetPositionX(), giver->GetPositionY(),
+                                        giver->GetPositionZ(), MOVE_PATHFINDING);
+        return true;
+    }
+
+    Quest const* qInfo = sObjectMgr.GetQuestTemplate(_questId);
+    if (!qInfo)
+    {
+        _questPhase = 0;
+        return false;
+    }
+
+    if (_questPhase == 1)
+    {
+        if (me->GetQuestStatus(_questId) == QUEST_STATUS_INCOMPLETE)
+        {
+            _questPhase = 2;
+            return false;
+        }
+        if (me->GetQuestStatus(_questId) == QUEST_STATUS_COMPLETE)
+        {
+            _questPhase = 3;
+            return false;
+        }
+        if (me->CanInteractWithQuestGiver(giver) && me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
+        {
+            me->AddQuest(qInfo, giver);
+            // AddQuest returns void; only log acceptance if the quest
+            // actually entered the log.
+            if (me->GetQuestStatus(_questId) != QUEST_STATUS_NONE)
+            {
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] quest accepted GUID:%u quest:%u",
+                                   me->GetGUIDLow(), _questId);
+                _questPhase = me->CanCompleteQuest(_questId) ? 3 : 2;
+                return true;
+            }
+        }
+        if (++_questDenyCount >= 5)
+        {
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] quest accept denied GUID:%u quest:%u; disabling",
+                               me->GetGUIDLow(), _questId);
+            _questPhase = 0;
+        }
+        else if (sPlayerBotMgr.IsDebugEnabled() && _questDenyCount == 1)
+            sLog.outString("[PlayerBot] quest accept denied GUID:%u quest:%u interact:%u take:%u add:%u",
+                           me->GetGUIDLow(), _questId,
+                           me->CanInteractWithQuestGiver(giver) ? 1 : 0,
+                           me->CanTakeQuest(qInfo, false) ? 1 : 0,
+                           me->CanAddQuest(qInfo, false) ? 1 : 0);
+        return true;
+    }
+
+    // Phase 3: turn in.
+    if (me->GetQuestStatus(_questId) != QUEST_STATUS_COMPLETE)
+    {
+        _questPhase = 2;
+        return false;
+    }
+    if (me->CanInteractWithQuestGiver(giver))
+    {
+        me->CompleteQuest(_questId);
+        if (me->CanRewardQuest(qInfo, false))
+        {
+            uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
+            me->RewardQuest(qInfo, 0, giver, true);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] quest rewarded GUID:%u quest:%u xpBefore:%u xpAfter:%u",
+                               me->GetGUIDLow(), _questId, xpBefore,
+                               me->GetUInt32Value(PLAYER_XP));
+            _questPhase = 4;
+        }
+        else
+        {
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] quest reward denied GUID:%u quest:%u",
+                               me->GetGUIDLow(), _questId);
+            _questPhase = 4;
+        }
+        return true;
+    }
+    return true;
+}
+
 void PlayerBotAI::OnPlayerLogin()
 {
     _lastLevel = me ? me->GetLevel() : 0;
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
+    InitQuestState();
 }
 
 void PlayerBotAI::OnLevelUp()
@@ -589,6 +1180,11 @@ void PlayerBotAI::AutoEquipForLevel()
 
 void PlayerBotAI::Remove()
 {
+    // TW-008 (AC1): tolerate double removal of a detached controller.
+    if (!me)
+        return;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot] AI removed GUID:%u", me->GetGUIDLow());
     me->setAI(nullptr);
     me = nullptr;
 }
@@ -674,6 +1270,9 @@ bool MageOrgrimmarAttackerAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSessio
 
 void MageOrgrimmarAttackerAI::UpdateAI(const uint32 diff)
 {
+    // TW-008 (AC1): keep the override null-safe for a detached controller.
+    if (!me)
+        return;
     PlayerBotAI::UpdateAI(diff);
     if (me->GetLevel() != 60)
         me->GiveLevel(60);
@@ -874,4 +1473,89 @@ PlayerBotAI* CreatePlayerBotAI(std::string ainame)
     if (ainame == "PlayerBotFleeingAI")
         return new PlayerBotFleeingAI();
     return new PlayerBotAI();
+}
+
+// ---------------------------------------------------------------------------
+// TW-014 (KAP-557): owner-directed follow/stop. A goal is identified by
+// (leader, seq); a seq at or below the current one is stale and must never
+// resume following (e.g. a delayed delivery of an already-stopped goal).
+// ---------------------------------------------------------------------------
+void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
+{
+    if (!me)
+        return;
+    if (seq <= _followSeq)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Follow] goal rejected stale seq:%u current:%u GUID:%u",
+                           seq, _followSeq, me->GetGUIDLow());
+        return;
+    }
+    if (me->GetVictim())
+        me->CombatStop();
+    _followSeq = seq;
+    _followLeaderGuid = leaderGuid;
+    _following = true;
+    _followReached = false;
+    me->GetMotionMaster()->Clear(false);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Follow] active GUID:%u leader:%u seq:%u",
+                       me->GetGUIDLow(), leaderGuid, seq);
+}
+
+void PlayerBotAI::FollowStop()
+{
+    if (!me)
+        return;
+    _following = false;
+    _followLeaderGuid = 0;
+    _followReached = false;
+    // Invalidate the current goal immediately (TW-014 AC1).
+    me->GetMotionMaster()->Clear(true);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Follow] inactive GUID:%u", me->GetGUIDLow());
+}
+
+bool PlayerBotAI::UpdateFollow(uint32 diff)
+{
+    if (!_following || !me || !me->IsAlive() || !me->IsInWorld() || !me->GetMap())
+        return false;
+
+    // Same-map lookup: a leader on another map (or not in world yet) is
+    // temporarily unavailable; the goal stays active and the bot holds
+    // position instead of dropping it.
+    Player* leader = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!leader || !leader->IsAlive())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled() && _followDebugTimer <= diff)
+        {
+            _followDebugTimer = 5000;
+            sLog.outString("[PlayerBot][Follow] leader unavailable GUID:%u leader:%u null:%u dead:%u",
+                           me->GetGUIDLow(), _followLeaderGuid, leader ? 0 : 1,
+                           (leader && !leader->IsAlive()) ? 1 : 0);
+        }
+        else if (sPlayerBotMgr.IsDebugEnabled())
+            _followDebugTimer -= diff;
+        return true;
+    }
+
+    if (me->GetDistance(leader) > kFollowRange)
+    {
+        // The same path-find-to-position pattern idle wander and the quest
+        // giver pursuit use (a player chase is a no-op without a victim).
+        me->GetMotionMaster()->MovePoint(0, leader->GetPositionX(), leader->GetPositionY(),
+                                         leader->GetPositionZ(), MOVE_PATHFINDING);
+        return true;
+    }
+
+    if (!me->GetMotionMaster()->empty())
+        me->GetMotionMaster()->Clear(false);
+    if (!_followReached)
+    {
+        _followReached = true;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Follow] reached GUID:%u leader:%u dist:%.2f seq:%u",
+                           me->GetGUIDLow(), _followLeaderGuid, me->GetDistance(leader), _followSeq);
+    }
+    return true;
 }

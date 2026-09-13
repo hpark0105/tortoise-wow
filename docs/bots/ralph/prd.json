@@ -1,0 +1,1297 @@
+﻿{
+  "project": "Tortoise-WoW Living World",
+  "branchName": "feature/kap-543-bot-living-world",
+  "description": "Preserve completed persistence foundations; next qualify one useful Turtle companion by small, provenance-reviewed Playerbots behavior ports. Hosted Codex governs dispatch, review, commits and acceptance.",
+  "epicKey": "KAP-543",
+  "epicUrl": "https://parkenstein.atlassian.net/browse/KAP-543",
+  "sourcePrd": "docs/prd/living-world.prd",
+  "userStories": [
+    {
+      "id": "TW-001",
+      "title": "Diagnose the pinned candidate test-configuration mismatch",
+      "description": "As the personal server operator, I want diagnose the pinned candidate test-configuration mismatch so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Diagnose the pinned candidate test-configuration mismatch\nGiven a pinned candidate and a head-provided build status\nWhen the regression extraction marker is compared with its current source\nThen the report identifies the missing contract and distinguishes unexecuted tests from failed tests",
+        "Scenario: Reject or handle the failure path\nGiven a proposed repair would change the meaning of the tested behavior\nWhen this condition is detected\nThen the worker records that uncertainty rather than deleting the assertion to obtain a pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Read-only source comparison; report exact revision and bounded source references. No duplicate server build while the head's probe is running.",
+      "dependsOn": [],
+      "allowedScope": [
+        "docker/bot-candidate.Dockerfile",
+        "docs/bots/feasibility.md",
+        "local/bot-engine-candidate/tests/architecture/CMakeLists.txt",
+        "local/bot-engine-candidate/tests/architecture/ForkIntegrationTest.cpp",
+        "local/bot-engine-candidate/modules/mod-playerbots/src/playerbot/strategy/actions/BattleGroundTactics.cpp"
+      ],
+      "jiraKey": "KAP-544",
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T16:57:24.366-0500"
+    },
+    {
+      "id": "TW-002",
+      "title": "Record the smallest viable bot-engine integration boundary",
+      "description": "As the personal server operator, I want record the smallest viable bot-engine integration boundary so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Record the smallest viable bot-engine integration boundary\nGiven the bundled-engine blockers and pinned candidate findings\nWhen the head reviews the proposed execution-engine boundary\nThen an ADR lists selected reuse, required host hooks, excluded changes and unresolved runtime proof",
+        "Scenario: Reject or handle the failure path\nGiven a dependency requires unrelated core scheduling or content changes\nWhen this condition is detected\nThen it is separated for review rather than silently importing the whole fork"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Worker proposes only; head records the architecture decision. Reopen at most the referenced host interfaces before expanding scope.",
+      "dependsOn": [
+        "TW-001"
+      ],
+      "allowedScope": [
+        "docs/bots/feasibility.md",
+        "docs/bots/engine-decision.md",
+        "src/game/ScriptObjects.h",
+        "src/game/Objects/Player.h"
+      ],
+      "jiraKey": "KAP-545",
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:10:12.450-0500"
+    },
+    {
+      "id": "TW-003",
+      "title": "Add opt-in world-processing-time measurements",
+      "description": "As the personal server operator, I want add opt-in world-processing-time measurements so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Add opt-in world-processing-time measurements\nGiven a disposable zero-bot world with measurements enabled\nWhen world updates and intentional frame sleeps run\nThen bounded telemetry reports processing-time counts and p95/p99 separately from elapsed tick intervals",
+        "Scenario: Reject or handle the failure path\nGiven telemetry is disabled or its output consumer is unavailable\nWhen this condition is detected\nThen the world remains nonblocking and retains bounded memory"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Compile server; test known duration samples, percentile edges and disabled mode; run disposable baseline. No live deployment.",
+      "dependsOn": [],
+      "allowedScope": [
+        "src/mangosd/WorldRunnable.cpp",
+        "src/game/PerformanceMonitor.h",
+        "src/game/PerformanceMonitor.cpp",
+        "src/game/World.cpp"
+      ],
+      "jiraKey": "KAP-546",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:38:15.698-0500"
+    },
+    {
+      "id": "TW-004",
+      "title": "Specify persistent bot ownership and save invariants",
+      "description": "As the personal server operator, I want specify persistent bot ownership and save invariants so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Specify persistent bot ownership and save invariants\nGiven persistent and ephemeral bots have different intended lifetimes\nWhen identity, login, save and logout paths are specified\nThen the contract binds a persistent bot to a real owned account and character while preserving ephemeral no-save behavior",
+        "Scenario: Reject or handle the failure path\nGiven session account identity disagrees with character ownership\nWhen this condition is detected\nThen the contract rejects login/save and never reassigns a human character"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Source-backed design only; head approves before schema or save-path changes. Include interrupted provisioning and stale callback cases.",
+      "dependsOn": [
+        "TW-002"
+      ],
+      "allowedScope": [
+        "docs/bots/persistence-contract.md",
+        "src/game/Objects/Player.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/WorldSession.cpp"
+      ],
+      "jiraKey": "KAP-547",
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:40:52.747-0500"
+    },
+    {
+      "id": "TW-005",
+      "title": "Add versioned bot-ownership metadata migrations",
+      "description": "As the personal server operator, I want add versioned bot-ownership metadata migrations so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Add versioned bot-ownership metadata migrations\nGiven a disposable character database and an approved identity contract\nWhen the ownership metadata migration is applied and the updater is rerun\nThen stable bot identity, ownership, type and provisioning version are retained without duplicate records",
+        "Scenario: Reject or handle the failure path\nGiven a metadata row references an unowned or incompatible character\nWhen this condition is detected\nThen validation reports the mismatch without changing human records"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Use the actual updater directory verified in source; migration tests in a disposable database, including an existing-character fixture. No live migration.",
+      "dependsOn": [
+        "TW-004"
+      ],
+      "allowedScope": [
+        "sql/database_updates/characters/",
+        "docs/bots/persistence-contract.md",
+        "docker/"
+      ],
+      "jiraKey": "KAP-548",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T17:47:22.862-0500"
+    },
+    {
+      "id": "TW-006",
+      "title": "Validate persistent bot ownership before session login",
+      "description": "As the personal server operator, I want validate persistent bot ownership before session login so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Validate persistent bot ownership before session login\nGiven a registered persistent bot and matching real account/character ownership\nWhen the bot requests a session\nThen login uses the approved account identity and preserves the character's stored owner",
+        "Scenario: Reject or handle the failure path\nGiven ownership is mismatched or a conflicting session exists\nWhen this condition is detected\nThen login is rejected without replacing the human session or rewriting ownership"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Compile; isolated valid-owner, wrong-owner and conflicting-session tests. Adapt to the approved engine; do not retain synthetic IDs for persistent saves.",
+      "dependsOn": [
+        "TW-005"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Handlers/CharacterHandler.cpp",
+        "src/game/WorldSession.cpp"
+      ],
+      "jiraKey": "KAP-549",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T22:50:06.290-0500"
+    },
+    {
+      "id": "TW-007",
+      "title": "Enable saving only for explicitly owned persistent bots",
+      "description": "As the personal server operator, I want enable saving only for explicitly owned persistent bots so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Enable saving only for explicitly owned persistent bots\nGiven an authenticated bot session satisfies the approved persistent ownership contract\nWhen normal character save executes\nThen earned state is written under the existing real owner through normal save paths",
+        "Scenario: Reject or handle the failure path\nGiven the bot is ephemeral or ownership validation fails\nWhen this condition is detected\nThen the existing no-save protection remains effective and unrelated human records are unchanged"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Compile; disposable save tests for persistent, ephemeral and mismatched identities. Do not merely remove GetBot() guard.",
+      "dependsOn": [
+        "TW-006"
+      ],
+      "allowedScope": [
+        "src/game/Objects/Player.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/WorldSession.cpp"
+      ],
+      "jiraKey": "KAP-550",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "mvp",
+      "acceptanceState": "Implemented and Jira Done; review follow-up is represented by MVP-001 or MVP-002.",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T19:59:48.509-0500"
+    },
+    {
+      "id": "TW-008",
+      "title": "Repair bundled bot initialization and null-entry safety",
+      "description": "As the personal server operator, I want repair bundled bot initialization and null-entry safety so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Repair bundled bot initialization and null-entry safety\nGiven a newly constructed or detached bundled bot controller\nWhen its first update executes\nThen all decision timers have deterministic initialization and a null player is checked before dereference",
+        "Scenario: Reject or handle the failure path\nGiven a valid player is completing a teleport\nWhen this condition is detected\nThen required acknowledgement handling remains reachable and correct"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Compile; meaningful null/first-update/teleport fixtures. If the approved engine replaces this class, head records supersession and remaps the test rather than performing an obsolete edit.",
+      "dependsOn": [
+        "TW-002"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotAI.cpp"
+      ],
+      "jiraKey": "KAP-551",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T20:17:28.394-0500"
+    },
+    {
+      "id": "TW-009",
+      "title": "Make repeated and stale bot logins lifecycle-safe",
+      "description": "As the personal server operator, I want make repeated and stale bot logins lifecycle-safe so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Make repeated and stale bot logins lifecycle-safe\nGiven one owned bot is loading or online\nWhen the same add request is repeated\nThen one session and one matching state transition exist with accurate loading/online counters",
+        "Scenario: Reject or handle the failure path\nGiven an old asynchronous completion arrives after cancellation and retry\nWhen this condition is detected\nThen its generation is rejected and the current session is preserved"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Compile; asynchronous login failure, duplicate add, cancellation/retry and logout tests. Online means successful player entry, not merely queued SQL.",
+      "dependsOn": [
+        "TW-006",
+        "TW-008"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Handlers/CharacterHandler.cpp"
+      ],
+      "jiraKey": "KAP-552",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "mvp",
+      "acceptanceState": "Implemented and Jira Done; review follow-up is represented by MVP-001 or MVP-002.",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T22:50:05.179-0500"
+    },
+    {
+      "id": "TW-010",
+      "title": "Provision one persistent test bot idempotently",
+      "description": "As the personal server operator, I want provision one persistent test bot idempotently so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Provision one persistent test bot idempotently\nGiven an empty disposable lab and one requested bot identity\nWhen provisioning runs twice\nThen exactly one valid owned account and character exist with resumable provisioning status",
+        "Scenario: Reject or handle the failure path\nGiven the first run stops between account and character creation\nWhen this condition is detected\nThen retry completes the same identity without deleting unrelated records"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Use native account/character creation paths; test at each interruption boundary. One identity only; normal class/race legality and no copied human character data.",
+      "dependsOn": [
+        "TW-007",
+        "TW-009"
+      ],
+      "allowedScope": [
+        "docker/",
+        "src/game/PlayerBots/",
+        "docs/bots/persistence-contract.md"
+      ],
+      "jiraKey": "KAP-553",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "history",
+      "validation": [],
+      "jiraUpdated": "2026-09-11T22:50:04.077-0500"
+    },
+    {
+      "id": "MVP-001",
+      "title": "Exercise ownership rejection at the save boundary",
+      "description": "Exercise ownership rejection at the save boundary",
+      "acceptanceCriteria": [
+        "Scenario: Reject an invalid persistent save at execution time\nGiven an owned bot is logged in and its ownership becomes invalid immediately before SaveToDB\nWhen periodic or logout save reaches the ownership guard\nThen the save is rejected and character, inventory and quest rows remain unchanged",
+        "Scenario: Keep ephemeral sessions unsaved\nGiven an ephemeral bot session reaches the same save boundary\nWhen SaveToDB executes\nThen the existing no-save behavior remains effective"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Accepted from ownership-boundary lab evidence; full card: docs/bots/ralph/mvp/mvp-001.md",
+      "dependsOn": [],
+      "allowedScope": [
+        "docker/test_bot_save_guard.py"
+      ],
+      "validation": [
+        "python docker/test_bot_save_guard.py"
+      ],
+      "jiraKey": "KAP-550",
+      "sourceStory": "TW-007",
+      "issueType": "Repair",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "mvp",
+      "jiraUpdated": "2026-09-11T19:59:48.509-0500"
+    },
+    {
+      "id": "MVP-002",
+      "title": "Deliver and reject a stale login completion",
+      "description": "Deliver and reject a stale login completion",
+      "acceptanceCriteria": [
+        "Scenario: Reject an old generation after retry\nGiven generation one was cancelled and generation two is current\nWhen a deterministic test hook delivers generation one completion\nThen the old completion is rejected and generation two remains authoritative",
+        "Scenario: Disable the hook by default\nGiven a normal server configuration\nWhen bot login runs\nThen no synthetic completion can be injected"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Accepted from 7/7 lifecycle and stale-generation lab evidence; full card: docs/bots/ralph/mvp/mvp-002.md",
+      "dependsOn": [
+        "MVP-001"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Handlers/CharacterHandler.cpp",
+        "docker/test_bot_login_lifecycle.py"
+      ],
+      "validation": [
+        "docker compose build world",
+        "python docker/test_bot_login_lifecycle.py"
+      ],
+      "jiraKey": "KAP-552",
+      "sourceStory": "TW-009",
+      "issueType": "Repair",
+      "headReviewRequired": true,
+      "jiraStatus": "Done",
+      "milestone": "mvp",
+      "jiraUpdated": "2026-09-11T22:50:05.179-0500"
+    },
+    {
+      "id": "MVP-003",
+      "title": "Prevent autonomous attacks on players and friendly units",
+      "description": "Prevent autonomous attacks on players and friendly units",
+      "acceptanceCriteria": [
+        "Scenario: Select only legal hostile NPC targets\nGiven an idle owned bot can see its owner, friendly units, neutral units and a hostile creature\nWhen autonomous target selection runs\nThen only a legal hostile creature may be attacked",
+        "Scenario: Never initiate PvP autonomously\nGiven any player is within the scan radius\nWhen the bot is not already defending itself\nThen it does not initiate an attack on that player"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "Accepted: source/build guard plus 2/2 disposable two-faction target-policy lifecycle lab; full card: docs/bots/ralph/mvp/mvp-003.md",
+      "dependsOn": [
+        "MVP-002"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/"
+      ],
+      "validation": [
+        "docker compose build world",
+        "focused disposable target-policy test"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Subtask",
+      "headReviewRequired": true,
+      "jiraStatus": "Mapped locally; Jira parent status unchanged",
+      "milestone": "mvp"
+    },
+    {
+      "id": "MVP-004",
+      "title": "Prove legitimate combat XP for one owned bot",
+      "description": "Prove legitimate combat XP for one owned bot",
+      "acceptanceCriteria": [
+        "Scenario: Earn XP through normal combat credit\nGiven one owned bot and a deterministic eligible hostile creature in a disposable world\nWhen the bot kills the creature through normal combat\nThen its XP increases through the server credit path and the before/after evidence names the bot identity"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "Accepted: normal combat against Kobold Vermin changed owned bot XP from 0 to 54; full card: docs/bots/ralph/mvp/mvp-004.md",
+      "dependsOn": [
+        "MVP-003"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "validation": [
+        "focused disposable combat-XP scenario"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-554",
+      "issueType": "Subtask",
+      "headReviewRequired": true,
+      "jiraStatus": "Mapped locally; Jira parent status unchanged",
+      "milestone": "mvp"
+    },
+    {
+      "id": "MVP-005",
+      "title": "Add one bounded normal corpse-loot interaction",
+      "description": "Add one bounded normal corpse-loot interaction",
+      "acceptanceCriteria": [
+        "Scenario: Loot one eligible corpse through game handlers\nGiven the owned bot killed a creature with deterministic loot\nWhen its bounded loot action executes\nThen the item enters inventory through normal loot rules and no item is fabricated by SQL or GM command",
+        "Scenario: Respect ownership and capacity\nGiven loot is unavailable, reserved, or inventory is full\nWhen the bot tries to loot\nThen it does not duplicate or take the item illegally"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "Accepted 2026-09-13: held-target combat + normal corpse loot proved in a disposable lab (python docker/test_bot_loot.py -v, 1/1 in 62.2s). Bot Lootbot GUID:500102 killed seeded Kobold Vermin 2500002 via normal combat and looted item 117 through SendLoot/Unit::Kill paths: 'corpse loot stored GUID:500102 item:117 before:0 after:1'. Root cause of the earlier 0-slot loot: fresh lab DBs replayed all 149 sql/database_updates files at world start (base dump ships an empty legacy migrations table), clobbering the seeded creature_template.loot_id; fixed by docker/init-db-updates.sh applying+recording updates (SHA-1, uppercase) at db init. Full card: docs/bots/ralph/mvp/mvp-005.md",
+      "dependsOn": [
+        "MVP-004"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "validation": [
+        "docker compose build world",
+        "focused disposable loot scenario"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-554",
+      "issueType": "Subtask",
+      "headReviewRequired": true,
+      "jiraStatus": "Mapped locally; Jira parent status unchanged",
+      "milestone": "mvp"
+    },
+    {
+      "id": "MVP-006",
+      "title": "Add one declared supported quest progression path",
+      "description": "Add one declared supported quest progression path",
+      "acceptanceCriteria": [
+        "Scenario: Progress one named quest through normal rules\nGiven one declared low-level quest and an eligible owned bot\nWhen the bot accepts it and performs its supported objective\nThen normal quest APIs record progress and the evidence identifies the exact quest and objective",
+        "Scenario: Fail closed outside the declared quest\nGiven a quest is unsupported or prerequisites fail\nWhen progression is requested\nThen the bot does not fabricate credit or rewards"
+      ],
+      "priority": 16,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): declared quest 456 proven end-to-end in two disposable labs (python docker/test_bot_quest.py -v, 7/7 in 305s). Flow lab (Questbot GUID:500104): accepted from seeded NPC 2079, killed 7x2031 + 4x1984 via normal combat, core auto-completed on final credit, bot turned in and was rewarded: 'quest rewarded GUID:500104 quest:456 xpBefore:648 xpAfter:818'; DB row persisted with rewarded=1 and XP saved (0 -> 818); no [CRASH]. Fail-closed lab (no giver): init only, no credit/reward, quest=none xp=0 over 90s; no [CRASH]. Fixes in PlayerBotAI: player chase is a no-op without the chased unit as victim (ChaseMovementGenerator::_lostTarget), so quest-giver pursuit now uses a pathfinding MovePoint; phase 2->3 also transitions on GetQuestStatus==COMPLETE because the core auto-completes and CanCompleteQuest then returns false. Test schema correction: no characters.questlog in this fork; character_queststatus.status uses the fork enum (COMPLETE=1, INCOMPLETE=3) written verbatim, rewarded rows persist with rewarded=1. Debug-gated quest state/req/attack/giver-loss lines added; head-approved one-line GetSpecialFlags() getter in QuestDef.h (observability only). Evidence under gitignored local/. Full card: docs/bots/ralph/mvp/mvp-006.md",
+      "dependsOn": [
+        "MVP-005"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "validation": [
+        "docker compose build world",
+        "focused disposable supported-quest scenario"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-554",
+      "issueType": "Subtask",
+      "headReviewRequired": true,
+      "jiraStatus": "Mapped locally; Jira parent status unchanged",
+      "milestone": "mvp"
+    },
+    {
+      "id": "MVP-007",
+      "title": "Prove exact earned state across world restart",
+      "description": "Prove exact earned state across world restart",
+      "acceptanceCriteria": [
+        "Scenario: Preserve earned state after restart\nGiven recorded identity, XP, legitimate loot and supported quest progress\nWhen the disposable world performs a clean save, stops and restarts\nThen the same identity and complete recorded state match after login"
+      ],
+      "priority": 17,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): exact earned state across a clean world restart proved in a disposable port-free lab (python docker/test_bot_restart.py -v, 4/4 in 132.6s; evidence under gitignored local/tortoise-bot-restart-8af716bec00f-20260913T100008Z). Restbot GUID:500105 earned quest 456 ('quest rewarded GUID:500105 quest:456 xpBefore:648 xpAfter:818') and item 117 from the deterministic seeded Kobold ('corpse loot stored GUID:500105 item:117 before:0 after:1'); the clean SIGTERM stop logged the bot out through its normal path ('[PlayerBot][Logout] Restbot GUID:500105 Acc:1000500105'), saved and halted cleanly with no SIGSEGV; the post-restart DB snapshot matched the pre-restart snapshot exactly: level 3, xp 836 (818 quest + 18 Kobold), money 100035, map 0/zone 12, identical position, item 117 instance (guid 12, count 1), ownership 1000500105 v2, roster 1, quest row persisted (character_queststatus rewarded=1). Two root causes fixed: (1) lab isolation gap - the earn phase left natural creatures alive and a natural hostile killed the seeded Kobold itself, so with zero player damage IsLootAllowedDueToDamageOrigin() was false, Unit::Kill cleared the recipient and SendLoot silently refused the corpse; the seed now clears natural creatures in the spawn box before inserting the seeded pack, and the clean stop is gated on both earnings because the quest phase machine preempts the combat loop; the DB auto-updater was verified a no-op (146 migrations found, none executed); (2) core shutdown crash, latent on the personal server - bot sessions are socketless so KickPlayer() is a no-op and World::Shutdown() left the bot in the world, where the grid unloader crashed the visibility cleanup (SIGSEGV in Player::IsInVisibleList via Camera::UpdateVisibilityForOwner) before the final save ran; World::Shutdown() now calls sPlayerBotMgr.DeleteAll() (previously never called) before KickAll(), driving each bot through the normal logout/save path. Test hardening: non-vacuous single-item assertion, captured post-stop world.log with a SIGSEGV check, _state() reads item_instance (this fork's character_inventory has no item_guid). Gates: docker compose build world (tortoise-local:dev sha256:f3dc289f...), py_compile, docker compose config --quiet, git diff --check. Full card: docs/bots/ralph/mvp/mvp-007.md",
+      "dependsOn": [
+        "MVP-006"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "validation": [
+        "focused disposable restart comparison"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-554",
+      "issueType": "Subtask",
+      "headReviewRequired": true,
+      "jiraStatus": "Mapped locally; Jira parent status unchanged",
+      "milestone": "mvp"
+    },
+    {
+      "id": "MVP-008",
+      "title": "Prove exact earned state after isolated backup restore",
+      "description": "Prove exact earned state after isolated backup restore",
+      "acceptanceCriteria": [
+        "Scenario: Restore earned state into a second disposable project\nGiven the restart proof passed and a bounded backup exists\nWhen that backup is restored into a separate port-free project\nThen identity, ownership, XP, inventory and supported quest state match the source snapshot",
+        "Scenario: Protect the personal volume\nGiven source or target identity is not the expected disposable project\nWhen restore or cleanup is requested\nThen the operation stops before changing any volume"
+      ],
+      "priority": 18,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): exact earned state proven to survive an isolated backup restore in two disposable port-free labs (python docker/test_bot_restore.py -v, 8/8 in 226.4s). Lab A (Restorebot GUID:500106) earned quest 456 (rewarded) + item 117, clean stop (no SIGSEGV), snapshot S1: level 3, xp 872, money 100035, item 117 instance, quest row status=1 rewarded=1 with persisted 7x2031+4x1984 mobcounts, ownership 1000500106 v2, roster 1; the lab db then backed up through /ops/backup.sh (the personal backup.ps1 script) with a sha256 sidecar. Lab B (separate project, fresh db) imported it through /ops/restore-check.sh (the personal test-restore.ps1 script): filename guard + sha256 + import + bootstrap check, then rows matched S1 exactly before the world ran. Restored world run: the bot re-logged and resumed from saved quest state (quest init phase:3), reached the restored quest giver, and the core fail-closed on re-reward (quest reward denied; no second quest rewarded, no double XP); state after the run still matched S1 (position within 50 yd of wander). restore-check.sh rejected a foreign filename before touching the db; the personal server containers' StartedAt was unchanged. Harness: write_compose/boot_lab gained optional extra db volumes (docker/ -> /ops ro, evidence backups -> /backups rw|ro) with module-level bind helpers. Full card: docs/bots/ralph/mvp/mvp-008.md",
+      "dependsOn": [
+        "MVP-007"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "validation": [
+        "./docker/backup.ps1 against disposable source",
+        "./docker/test-restore.ps1 with isolated target",
+        "exact state comparison"
+      ],
+      "jiraKey": "KAP-554",
+      "sourceStory": "TW-011",
+      "issueType": "Subtask",
+      "headReviewRequired": true,
+      "jiraStatus": "In Progress",
+      "milestone": "mvp",
+      "jiraUpdated": "2026-09-13T10:05:39.886-0500"
+    },
+    {
+      "id": "TW-011",
+      "title": "Prove one bot's earned state survives restart and restore",
+      "description": "As the personal server operator, I want prove one bot's earned state survives restart and restore so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Prove one bot's earned state survives restart and restore\nGiven one lab bot has legitimately earned XP, an item and a supported quest update\nWhen the world restarts and a backup is restored into a second disposable project\nThen the same bot identity, owner and earned records match the pre-restart evidence",
+        "Scenario: Reject or handle the failure path\nGiven the save or backup is incomplete\nWhen this condition is detected\nThen the check fails with bounded evidence and cannot overwrite the personal volume"
+      ],
+      "priority": 19,
+      "passes": true,
+      "notes": "Complete 2026-09-13: restart proof (MVP-007) and isolated restore proof (MVP-008) both head-accepted in disposable labs - earned XP, item and quest state match across restart, backup and restore, with fail-closed re-reward protection and personal-volume protection. Evidence and full cards: docs/bots/ralph/progress.txt, docs/bots/ralph/mvp/mvp-007.md, docs/bots/ralph/mvp/mvp-008.md. Original constraint honored: real game/save integration only, complete relevant state compared (not table existence), no fabricated SQL rewards as gameplay proof.",
+      "dependsOn": [
+        "TW-010",
+        "MVP-008"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/persistence-evidence.md"
+      ],
+      "jiraKey": "KAP-554",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "In Progress",
+      "milestone": "mvp",
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:39.886-0500"
+    },
+    {
+      "id": "TW-014",
+      "title": "Add deterministic follow and stop for one owned companion",
+      "description": "As the personal server operator, I want add deterministic follow and stop for one owned companion so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Add deterministic follow and stop for one owned companion\nGiven one owned companion in the human's test party and no LLM service\nWhen the owner issues follow and then stop\nThen normal pathfinding follows the leader and stop invalidates the current goal immediately",
+        "Scenario: Reject or handle the failure path\nGiven a different player commands the bot or an old goal is delivered after stop\nWhen this condition is detected\nThen the command is rejected and the bot does not resume the invalidated goal"
+      ],
+      "priority": 20,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): deterministic owner-only follow/stop proven in a disposable lab (python docker/test_bot_follow.py -v -> 10/10 in 264.2s) - owner follow pathfinds and holds within 2 yd of the owner from a 32 yd seed, stop invalidates the current goal immediately, foreign-player commands are rejected (not-owner audit line), and a stale goal delivered after stop is rejected by the sequence guard without resuming; DB same-save-tick samples, ownership rows, clean shutdown and personal-volume protection all verified. Design and full evidence: docs/bots/companion-scenarios.md, docs/bots/ralph/mvp/mvp-009.md. Schema: additive migration 20260913120000_character.sql (bot_ownership.owner_account_id, NULL = unowned). No combat-role or natural-language scope in this story.",
+      "dependsOn": [
+        "TW-011",
+        "MVP-003"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Commands/",
+        "docs/bots/companion-scenarios.md"
+      ],
+      "jiraKey": "KAP-557",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "In Progress",
+      "milestone": "mvp",
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:44.711-0500"
+    },
+    {
+      "id": "TW-012",
+      "title": "Make bot population boundaries deterministic",
+      "description": "As the personal server operator, I want make bot population boundaries deterministic so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Make bot population boundaries deterministic\nGiven roster sizes of zero, one and ten with explicit min/max targets\nWhen the director reconciles requested population\nThen exact target boundaries are respected and loading, online and offline counts remain distinct",
+        "Scenario: Reject or handle the failure path\nGiven the requested target exceeds valid roster capacity or a login fails\nWhen this condition is detected\nThen actual capacity is reported without underflow, a fake online count or an unbounded retry"
+      ],
+      "priority": 30,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 by hosted Codex: exact zero, one/capacity-clamped, and ten-bot targets passed in disposable runtime labs (4/4 in 238.286s). Reconciliation counts online plus loading sessions, exact min=max targets do not churn, and weighted add/delete indices are bounded. Full card: docs/bots/ralph/mvp/tw-012.md.",
+      "dependsOn": [
+        "TW-002",
+        "TW-009"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h"
+      ],
+      "jiraKey": "KAP-555",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "In Progress",
+      "milestone": "post-mvp",
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:41.484-0500"
+    },
+    {
+      "id": "TW-013",
+      "title": "Validate a paced ten-bot disposable cohort",
+      "description": "As the personal server operator, I want validate a paced ten-bot disposable cohort so the living-world rollout is safe and testable.",
+      "acceptanceCriteria": [
+        "Scenario: Validate a paced ten-bot disposable cohort\nGiven ten valid persistent bot identities in a disposable project\nWhen a bounded login schedule activates the cohort\nThen ten distinct successful sessions are observed with saved ownership intact and recorded resource/tick measurements",
+        "Scenario: Reject or handle the failure path\nGiven a bot cannot load or resource thresholds are exceeded\nWhen this condition is detected\nThen new logins back off and the report identifies the achieved count without repeatedly recreating identities"
+      ],
+      "priority": 31,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 by hosted Codex: ten distinct owned sessions remained online for 1800.8s in a disposable port-free lab; 1548 wander actions, 153 resource samples, 359 processing-telemetry windows, and no crash. World CPU mean/p95/max 36.08/50.32/62.09%; memory 1.065 -> 1.267 GiB. Full report: docs/bots/cohort-ten.md.",
+      "dependsOn": [
+        "TW-011",
+        "TW-012"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/cohort-ten.md"
+      ],
+      "jiraKey": "KAP-556",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "In Progress",
+      "milestone": "post-mvp",
+      "validation": [],
+      "jiraUpdated": "2026-09-13T10:05:43.115-0500"
+    },
+    {
+      "id": "NEXT-001",
+      "title": "Configure legal persistent-bot race, class, gender and appearance",
+      "description": "Allow an operator to declare each persistent bot identity without hardcoded Human Warrior creation.",
+      "acceptanceCriteria": [
+        "Scenario: Create a configured legal identity\nGiven a name and legal race, class, gender and appearance specification\nWhen native provisioning runs\nThen Player::Create receives that specification and homebind derives from the matching playercreateinfo row",
+        "Scenario: Reject an illegal or changed identity\nGiven an illegal combination or a specification that conflicts with an existing marker\nWhen provisioning runs\nThen it fails closed without replacing or mutating the existing character"
+      ],
+      "priority": 40,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 (park-head local-Qwen): the provision config now accepts Name or Name,race,class,gender,skin,face,hairStyle,hairColor,facialHair; the identity is persisted on bot_provision_state (additive idempotent migration 20260913190000_character.sql) and Player::Create plus homebind receive the spec. A 4/4 disposable lab (80.525s) proved a configured female Dwarf Hunter, fail-closed rejection of a changed spec, and rejection of an illegal race/class combination with no character created. Jira story not created. Full card: docs/bots/ralph/mvp/next-001.md",
+      "dependsOn": [
+        "TW-011"
+      ],
+      "allowedScope": [
+        "docker/server.py",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "docker/"
+      ],
+      "validation": [
+        "docker compose build world",
+        "focused provisioning matrix in a disposable project"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "post-mvp"
+    },
+    {
+      "id": "REF-001",
+      "title": "Record applicable AzerothCore and playerbots design references",
+      "description": "Rank upstream projects by useful behavior, validation patterns, compatibility and licensing risk without changing the Turtle core.",
+      "acceptanceCriteria": [
+        "Scenario: Select bounded upstream references\nGiven the Turtle 1.18.1 living-world requirements\nWhen current AzerothCore and maintained playerbots projects are reviewed\nThen useful controller, population, load-test and operations patterns are mapped to local work with direct source URLs",
+        "Scenario: Reject incompatible reuse\nGiven a project requires AzerothCore 3.3.5a APIs, schemas or protocol\nWhen applicability is assessed\nThen it is recorded as design-only or rejected rather than added as a runtime dependency"
+      ],
+      "priority": 41,
+      "passes": true,
+      "notes": "Accepted 2026-09-13 by hosted Codex. Ranked review and resulting boundaries: docs/bots/azerothcore-reference-review.md. The official azerothcore/mod-playerbots is not ready; maintained mod-playerbots requires its custom WotLK core. AzerothGhost informs scaled scenario orchestration only. No upstream code imported.",
+      "dependsOn": [
+        "NEXT-001"
+      ],
+      "allowedScope": [
+        "docs/bots/azerothcore-reference-review.md",
+        "docs/bots/ralph/"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "post-mvp",
+      "validation": [
+        "source URLs opened 2026-09-13",
+        "git diff --check"
+      ]
+    },
+    {
+      "id": "CMP-010",
+      "title": "Use real party membership for an owned companion roster",
+      "description": "Recruit, dismiss and recall an owned companion through normal Group state while keeping durable owner authority.",
+      "acceptanceCriteria": [
+        "Scenario: Recruit an owned companion into the player's party\nGiven an online human owner and an online owned companion\nWhen the owner recruits the companion\nThen the normal Group system contains both players, the human remains leader, and the binding survives companion logout and recall",
+        "Scenario: Reject an unsafe roster change\nGiven combat, a full party, a foreign owner, or a stale roster sequence\nWhen recruit, dismiss, or recall is requested\nThen the request is rejected without changing the group or ownership rows"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-010.md Existing dirty party/invite edits and untracked docker/test_bot_party.py must be inventoried and reviewed by hosted head before dispatch; never overwrite or claim them as new worker work.",
+      "dependsOn": [
+        "TW-014",
+        "NEXT-001",
+        "REF-001",
+        "PORT-001"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Commands/",
+        "sql/database_updates/character/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-010.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "focused disposable group lifecycle lab"
+      ],
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "CMP-011",
+      "title": "Add deterministic assist, defend and attack commands",
+      "description": "Create a typed observation-trigger-action seam for owner-authorized party combat commands.",
+      "acceptanceCriteria": [
+        "Scenario: Execute an owner-selected party action\nGiven an owned companion in the owner party\nWhen the owner issues assist, defend, or attack-marked-target\nThen the controller selects only a legal hostile target and normal game systems execute it",
+        "Scenario: Reject an invalid action\nGiven a stale goal, foreign command, friendly target, missing target or unreachable target\nWhen the command reaches the world thread\nThen it is rejected and cannot resume after stop"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Roll-up acceptance only; implementation split into PORT-003 through PORT-010. Do not independently implement the old broad card.",
+      "dependsOn": [
+        "PORT-010"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "src/game/Commands/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-011.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "focused disposable command authorization and target-safety lab"
+      ],
+      "executionMode": "hosted-acceptance",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "CMP-012",
+      "title": "Implement one legal tank threat policy",
+      "description": "Make one declared tank class establish and recover threat during a small normal pull.",
+      "acceptanceCriteria": [
+        "Scenario: Tank a declared small pull\nGiven a supported tank class with learned legal abilities and normal gear\nWhen the party starts a declared two-creature pull\nThen the tank establishes threat before damage companions engage and reacts when a non-tank holds threat",
+        "Scenario: Avoid an unsafe pull\nGiven no healer resources, an uncontrolled extra target or an unreachable enemy\nWhen the tank evaluates the pull\nThen it waits, recovers or stops with a bounded reason"
+      ],
+      "priority": 64,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-012.md",
+      "dependsOn": [
+        "CMP-011"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-012.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "declared tank-class two-creature pull lab"
+      ]
+    },
+    {
+      "id": "CMP-013",
+      "title": "Implement one legal healer triage policy",
+      "description": "Make one declared healer class prioritize party survival, range and mana through normal spells.",
+      "acceptanceCriteria": [
+        "Scenario: Heal a declared small pull\nGiven a supported healer class in the owner party\nWhen party health falls during combat\nThen the healer prioritizes survival using learned legal spells while respecting range, line of sight and mana",
+        "Scenario: Recover before the next pull\nGiven low mana, no legal heal or an unreachable party member\nWhen the healer evaluates readiness\nThen the party waits or reports the blocker instead of starting another pull"
+      ],
+      "priority": 65,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-013.md",
+      "dependsOn": [
+        "CMP-011"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-013.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "declared healer-class resource and triage lab"
+      ]
+    },
+    {
+      "id": "CMP-014",
+      "title": "Implement damage assist and pull discipline",
+      "description": "Make one declared damage class assist the tank without extra pulls or breaking controlled targets.",
+      "acceptanceCriteria": [
+        "Scenario: Assist the party tank\nGiven a supported damage class and established tank target\nWhen the damage companion enters combat\nThen it attacks that target with learned legal abilities and does not pull an unselected nearby enemy",
+        "Scenario: Preserve control and stop authority\nGiven a controlled target or owner stop command\nWhen an offensive action is considered\nThen the companion does not damage the controlled target and no invalidated action resumes"
+      ],
+      "priority": 66,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/cmp-014.md",
+      "dependsOn": [
+        "CMP-011",
+        "CMP-012"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/cmp-014.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P2",
+      "validation": [
+        "declared damage-class pull-discipline lab"
+      ]
+    },
+    {
+      "id": "POP-020",
+      "title": "Maintain independent regional activity and report it",
+      "description": "Assign ambient bots across regions, pace activity and expose real active/reduced/parked counts without following the human.",
+      "acceptanceCriteria": [
+        "Scenario: Maintain activity away from the human\nGiven persistent bots assigned across at least six zones\nWhen the human remains in one zone for sixty minutes\nThen configured remote-zone floors remain active and meaningful actions succeed in three human-free zones",
+        "Scenario: Degrade under load without hiding it\nGiven world processing exceeds a configured threshold\nWhen optional work is reduced\nThen new logins pause first, required activity remains, and status reports requested, active, reduced-detail and parked counts"
+      ],
+      "priority": 70,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/pop-020.md",
+      "dependsOn": [
+        "TW-013",
+        "PORT-010"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/pop-020.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P3",
+      "validation": [
+        "sixty-minute multi-zone disposable activity lab"
+      ]
+    },
+    {
+      "id": "POP-021",
+      "title": "Qualify fifty active bots for thirty minutes",
+      "description": "Run the first staged scale gate with paced activation, regional work and structured resource evidence.",
+      "acceptanceCriteria": [
+        "Scenario: Sustain the first scaled cohort\nGiven 50 valid persistent bots and a zero-bot baseline\nWhen bots activate at a bounded rate and run for thirty minutes\nThen 50 achieved sessions, regional actions, saves, world processing, memory, database writes and failures are reported",
+        "Scenario: Report lower achieved capacity\nGiven login failures or a resource threshold breach\nWhen the stage cannot sustain 50\nThen activation backs off and the run fails with the achieved count and limiting measurement"
+      ],
+      "priority": 71,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/pop-021.md",
+      "dependsOn": [
+        "POP-020"
+      ],
+      "allowedScope": [
+        "docker/",
+        "docs/bots/ralph/post-mvp/pop-021.md"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P3",
+      "validation": [
+        "thirty-minute 50-active disposable cohort"
+      ]
+    },
+    {
+      "id": "LLM-010",
+      "title": "Add a bounded local shared party-planner transport",
+      "description": "Send one coalesced versioned party observation to park-llama and offer only current schema-valid steps to deterministic controllers.",
+      "acceptanceCriteria": [
+        "Scenario: Accept one current bounded party plan\nGiven a versioned immutable observation and available park-llama service\nWhen one shared request returns before its deadline\nThen schema-valid allowlisted steps with matching versions are offered to the deterministic controller",
+        "Scenario: Continue without the model\nGiven the model is busy, offline, slow, malformed or stale\nWhen validation fails\nThen no returned action executes and deterministic follow, combat and recovery continue"
+      ],
+      "priority": 80,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/post-mvp/llm-010.md; related park-llama concurrency card: docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md",
+      "dependsOn": [
+        "CMP-012",
+        "CMP-013",
+        "CMP-014"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/",
+        "docker/",
+        "docs/bots/ralph/post-mvp/llm-010.md",
+        "C:/Users/hpark/WebstormProjects/park-llama"
+      ],
+      "jiraKey": null,
+      "sourceStory": "KAP-543",
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "P4",
+      "validation": [
+        "schema and stale-response tests",
+        "thirty-minute model-offline companion run"
+      ]
+    },
+    {
+      "id": "PORT-001",
+      "title": "Pin upstream behavior and audit reuse",
+      "description": "Read-only analysis of maintained mod-playerbots follow, assist, defend and action-priority implementations. The hosted head supplies a pinned revision and bounded source files; do not use the old azerothcore/mod-playerbots repository.",
+      "acceptanceCriteria": [
+        "Record repository URL, immutable commit, exact file/symbol ranges and hashes, file-level license notices, dependencies and Turtle API mappings for each proposed reuse. Distinguish copied/adapted code from behavior-only reimplementation.",
+        "If license compatibility or a dependency is unclear, label that fragment blocked and propose a smaller alternative; do not copy runtime code or choose architecture.",
+        "Scenario: Approve modular behavior boundaries\nGiven the current Turtle bot engine and pinned upstream evidence\nWhen PORT-001 proposes the minimal architecture\nThen lifecycle and persistence, immutable observations, behavior policies, action selection, and Turtle action execution have explicit responsibilities and dependency directions\nAnd tank/healer/DPS and quest policies can propose typed intents without owning sessions or database writes\nAnd an optional personality/planner adapter can only propose bounded typed goals or preferences and cannot execute game actions\nAnd hosted Codex approves exact interfaces and file paths before implementation."
+      ],
+      "priority": 41,
+      "passes": true,
+      "notes": "Card: docs/bots/ralph/companion-port/port-001.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [],
+      "allowedScope": [
+        "docs/bots/port-provenance.md",
+        "docs/bots/companion-architecture.md"
+      ],
+      "jiraKey": null,
+      "issueType": "Spike",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Head reviews the provenance matrix and explicitly approves the chosen minimal boundary; no server build for this documentation spike.",
+        "Hosted review of concrete module responsibilities, dependency direction, typed contracts and extension examples."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-002",
+      "title": "Keep dismissed companions benched",
+      "description": "Separate persistent companion availability from the ambient population target. Head must approve the exact additive migration path and schema before dispatch; do not edit applied migrations.",
+      "acceptanceCriteria": [
+        "Dismiss an owned companion with a positive population target, run at least two refresh intervals, and prove it stays offline; recall reactivates it, preserving ownership and earned state. Repeat across a world restart.",
+        "Ambient bots remain eligible; a rejected foreign dismiss cannot change availability. Existing ownership rows receive an explicit compatible default."
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-002.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "CMP-010",
+        "PORT-001"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "sql/wip_updates/bot_ownership.sql",
+        "docker/test_bot_bench.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; run the disposable bench/recall/restart fixture and relevant population/party regressions. No personal-volume operations."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-003",
+      "title": "Separate companion follow from combat priorities",
+      "description": "Implement only the head-approved minimal deterministic priority boundary. Keep existing autonomous behavior unchanged for bots outside companion control; no imported engine framework.",
+      "acceptanceCriteria": [
+        "An active follow goal no longer suppresses an existing legal combat action. After combat, the companion returns to its owner. Following without combat still works.",
+        "No new target selection or unrelated pull is introduced. Missing/dead/different-map owner produces a bounded hold; persistent bots gain no free gear or progress.",
+        "Scenario: Prove behavior extension without lifecycle coupling\nGiven separate follow and existing-combat policies using a shared observation and typed intent contract\nWhen PORT-003 implements and exercises both policies\nThen adding the second policy requires no changes to bot identity, login, save or bench logic\nAnd shared action selection interrupts follow for legal combat and resumes the still-valid follow goal afterward\nAnd the executor revalidates ownership, party, action generation, target and relevant game constraints immediately before action\nAnd model unavailability does not affect deterministic behavior.",
+        "Scenario: Preserve goals safely across interruptions\nGiven a suspended follow goal and a newer owner order or invalid owner state\nWhen combat ends\nThen the suspended goal resumes only if its generation and prerequisites remain valid\nAnd a canceled goal cannot be resumed by a policy or planner."
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-003.md. Follow companion-port/README.md; hosted acceptance only. Companion/ is a candidate location only: hosted head must approve exact new files/build registration in PORT-001 and narrow dispatch; split if extraction cannot fit one bounded assignment.",
+      "dependsOn": [
+        "PORT-002"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_priority.py",
+        "src/game/PlayerBots/Companion/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable existing-combat to follow transition plus existing follow/stop regression.",
+        "Behavioral extension proof with follow and existing combat policies; no lifecycle changes and stale-resume regression."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-004",
+      "title": "Add explicit hold and cancel semantics",
+      "description": "Add a distinct owner-only hold command, preserving the documented legacy botstop behavior. Head fixes command spelling and cancellation contract in the evidence card.",
+      "acceptanceCriteria": [
+        "Hold cancels movement and offensive goals, increments the action generation and persists until a new authorized order in this session. A delayed old action cannot restart offense.",
+        "Foreign commands and stale goals are rejected. Define and test defensive behavior while held; do not silently resume autonomous nearest-target aggression."
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-004.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-003"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Chat/Chat.cpp",
+        "src/game/Chat/Chat.h",
+        "src/game/Commands/Commands.cpp",
+        "docker/test_bot_companion_hold.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable hold during chase, hold during combat, stale delivery and foreign-owner cases."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-005",
+      "title": "Assist one owner-selected hostile target",
+      "description": "Port only the approved upstream assist decision rules. One owned melee damage companion and one explicit owner target; use learned abilities and normal Turtle combat APIs.",
+      "acceptanceCriteria": [
+        "A same-party companion attacks the owner's selected legal creature through normal chase/combat, earns only normal credit, and resumes following after the kill.",
+        "Reject friendly/player/missing/dead targets and foreign or non-party issuers. Revalidate target and action generation at execution; hold cancels pursuit. Never pick a replacement unrelated enemy."
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-005.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-004"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Chat/Chat.cpp",
+        "src/game/Chat/Chat.h",
+        "src/game/Commands/Commands.cpp",
+        "docker/test_bot_companion_assist.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable assist/kill/follow, invalid-target and cancellation fixtures; preserve the autonomous player-target protection."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-006",
+      "title": "Defend the owner without additional pulls",
+      "description": "Adapt bounded defensive target selection for one companion; no tank threat engine or PvP behavior.",
+      "acceptanceCriteria": [
+        "When enabled by the owner, select a legal creature actually attacking the owner or companion, handle it, and return to follow. Explicit hold has the precedence approved in PORT-004.",
+        "A nearby neutral/unengaged creature is never pulled; invalid owner/party state clears the goal. Multiple attackers use a deterministic documented tie-break."
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-006.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-005"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "src/game/Chat/Chat.cpp",
+        "src/game/Chat/Chat.h",
+        "src/game/Commands/Commands.cpp",
+        "docker/test_bot_companion_defend.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable attacked-owner, unrelated-bystander, owner-loss and hold-precedence fixtures."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-007",
+      "title": "Finish combat with bounded loot and regroup",
+      "description": "Reuse the current normal corpse-loot path within companion priorities; no gear generation, auto-equipping redesign or arbitrary quest selection.",
+      "acceptanceCriteria": [
+        "After a supported kill, loot only an eligible corpse and return to owner within a configured leash/time budget. Compare actual saved inventory changes.",
+        "Full bags, inaccessible corpse, missing loot rights or owner moving away cannot trap the bot in a retry loop. Respect group loot rules; report unsupported roll handling rather than bypass it."
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-007.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-006"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_regroup.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable eligible loot, full-bag/no-rights and regroup cases with inventory snapshots retained locally."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-008",
+      "title": "Bound unreachable-target and owner-loss recovery",
+      "description": "Add timer-bounded pursuit and regroup behavior using existing Turtle movement. No teleport-to-owner shortcut or general transport implementation.",
+      "acceptanceCriteria": [
+        "Unreachable or over-leash targets are abandoned within an explicit tested deadline, and the companion returns to an available owner without selecting unrelated enemies.",
+        "Owner logout, death or map change cancels offensive work and holds safely; owner return can resume the current valid follow goal. No per-tick expensive full path recomputation."
+      ],
+      "priority": 49,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-008.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-007"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_leash.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable unreachable target, owner logout/rejoin and map mismatch checks; report actual elapsed bounds."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-009",
+      "title": "Support one normal companion death and recovery path",
+      "description": "Implement one head-selected normal recovery path after source inspection: corpse recovery in one supported outdoor area, or accepting a legal player resurrection. The selected path must be explicit; do not attempt both in one worker assignment.",
+      "acceptanceCriteria": [
+        "A dead companion stops offensive work, completes the declared legal recovery path, resumes follow and preserves earned inventory/XP under normal death rules.",
+        "Unavailable/unreachable recovery holds and reports its state with bounded retries; no free resurrection, invented destination or bypass of normal penalties."
+      ],
+      "priority": 50,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-009.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-008"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/test_bot_companion_recovery.py"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Compile; disposable death/recovery and unavailable-path fixtures. Any second recovery mechanism is a new story."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-010",
+      "title": "Qualify one useful companion and review commits",
+      "description": "Hosted acceptance gate, not autonomous worker implementation. Use one fresh read-only QA worker after deterministic checks; the human/hosted head supplies in-game observations.",
+      "acceptanceCriteria": [
+        "Review each accepted commit and cumulative diff; run relevant deterministic regressions, then observe recruit/follow, assist/defend, loot/regroup, declared death recovery, dismiss/recall, and saved state across relog/restart.",
+        "Missing client evidence remains pending, never inferred from source tests. Failures become bounded repair assignments; QA never edits source. Clearly list unsupported dungeon/transport/class behaviors."
+      ],
+      "priority": 51,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-010.md. Follow companion-port/README.md; hosted acceptance only.",
+      "dependsOn": [
+        "PORT-009"
+      ],
+      "allowedScope": [
+        "docs/bots/companion-port-acceptance.md"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "one-useful-companion",
+      "validation": [
+        "Head records commit and image IDs, tests actually run, skipped checks and in-game evidence. No live rollout, push or Jira transition implied."
+      ],
+      "executionMode": "hosted-acceptance",
+      "trackingJiraKey": "KAP-558"
+    }
+  ],
+  "lastReviewed": "2026-09-13",
+  "mvpDefinition": {
+    "foundationGate": "One owned bot earns XP, loot, and supported quest progress through normal game paths; the exact state survives restart and isolated restore.",
+    "playableCompanion": "The foundation gate plus owner-safe targeting and deterministic owner-only follow/stop with no LLM dependency.",
+    "excluded": [
+      "multiple classes and appearance selection",
+      "ten-bot cohort",
+      "500-active qualification",
+      "LLM planning",
+      "role tactics"
+    ]
+  },
+  "selectionPolicy": "Hosted head selects the lowest-priority-number false story whose dependencies are accepted. First read companion-port/README.md. executionMode=hosted-acceptance is never an editing worker task. One fresh serialized worker per assignment; no autonomous acceptance, commits, pushes or deployment.",
+  "jiraReconciliation": {
+    "epicKey": "KAP-543",
+    "epicStatus": "In Progress",
+    "epicUpdated": "2026-09-13T10:05:46.182-0500",
+    "report": "docs/bots/ralph/companion-port/jira-reconciliation.md",
+    "knownIssuesRead": [
+      "KAP-544",
+      "KAP-545",
+      "KAP-546",
+      "KAP-547",
+      "KAP-548",
+      "KAP-549",
+      "KAP-550",
+      "KAP-551",
+      "KAP-552",
+      "KAP-553",
+      "KAP-554",
+      "KAP-555",
+      "KAP-556",
+      "KAP-557"
+    ],
+    "childEnumeration": "Unverified: search API failed with Cannot read properties of undefined (reading 'map'); read-issue responses omit parent and comments.",
+    "externalWrites": false,
+    "acceptancePolicy": "Local passes flags are existing bounded evidence, not Jira closure or full epic acceptance. No flags changed by this reconciliation."
+  },
+  "companionPortTracking": {
+    "jiraKey": "KAP-558",
+    "jiraUrl": "https://parkenstein.atlassian.net/browse/KAP-558",
+    "jiraStatus": "To Do",
+    "epicKey": "KAP-543",
+    "parentSubmitted": true,
+    "parentReadbackVerified": false,
+    "notes": "One tracking story for the README wave. Creation submitted parent KAP-543; connector readback omits parent. Individual local cards remain bounded assignments, not separate Jira issues."
+  }
+}

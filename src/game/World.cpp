@@ -201,6 +201,12 @@ void World::Shutdown()
     });
 
 	sGuildMgr.SaveGuildBanks();
+    // Bots own socketless sessions that KickAll() cannot drive into the
+    // disconnected flow; mark every bot OFFLINE so the UpdateSessions call
+    // below logs each one out through its normal save + RemoveFromWorld
+    // path before the world unloads grids (a bot left in an unloaded grid
+    // crashes the visibility cleanup on a dangling pointer).
+    sPlayerBotMgr.DeleteAll();
     sWorld.KickAll();                                       // save and kick all players
     sWorld.UpdateSessions(1);                               // real players unload required UpdateSessions call
     if (m_charDbWorkerThread && m_charDbWorkerThread->joinable())
@@ -2202,10 +2208,11 @@ void LoadPlayerEggLoot();
     sScriptMgr.LoadGenericScripts();
     sLog.outString("Loading creature EventAI scripts...");
     sScriptMgr.LoadCreatureEventAIScripts();
-    sScriptMgr.CheckAllScriptTexts();
     sLog.outString("Loading creature EventAI events...");
     sEventAIMgr.LoadCreatureEventAI_Events();
     sScriptMgr.Initialize();
+    // must be after sScriptMgr.Initialize() so the legacy script_texts store is loaded
+    sScriptMgr.CheckAllScriptTexts();
     ScriptRegistry<WorldScript>::ForEachEnabledHook(WORLDHOOK_ON_LOAD_CUSTOM_DATABASE_TABLE, [](WorldScript* script)
     {
         script->OnLoadCustomDatabaseTable();

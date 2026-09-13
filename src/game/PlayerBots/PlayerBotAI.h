@@ -7,13 +7,14 @@
 struct PlayerBotEntry;
 class WorldSession;
 class PlayerBotAI;
+class Creature;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 
 class PlayerBotAI: public PlayerAI
 {
     public:
-        explicit PlayerBotAI(Player* pPlayer = nullptr) : PlayerAI(pPlayer), botEntry(nullptr), _wanderTimer(0), _combatCheckTimer(0) {}
+        explicit PlayerBotAI(Player* pPlayer = nullptr) : PlayerAI(pPlayer), botEntry(nullptr), _wanderTimer(0), _combatCheckTimer(0), _abilityTimer(0) {}
         virtual ~PlayerBotAI() {}
         void Remove() override;
 
@@ -23,6 +24,11 @@ class PlayerBotAI: public PlayerAI
         virtual void SendFakePacket(uint16 /*opcode*/) {} // ai has scheduled delayed response to opcode
         virtual void UpdateAI(const uint32 /*diff*/) override; // Handle delayed teleports
         virtual void OnPlayerLogin();
+        // TW-014 (KAP-557): owner-directed follow/stop goal. While active
+        // the follow state machine preempts normal behavior; a goal whose
+        // seq is at or below the current one is stale and never resumes.
+        void FollowGoal(uint32 leaderGuid, uint32 seq);
+        void FollowStop();
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         // Helpers
@@ -32,7 +38,37 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
+        ObjectGuid _lootTargetGuid;
+        uint8 _lootRetryCount = 0;
+        bool _obsAlive = true;
+        uint32 _obsTimer = 0;
+        // MVP-006: one declared supported quest progressed through the
+        // normal quest APIs (accept, objective credit, turn-in). Phase:
+        // 0 off, 1 seek giver (accept), 2 await objective, 3 seek
+        // finisher (turn-in), 4 done.
+        uint32 _questId = 0;
+        uint8 _questPhase = 0;
+        ObjectGuid _questGiverGuid;
+        ObjectGuid _questObjectiveGuid;
+        uint32 _questScanTimer = 0;
+        uint32 _questDebugTimer = 0;
+        uint8 _questDenyCount = 0;
+        // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
+        bool _following = false;
+        uint32 _followSeq = 0;
+        uint32 _followLeaderGuid = 0;
+        bool _followReached = false;
+        uint32 _followDebugTimer = 0;
         uint8 _lastLevel = 0;
+        bool TryLootDefeatedTarget();
+        void RememberLootTarget(Unit* unit);
+        bool UpdateFollow(uint32 diff);
+        Creature* GetAliveHeldTarget() const;
+        void ClearTarget();
+        void InitQuestState();
+        bool UpdateQuestPhases(uint32 diff);
+        Creature* FindQuestGiver() const;
+        Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
         uint32 SelectOffensiveSpell(Unit* target) const;
         void AutoEquipForLevel();

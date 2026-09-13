@@ -18214,9 +18214,17 @@ bool Player::SaveToDB(bool online, bool force, bool direct)
     // delay auto save at any saves (manual, in code, or autosave)
     m_nextSave = sWorld.getConfig(CONFIG_UINT32_INTERVAL_SAVE);
 
-    // Pas de sauvegarde des bots
-    if (GetSession()->GetBot())
-        return false;
+    // Pas de sauvegarde des bots - except verified persistent bots (TW-007,
+    // contract C4). A persistent (roster) bot whose session uses its approved
+    // bound identity saves through the normal path under the stored owner;
+    // ephemeral bots and any identity disagreement keep the no-save protection.
+    if (PlayerBotEntry* botEntry = GetSession()->GetBot())
+    {
+        if (!sPlayerBotMgr.IsSaveableBot(botEntry, GetSession()->GetAccountId()))
+        {
+            return false;
+        }
+    }
     if (m_DbSaveDisabled)
         return false;
 

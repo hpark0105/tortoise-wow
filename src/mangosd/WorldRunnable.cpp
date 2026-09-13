@@ -36,6 +36,7 @@
 #include "PerfStats.h"
 #include "Database/DatabaseEnv.h"
 #include "PerformanceMonitor.h"
+#include "Config/Config.h"
 
 // Target server framerate is 1000/WORLD_SLEEP_CONST
 #define WORLD_SLEEP_CONST 50
@@ -50,6 +51,25 @@ void WorldRunnable::operator()()
 
     Master::ArmAnticrash();
     uint32 anticrashRearmTimer = 0;
+
+    // Optional world processing-time telemetry: Perf.ProcessingTelemetry is
+    // the report interval in seconds; 0 disables it.
+    uint32 telemetrySeconds = sConfig.GetIntDefault("Perf.ProcessingTelemetry", 0);
+    bool telemetryEnabled = false;
+    if (telemetrySeconds != 0)
+    {
+        if (telemetrySeconds > 3600)
+            sLog.outError("Perf.ProcessingTelemetry=%u is out of range (1..3600); processing telemetry disabled", telemetrySeconds);
+        else if (!PerfProcessingHistogram::SelfTest() || !BoundedTelemetrySink::SelfTest())
+            sLog.outError("World processing telemetry self-test failed; telemetry disabled");
+        else
+            telemetryEnabled = true;
+    }
+    if (telemetryEnabled)
+        sPerfMonitor.StartTelemetrySink(
+            sConfig.GetStringDefault("Perf.ProcessingTelemetryFile", "world_processing_telemetry.log").c_str());
+    uint64 tickIntervalTotalMs = 0;
+    uint32 telemetryLastReportMs = telemetryEnabled ? WorldTimer::getMSTime() : 0;
 
     // Aim for WORLD_SLEEP_CONST update times
     // If we update slower, update again immediately.
@@ -87,8 +107,20 @@ void WorldRunnable::operator()()
                 anticrashRearmTimer -= diff;
         }
 
+        const uint32 processingStartMs = telemetryEnabled ? WorldTimer::getMSTime() : 0;
         sWorld.Update(diff);
 		sPerfMonitor.Tick.End();
+        if (telemetryEnabled)
+        {
+            sPerfMonitor.RecordProcessingTime(WorldTimer::getMSTimeDiff(processingStartMs, WorldTimer::getMSTime()));
+            tickIntervalTotalMs += diff;
+            if (WorldTimer::getMSTimeDiff(telemetryLastReportMs, WorldTimer::getMSTime()) >= telemetrySeconds * 1000u)
+            {
+                sPerfMonitor.ReportProcessingTime(tickIntervalTotalMs);
+                tickIntervalTotalMs = 0;
+                telemetryLastReportMs = WorldTimer::getMSTime();
+            }
+        }
 
         // diff is the actual time since last tick
         // updateTime is the actual time taken to update this round
@@ -109,6 +141,9 @@ void WorldRunnable::operator()()
 
 		sPerfMonitor.FrameEnd(diff);
     }
+
+    if (telemetryEnabled)
+        sPerfMonitor.StopTelemetrySink();
 
     sLog.outString("Shutting down world...");
     sWorld.Shutdown();

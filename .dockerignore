@@ -1,0 +1,17 @@
+.git
+.idea
+.agents
+.codex
+.env
+.env.*
+build
+bin
+lib
+data
+local
+TurtleServer
+twmoa_1181_cn
+**/__pycache__
+**/*.log
+sql/base
+sql/create_databases.sql

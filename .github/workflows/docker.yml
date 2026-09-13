@@ -1,0 +1,59 @@
+name: Personal server build and persistence
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Create temporary local configuration
+        shell: pwsh
+        run: ./docker/setup.ps1
+      - name: Validate configuration and scripts
+        run: |
+          docker compose config --quiet
+          bash -n docker/init-db.sh docker/backup.sh docker/check-db.sh docker/restore-check.sh
+          python3 -m py_compile docker/server.py
+          python3 -m unittest discover -s docker -p 'test_*.py'
+      - name: Compile server and matching extraction tools
+        run: docker compose build world
+      - name: Check runtime libraries and missing-client handling
+        run: |
+          docker run --rm --entrypoint mangosd tortoise-local:dev --version
+          docker run --rm --entrypoint realmd tortoise-local:dev --version
+          set +e
+          output=$(docker compose run --rm --no-deps world 2>&1)
+          result=$?
+          set -e
+          test "$result" -eq 1
+          [[ "$output" == *"Missing extracted client data:"* ]]
+      - name: Bootstrap databases
+        run: |
+          docker compose up -d --wait --wait-timeout 900 db
+          docker compose exec -T db bash /ops/check-db.sh
+      - name: Verify persistence across container recreation
+        run: |
+          docker compose exec -T db bash /ops/check-db.sh mark
+          docker compose up -d --force-recreate --wait --wait-timeout 180 db
+          docker compose exec -T db bash /ops/check-db.sh verify
+      - name: Verify backup command
+        shell: pwsh
+        run: ./docker/backup.ps1
+      - name: Restore backup into a disposable database
+        shell: pwsh
+        run: ./docker/test-restore.ps1
+      - name: Show service status
+        if: always()
+        run: docker compose ps --all
+      - name: Stop disposable CI services
+        if: always()
+        run: docker compose down

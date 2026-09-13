@@ -724,6 +724,14 @@ class ChatHandler
 
         bool HandleDiscBotStopCommand(char* args);
         bool HandleBlacklistNameCommand(char* args);
+        // TW-014 (KAP-557): owner-only companion follow/stop.
+        bool HandleBotFollowCommand(char* args);
+        bool HandleBotStopCommand(char* args);
+        bool HandleBotFollowStopCommand(char* args, bool follow);
+        bool HandleBotRecruitCommand(char* args);
+        bool HandleBotDismissCommand(char* args);
+        bool HandleBotRecallCommand(char* args);
+        bool HandleBotPartyCommand(char* args, uint8 action);
 
         bool HandleBankCommand(char* args);
         bool HandleChangeWeatherCommand(char* args);

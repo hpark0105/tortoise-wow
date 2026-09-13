@@ -2054,6 +2054,9 @@ PlayerBot.MinBots = 0
 PlayerBot.MaxBots = 0
 PlayerBot.Refresh = 10000
 PlayerBot.ForceLogoutDelay = 1
+# MVP-006: one declared quest the companion progresses through the normal
+# quest APIs (accept, objective, turn-in). 0 = disabled (default).
+PlayerBot.QuestId = 0
 
 MailSpam.ExpireSecs = 30
 MailSpam.MaxMails = 5
@@ -2119,3 +2122,10 @@ Perf.Enable = 1
 
 # Report to logs DB. Time in seconds
 Perf.ReportInterval = 600
+
+# World processing-time telemetry: report interval in seconds; 0 disables it.
+Perf.ProcessingTelemetry = 0
+
+# World processing-time telemetry sink file. Written by a dedicated bounded
+# nonblocking writer thread; a blocked consumer can never stall the world thread.
+Perf.ProcessingTelemetryFile = "world_processing_telemetry.log"

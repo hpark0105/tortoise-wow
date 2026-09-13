@@ -191,14 +191,6 @@ void ScriptMgr::LoadScripts(ScriptMapMap& scripts, const char* tablename)
                     continue;
                 }
 
-                for (int i : tmp.talk.textId)
-                {
-                    if (i < 0)
-                    {
-                        sLog.outErrorDb("Table `%s` has out of range broadcast text id (dataint = %i, expected positive value) in SCRIPT_COMMAND_TALK for script id %u", tablename, i, tmp.id);
-                        continue;
-                    }
-                }
                 break;
             }
             case SCRIPT_COMMAND_EMOTE:
@@ -1626,8 +1618,16 @@ void ScriptMgr::CheckScriptTexts(ScriptMapMap const& scripts)
             {
                 for (int i : itrM->second.talk.textId)
                 {
-                    if (i && !sObjectMgr.GetBroadcastTextLocale(i))
-                        sLog.outErrorDb("Table `broadcast_text` is missing text id %u, used in database script id %u.", i, script.first);
+                    if (i > 0)
+                    {
+                        if (!sObjectMgr.GetBroadcastTextLocale(i))
+                            sLog.outErrorDb("Table `broadcast_text` is missing text id %u, used in database script id %u.", i, script.first);
+                    }
+                    else if (i < 0)
+                    {
+                        if (!GetTextData(i))
+                            sLog.outErrorDb("Table `script_texts` is missing text id %i, used in database script id %u.", i, script.first);
+                    }
                 }
             }
         }

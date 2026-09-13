@@ -1,0 +1,284 @@
+---
+id: TW-BOTS-001
+title: Living World and Capable Companions
+version: 0.4
+status: draft-for-review
+created: 2026-09-11
+owner: hpark
+repository: tortoise-wow
+baseline_commit: e4ee1ba
+format: Markdown with YAML metadata, stored as .prd
+---
+
+# Product requirements
+
+## 1. Outcome
+
+Make the personal Turtle 1.18.1 server feel inhabited by persistent adventurers, while giving the player a small set of companions who can reliably quest and fight alongside them.
+
+Two distinct capabilities are required:
+
+1. **World population:** a configurable population of 500+ persistent bot characters combining substantial simultaneous gameplay with adaptive simulation detail. While the server runs, bots independently travel, fight, quest and visit towns across the world, including regions with no human present. Benchmark 500 simultaneously active bot sessions as a capacity target; do not claim that a database roster of 500 proves this capacity. Player proximity changes simulation priority, not whether the rest of the world exists or progresses.
+2. **Capable companions:** 2–5 persistent, individually named smart bots with roles, continuity and useful decision-making. Their skill is measured by successful gameplay, not chat volume or randomness. LLM assistance adds planning, coordination and understanding of requests to a reliable gameplay controller.
+
+This document plans implementation. It does not enable bots, change the live realm, select a replacement core, or establish that the desktop can already run 500 bots.
+
+## 2. Decisions and working assumptions
+
+| Topic | Draft decision | Status |
+|---|---|---|
+| Host | Existing Windows desktop and Docker game server; local persistent data | Confirmed existing setup |
+| Population target | Combine 500+ persistent identities, substantial concurrent activity and adaptive simulation detail; retain the 500-concurrent capacity benchmark | User-confirmed combined approach; capacity still unmeasured |
+| Density | Independent activity across populated regions, including places without the human; higher detail near humans without abandoning distant activity | User-confirmed world-wide behavior; exact regional budgets proposed |
+| Smart bots | Persistent personal companions focused on the human's party, goals and progression; independent routines belong to the ambient population | User-confirmed companions |
+| Party composition | With one human in a normal five-player party, at most four bots accompany them; a fifth smart bot is a substitute | Required party constraint |
+| Initial role coverage | Tank, healer and two damage dealers for the player's current warlock; selectable replacements | Proposed starting lineup, not a permanent class restriction |
+| LLM | Existing local inference stack, accessed through a Windows host planner and shared-model broker | Proposed technical design below; runtime integration not implemented |
+| Cloud inference | Disabled by default; no paid fallback without an explicit later decision | Cost boundary |
+| Hardware limits | No container CPU/RAM caps initially; measure and adapt bot work before setting limits | Existing user preference |
+| Progression | Normal persisted quests/items/XP for companions after initial provisioning; background roster can be seeded across levels | Proposed default |
+
+If measured capacity is below 500 simultaneous sessions, report the achieved count and limiting resource. Adaptive activity is part of the intended design, not permission to make only the player's surroundings active. Preserve a measured distant-world activity budget and never silently redefine the concurrent target as offline identities or decorative NPCs.
+
+## 3. Current evidence and limits
+
+Verified against the baseline commit and current source:
+
+- `src/game/PlayerBots/PlayerBotMgr.cpp:79` loads roster entries from `playerbot`; population configuration alone does not provision characters. Startup min/max adjustment and randomized population refresh need boundary tests before promising exact counts.
+- `src/game/PlayerBots/PlayerBotAI.cpp:27` contains the default update loop: teleport acknowledgments, offensive targeting, wandering, auto-learning and equipment selection. It returns when dead. The inspected loop does not establish dependable healing, threat control, questing, loot or recovery.
+- `src/game/PlayerBots/PlayerBotAI.h:15` leaves `_abilityTimer` uninitialized. `UpdateAI` also accesses `me` before its null guard. These are repair candidates, not measured production-crash claims.
+- Bot entries create full `WorldSession` objects; auto-equipping scans the item-prototype map. Profile login/learning/equipment work and stagger population login to avoid startup bursts. Do not infer that generated session account IDs necessarily create persisted account rows.
+- The first feasibility pass found that `Player::SaveToDB` explicitly rejects bot sessions. Simply removing that guard is unsafe: its character insert uses the session account ID, while the bundled manager generates synthetic bot session account IDs. Persistent bot ownership and saving require an explicit policy and isolated regression proof. See [the feasibility report](../bots/feasibility.md) for measured baselines and candidate evidence.
+- `docker/server.py` explicitly disables ordinary bots in the current deployment. None of the proposed bot services exists yet.
+- `modules/README.md` describes module support, but bot lifecycle, session and action hooks may require narrowly scoped core changes. A module-only implementation is not assumed.
+- Character persistence and baseline gameplay have been exercised. Custom portal and other content gaps remain; see `docker/content-status.md`. Select known-working routes and encounters for acceptance tests rather than treating content failures as AI failures.
+- Docker exposes 32 logical CPUs and roughly 30 GiB RAM in the observed setup. That is an allocation, not a 500-bot sizing result. Actual client, server, database, indexing and inference workloads must be profiled together.
+
+## 4. Experience requirements
+
+### World population
+
+**POP-01 — Population controls.** Expose configured roster size, desired active count, actual online count, actively simulating count, loading/failed sessions and parked/offline count separately. Smart bots are a subset of the total population, not an additional ambiguous counter. Counts must reflect real session state.
+
+**POP-02 — A visibly occupied world.** Use a population director with per-zone, per-hub and per-level budgets that exist independently of the human's location. Give bots persistent goals and routines such as travel, combat/quest activity, training/vendor visits and rest. Maintain a minimum distant-world activity budget instead of allocating all capacity to the human's current zone. Bots should finish or deliberately revise their goals when the player leaves, not freeze or migrate to follow the player. The director changes schedules gradually and provides a reason when an area cannot be populated. A finite population need not occupy every zone uniformly.
+
+**POP-03 — Activity levels.** Full gameplay simulation applies near humans, in combat and for active companions. Distant active bots continue real server-authoritative actions, with lower-frequency high-level decisions where safe. Combat, movement, interactions and rewards still follow normal game rules; remote quest progress comes from actual completed actions, not fabricated offline rewards. Some roster members can be parked/offline through normal save/logout paths, but that must not replace the required activity in human-free regions. Track full-detail active, reduced-decision-frequency active and parked/offline populations separately. Never skip necessary session, combat or persistence updates merely to improve performance numbers. While the server is stopped, state persists but this release does not simulate new progress.
+
+**POP-04 — Stable identities.** Persist names, race/class, faction, level, gear, inventory, quests and routine assignment. Provisioning is idempotent, uses game-valid race/class and item combinations, and can resume after a partial failure without duplicate characters or accounts. Distinguish bot-owned records from human characters for cleanup.
+
+Provisioning policy must explicitly separate seeded background gear from earned companion gear. The current automatic equip/learn behavior must not silently replace earned companion items or bypass the approved progression policy on every login/level-up. Test supported classes and race/class combinations rather than assuming one class's initialization generalizes.
+
+**POP-05 — Player access comes first.** Limit competition for quest targets, gathering nodes and vendors near the player. Avoid spawn camping, unsolicited PvP and mass chat spam. Initial release excludes auction-house trading and automated mail/trade to the human. Background loot and inventory need bounded disposal policies to prevent unbounded DB growth.
+
+**POP-06 — Natural movement.** Use validated maps, collision and pathfinding. No visible teleporting, impossible movement or arbitrary destination guesses. Moving a parked population to another region is allowed only outside player visibility under an explicit relocation policy. Handle unreachable routes with a bounded retry and a logged reason.
+
+**POP-07 — Independent-world observability.** Provide local status by zone: active counts, current activity categories, recent successful actions, and saved progression summaries. This lets the operator verify remote activity without teleporting there or causing the director to activate it. Do not move or reset bots solely because the player changes zones. On arrival, the player should encounter the continuing state of existing adventurers rather than a freshly staged crowd.
+
+### Smart companions
+
+**CMP-01 — Ownership and roster.** Recruit, name/select, assign role, invite, dismiss and recall a roster of 2–5 bots. The human controls party leadership and loot policy. At most four occupy a standard five-player party with the human; replacements occur out of combat. Persist companion ownership independently of transient session IDs.
+
+Companions do not independently leave the player to pursue unrelated quests, join another party or change their assigned role. When dismissed or benched, retain their saved state and await recall; do not silently advance their quests, level or gear through ambient-population routines. Tactical initiative serves the player's current goal and can be overridden with stop/stay commands.
+
+**CMP-02 — Commands.** Support follow, stay, assist, defend, attack marked target, stop, recover, return and role assignment. Basic commands execute through deterministic validated actions. Natural-language requests translate into those capabilities or a bounded plan; unclear/destructive requests produce a short clarification, not a guessed action.
+
+**CMP-03 — Combat competence.** Tanks establish/retain threat; healers prioritize survival and resources; damage dealers assist without uncontrolled pulls. Supported classes manage ranges, line of sight, cooldowns, mana, interrupts, dispels and relevant crowd control. Behaviors must respect actual class, level, learned spells, equipment and server legality. Do not use GM privileges or hidden stat boosts to pass tests.
+
+**CMP-04 — Party awareness.** Follow the leader at sensible spacing, wait for healing/drinking, avoid breaking controlled targets, react to marked targets and prevent repeated failed pulls. Changes in the leader's objective invalidate stale plans. Coordination belongs to the party, rather than five independent models fighting over decisions.
+
+**CMP-05 — Questing and travel.** Support a declared initial quest set: accept, navigate, kill/collect, loot eligible items, return and complete objectives under normal quest rules. Detect prerequisites, group credit and inventory limits. Explicitly report unsupported escorts, puzzles or broken content. Travel respects faction, level, instance access and available routes.
+
+**CMP-06 — Recovery.** Recover from death, corpse runs, resurrection, low durability, full bags, lost leader and pathfinding failure. After repeated failures, stop the failing plan and explain the blocker. Do not solve these by repeatedly teleporting or granting items.
+
+**CMP-07 — Memory.** Retain role preferences, current goal, completed-task summaries and a small relationship/personality profile. Game state is authoritative; memory never overrides inventory, quest or spell facts. Companions remain capable when personality/history retrieval is unavailable.
+
+## 5. Architecture direction
+
+### Evaluate the execution foundation before building the LLM layer
+
+Run a bounded compatibility spike comparing:
+
+| Option | Potential value | Required evidence |
+|---|---|---|
+| Improve the bundled PlayerBot implementation | Small dependency footprint and direct control | Lifecycle safety, persistence, group roles, supported actions and scaling effort |
+| Selectively port a richer compatible bot implementation | Existing combat/quest strategies may reduce work | Exact revision, license, API/schema differences, build result and preserved character state |
+| Adopt a fork wholesale | Potentially broader existing features | Separate migration proposal and compatibility proof; not the default approach |
+
+Candidates/references reviewed September 11, 2026:
+
+- [Shyalya's playerbots branch](https://github.com/Shyalya/tortoise-wow/tree/playerbots-integration-gh) is a candidate for compatibility inspection, not a selected dependency. Its README currently says the project is winding down during September 2026, so any reuse must have a maintenance plan and pinned revision.
+- [mod-llm-playerbots](https://github.com/bigr00/mod-llm-playerbots) targets AzerothCore; use it as an architecture reference, not a drop-in promise.
+- [wow-llm-personas](https://github.com/Merrymak3r/wow-llm-personas) targets CMaNGOS/playerbots personality and memory; it does not by itself prove competent play in this core.
+
+Do not replace the working personal fork or import another server's character database during this spike. Record a decision with measured capabilities and remaining costs before proceeding.
+
+### Runtime components
+
+1. **Game action/controller layer:** reliable lifecycle, movement, combat, group roles, interactions and recovery. Runs without an LLM. Reuse tested strategies where compatible.
+2. **Population director:** provisions and schedules the ordinary population; manages persistent regional activity budgets, density, activation, login pacing and overload shedding. Human proximity affects priority/detail without eliminating remote-world work. No routine per-bot LLM calls for ambient bots.
+3. **Companion coordinator:** owns party goals and translates plans into validated game actions. Uses roles, current state and deterministic tactical policies.
+4. **Local planner service:** optional asynchronous reasoning over compact observations, supported actions and retrieved knowledge. Returns structured plans; it cannot mutate game state itself.
+5. **Knowledge and memory stores:** versioned game facts/routes in a separate retrieval collection, plus bounded companion memory. Reuse the existing local embedding infrastructure with explicit scope; code-retrieval results are not automatically suitable game knowledge. Do not index credentials, accounts, raw chat logs or character backups into the code collection.
+
+Model requests must never block the world thread. Responses carry bot/party identity, observation version, goal version, deadline and an allowlisted action/target. Revalidate ownership, target existence, spell legality, reachability and current conditions on the world thread. Reject stale, malformed or unauthorized output. Never execute SQL, shell commands, GM commands or arbitrary code from model output or in-game text.
+
+### Inference resource and cost policy
+
+- Use one approved shared model process; do not launch a model per bot or invoke a coding agent for gameplay decisions. Honor the existing single-slot local-model rules through a runtime lease/scheduler established in the feasibility phase.
+- Coding sessions may occupy the model. Companions then continue with deterministic tactics and a safe retained goal. Do not interrupt another model session or silently route to paid inference.
+- Proposed starting budget: one inference in flight; at most four total planning requests/minute across all companions, burst one; at most 1,500 input and 256 output tokens/request; one pending, replaceable request per party; end-to-end response deadline eight seconds. Rate adapts downward to keep runtime inference utilization at or below 60% of a minute. These are tuning defaults to validate, not measured model performance. The previous eight requests/minute could consume more than a minute of service at the eight-second deadline and is superseded.
+- Use one shared party plan where possible. Trigger reasoning on meaningful changes; coalesce events, cache stable instructions/facts and bound memory summaries. Never send the whole world or repeated full histories.
+- Instrument calls/hour, input/output tokens, cache/retrieval hits, latency, discarded responses and inference busy time. Local inference still consumes hardware/electricity; claim hosted-token savings only against a measured comparable workflow.
+- Embeddings stay on CPU. Initial indexing and gameplay must be tested together; schedule bulk indexing away from peak play if it hurts responsiveness.
+
+### Technical implementation plan
+
+All new components, paths, endpoints and timing values in this subsection are proposals. None is a claim about an existing runtime API. P0 must confirm the execution-engine choice and benchmark the model before implementation commitments.
+
+#### A. Separate gameplay execution from reasoning
+
+The ordinary population uses C++ strategies and a state machine: select a valid regional goal, travel, perform supported quest/combat actions, recover, visit services, and save. The director assigns goals and regional budgets; controllers execute them using normal game systems. No LLM request is required to keep 500 bots active.
+
+Companions use the same tested execution primitives with stronger class/role and party policies. The optional LLM selects bounded goals, explains blockers and interprets natural-language requests. One party plan assigns coordinated tasks to the active companions; individual personalities do not create separate competing combat planners. Deterministic stop/stay/assist commands override a plan immediately through the server's normal update path.
+
+Start with the bundled `src/game/PlayerBots/` lifecycle behind a small controller interface. BOT-002 may replace selected strategies with a pinned compatible implementation after build, license and persistence checks. Keep lifecycle/session glue separate from role policies, regional scheduling and planner transport so a strategy can change without replacing the core or database. Prefer narrow core hooks over maintaining a wholesale divergent fork.
+
+Proposed code ownership:
+
+| Location | Responsibility |
+|---|---|
+| `src/game/PlayerBots/` | Session lifecycle, controller adapter, deterministic actions, party coordinator, population director and world-thread validation |
+| `services/companion-planner/` | Optional Windows host planner, compact observation handling, request coalescing, knowledge lookup and response schema checks |
+| `docs/bots/` | Versioned action protocol, supported scenarios, engine decision and benchmark reports without private data |
+| Existing ordered SQL updater directories | Versioned bot ownership, provisioning and routine metadata migrations in the appropriate database |
+| `park-llama` repository, separate change | Reusable Windows model-lease broker and tests; no duplicated model launcher in this repository |
+
+#### B. Concrete deployment and data flow
+
+Keep the world, realm and MariaDB services in Docker. Initially run the optional planner and inference broker on Windows beside the existing model stack. A Linux container cannot directly participate in the current Windows named-mutex ownership contract; moving the planner entirely into Docker requires a host broker regardless.
+
+1. On its update thread, the world creates a bounded immutable observation for an owned companion party. Transport code receives copied values, never live `Player` pointers.
+2. A new authenticated game bridge exposes a small poll/submit protocol. Bind its published Docker port to `127.0.0.1` on Windows; the service may listen on the container interface internally. Do not publish the database or reuse an unrestricted command console.
+3. The Windows planner polls for observations, coalesces them by party and goal version, and asks the host broker for one bounded model request. It never directly edits game tables.
+4. The broker acquires the shared model lease, verifies the approved model and health, performs inference against the existing loopback model endpoint, and returns structured output. Model credentials remain host-local and absent from game observations, prompts and container images.
+5. The planner submits a candidate plan to the game bridge. A bounded inbound queue delivers it to the world thread for authoritative validation and acceptance or rejection.
+
+Network handlers must not wait on the world thread or execute game actions themselves. Set payload, queue and request-time limits; authenticate reads and writes with an ignored local credential. Disconnects, bridge failure and an absent planner all leave deterministic gameplay operating. Exact port and transport library are selected in BOT-040 after checking existing dependencies; the protocol does not depend on an invented existing HTTP endpoint.
+
+#### C. Shared-model arbitration and the current throttle
+
+Verified current behavior: `park-llama/scripts/park-models.ps1` implements `Enter-ParkModelSession` with the named mutex `Global\park-llama-model-session` and a nonblocking acquisition. A second launcher throws rather than queues. `scripts/park-agent.ps1` acquires that mutex before model setup and holds it through the entire coding session, releasing it in `finally`. This proves exclusive launcher-session ownership; it does not establish the backend's configured inference parallelism or measured throughput.
+
+Use `park-agent exec` for bounded development/review assignments, not runtime gameplay requests. Implement a small broker in `park-llama` that obeys the same ownership mechanism and existing approved model-management functions. It must not start an independent model server, bypass the mutex or swap models underneath another owner. The broker uses one dedicated Windows owner thread to acquire and release the mutex, since mutex ownership belongs to the acquiring thread.
+
+When a coding session owns the model, skip optional inference and report `model_busy`; keep the current safe goal and deterministic tactics. Do not retain the lease between planning requests or force preemption. A fixed approved runtime model profile avoids per-companion model swapping; if the current profile is incompatible, defer planning until a safe supported transition is available. Runtime must also respect the operator's explicit model-stop state.
+
+The eight-second deadline includes queueing, lease acquisition, inference and validation. Drop expired queued work before inference. Coalesce to the newest observation for each party, invalidate requests on owner stop/goal change, and enforce the global rate cap before acquiring the lease. With average service time `S` seconds, target no more than `min(4, 36 / S)` requests/minute, with additional backoff for deadline failures. Measure tokenization and actual latency before treating the input/output caps as feasible. A failed or slow planner is an optional feature failure, not a reason to weaken combat behavior.
+
+A client timeout does not prove inference stopped. Retain ownership until completion or acknowledged backend cancellation. If completion cannot be established within a bounded drain interval, quarantine further runtime requests and expose an operator-visible failure; do not silently release the lease while generation may continue. Broker crash/abandoned-mutex recovery must establish backend idleness before another request or model swap. This requires a shared recovery contract with launchers/watchdog, not only an isolated broker fix. Test this contract before enabling runtime inference.
+
+#### D. Action contract and tactical safety
+
+Use a versioned JSON schema with `schemaVersion`, `requestId`, `partyId`, `partyEpoch`, `goalVersion`, `observationVersion`, server-issued expiry, and the allowed capabilities/targets for that observation. Candidate output contains the matching identifiers, a `planId`, and a bounded list of steps using action enums such as follow, wait, assist, recover or pursue a supported quest objective. The model cannot invent spell IDs, destinations, quest prerequisites or arbitrary executable commands.
+
+An accepted goal is not permission to execute every future step blindly. The controller rechecks ownership, party membership, current goal, target availability, map/access rules and action preconditions as it runs. Server legality checks still apply to every cast and interaction. Reject unknown fields/actions, oversized lists, duplicate plan IDs, expired observations and invalid targets. A stop command increments the goal version so an old response cannot resume the stopped activity. Reconnects create a new party epoch to reject pre-restart responses.
+
+Proposed starting decision intervals are 100–250 ms for needed tactical evaluations and 1–5 seconds for distant high-level routine selection, adjusted through profiling. These do not replace normal movement, session, combat or persistence updates. LLM planning happens on significant goal/blocker changes, generally tens of seconds apart, never for each movement step or spell cast.
+
+#### E. Persistence, knowledge and provisioning
+
+Game character, inventory, spell and quest tables remain authoritative. Add explicit persistent bot ownership/type, provisioning version/status and routine assignment metadata through reviewed migrations. Provisioning records a stable bot identity and resumes incomplete steps idempotently; it does not infer ownership from a name prefix. Save/logout uses normal game paths. Test interruption between provisioning steps and ensure retries cannot alter human records.
+
+Store bounded companion preferences and task summaries separately from authoritative game state, initially in a local planner SQLite store with schema versions. Include its snapshot and a shared version/backup marker in the backup procedure. On restore, reconcile memories against current game facts and discard stale goals; never replay saved action queues. Benched companions remain saved and inactive, without ambient progression.
+
+Start knowledge lookup with a curated, versioned set of supported quests, routes, roles and recovery rules. Deterministic lookups by game ID precede semantic search. Later use a separate approved game-knowledge collection on the existing embedding infrastructure; attach source revision and relevant IDs to retrieved facts. Do not feed the code index to bots as world knowledge, index raw player chat/history, or make embedding availability a requirement for combat. Bulk knowledge indexing is an operator-controlled maintenance task, not a startup action or a per-bot loop.
+
+#### F. Implementation evidence and CI
+
+BOT-003 delivers mutex contention, coding-session coexistence, watchdog interaction, cancellation and crash-recovery tests against a fake backend before a bounded real-model check. BOT-040 delivers protocol/schema fixtures and stale/duplicate/ownership rejection tests. BOT-042 injects unavailable, slow, malformed and disconnected inference for the full failure-tolerance gate. Report queue age, model-busy skips, completion/cancellation state, accepted/rejected plans and controller outcomes without recording hidden model reasoning or private chat.
+
+Add CI incrementally: deterministic controller/state-machine tests, schema validation, migration/provisioning fixtures and a client-free server compile preserving `-DALLOW_TURTLE_ADDONS=ON`. Keep real-map gameplay and GPU inference benchmarks as reproducible local integration runs; CI cannot prove those behaviors without their required assets. Each phase records commands, source revision, scenario seed, actual active counts and outcome. No extra runtime service or live bot flag is enabled by this planning change.
+
+## 6. Success measures and release gates
+
+All numbers below are proposed acceptance thresholds. Establish a zero-bot baseline first, record hardware/model/configuration/commit, then change one load variable at a time. Do not relax a failed threshold without recording the reason and obtaining a product decision.
+
+| Gate | Acceptance evidence |
+|---|---|
+| Roster/persistence | Provision 500 identities twice without duplicates; sampled IDs plus complete row-count/checksum evidence survive restart and isolated backup/restore; human records remain unchanged by provisioning |
+| Density | On three fixed 20-minute town/road/quest routes, meet agreed visible-activity targets in at least 80% of observation windows; proposed starting targets are 8–20 adventurers in a selected hub and 2–6 around the player's quest route, without monopolizing targets |
+| Independent world | At the qualified 500-active profile, a proposed minimum 40% of active ambient bots remain outside the human's current zone, with at least six populated zones across both continents and three human-free test zones. During a 60-minute stationary-player test, each remote test zone records successful movement and meaningful routine/gameplay actions in at least 90% of five-minute windows. On a later visit, sampled bot identities and legitimately earned state persist; no arrival-triggered reset or teleport staging. Exact budgets are tunable, but remote activity is required |
+| Population scale | Stages 10, 50, 100, 250, 500 active sessions; each runs at least 30 minutes with reported actual counts, then an eight-hour 500-active soak if prior stages pass. Test dispersed, concentrated-hub and mixed-combat scenarios separately |
+| Server responsiveness | Provisional measured world-update processing p95 <=50 ms, p99 <=100 ms; zero >1 s bot-attributable stalls during the soak. Record configured tick interval separately and use its actual budget when tighter |
+| Client experience | With client on the same desktop, no sustained >10% median FPS regression or >100 ms p95 interaction-latency increase against matched zero-bot route; investigate GPU sharing and crowded-scene cost separately |
+| Resource stability | No crash/OOM; no sustained swapping; after warm-up, no unexplained >10% memory growth over the soak. Track CPU/core, RSS, DB latency/connections/write rate, pathfinding time and disk growth |
+| Combat | At normal gear/level, four companions plus human complete >=18 of 20 defined pulls without a bot-caused wipe; no illegal spells, GM powers or uncontrolled extra pulls in the acceptance sample |
+| Quest competence | >=9 of 10 declared supported quest runs complete correctly, including loot/credit and turn-in persistence, with no manual bot reset; unsupported content is identified distinctly |
+| Recovery | >=9 of 10 injected death/lost-leader/stuck/full-bag cases recover or report the real blocker within an agreed scenario time budget; no infinite action loop |
+| Dungeon readiness | Complete three runs of one confirmed-working five-player dungeon with role-correct behavior and persisted loot; known portal/content failures are tracked separately |
+| LLM failure tolerance | With model offline/busy for 30 minutes, world and companions retain basic combat/follow/recovery; stale and malformed responses produce zero unauthorized actions in fault-injection tests |
+| Added intelligence | In at least 20 paired seeded scenarios, compare controller-only and LLM-assisted modes. Assisted mode must improve goal/task success or reduce human interventions without increasing avoidable wipes; otherwise ship competent controller-only behavior and keep the planner experimental |
+
+Count sampled bot actions and failures, not just screenshots of a crowded town. Five hundred disconnected database rows, decorative NPC spawns or idle login sessions do not meet the active gameplay-load gate.
+
+## 7. Delivery plan
+
+| Phase / work items | Deliverable | Exit condition |
+|---|---|---|
+| P0 — BOT-001 baseline; BOT-002 execution-engine comparison; BOT-003 shared-model arbitration design | Measured baseline, chosen engine/reuse boundary, compatibility and migration decision, approved scenario set | Build/protocol/persistence proof; no unsupported claim of 500-bot capacity |
+| P1 — BOT-010 lifecycle/timer/null safety; BOT-011 idempotent provisioning; BOT-012 minimal commands and recovery | Ten ordinary bots and two role-aware companions in a disposable world | Stable lifecycle, real saves, follow/combat/death smoke tests, no LLM dependency |
+| P2 — BOT-020 role tactics; BOT-021 supported quests/travel; BOT-022 party/loot/bench controls | Four useful party companions and optional fifth roster substitute | Combat/quest/recovery gates pass on declared content |
+| P3 — BOT-030 independent regional routines/density director; BOT-031 population pacing; BOT-032 load and remote-activity telemetry | 50 -> 100 -> 250 active bots with visible activity near and away from the human | Intermediate load, scaled regional-activity budgets, density and persistence gates pass at each stage |
+| P4 — BOT-040 bounded planner API; BOT-041 game-knowledge retrieval/memory; BOT-042 arbitration/failure handling | LLM-assisted goals and coordination for 2–5 companions | Failure-tolerance and paired intelligence gates pass; costs reported |
+| P5 — BOT-050 500-active benchmark; BOT-051 eight-hour soak; BOT-052 rollout/rollback | Qualified capacity report and playable living-world profile | Scale, client responsiveness, persistence and recovery gates pass; lower-capacity result documented if needed |
+
+P3 and P4 can be developed independently after the action boundary is stable. Only one local-model request runs at a time; concurrency in the work plan does not override that rule. No fixed calendar estimate until P0 determines how much compatible bot capability can be reused.
+
+### First implementation slice after PRD review
+
+1. Establish a reproducible zero-bot measurement and an isolated bot test world using existing validated assets.
+2. Audit the lifecycle defects and implement focused tests/fixes; evaluate a small pinned sample of the candidate bot engine in a separate checkout.
+3. Provision ten persistent bot identities and prove restart/restore behavior.
+4. Demonstrate one tank/healer pair following the player, fighting a small pull, recovering, and saving state without model inference.
+5. Review measurements and engine choice before enabling larger populations or planner services on the personal realm.
+
+## 8. Rollout, recovery and maintenance
+
+- Default population and LLM flags remain off until the relevant gates pass. Separate controls for ambient population, companions and planner allow each to be disabled independently.
+- Start changes in disposable Compose projects without conflicting public ports. Keep bot state and migrations backed up with the existing game databases; independently back up any new companion-memory store and record a shared backup/version marker. Live character data remains in its current named volume.
+- On overload, stop new logins first and coalesce low-priority decisions; if necessary, save/park ambient bots across regions without silently draining all human-free zones. Preserve human sessions and active-party tactics. Publish actual active counts and whether regional activity floors remain met. Emergency safety can override those floors, but the result must be labeled degraded rather than a passing living-world profile.
+- Rollback disables the planner/population and restores a previously tested image; database rollback uses a separately verified backup because image rollback does not undo migrations. Never delete the human character or reset the personal database to provision bots.
+- Pin imported code revisions and review licenses, build flags, protocol/schema compatibility and upstream maintenance burden. Keep `ALLOW_TURTLE_ADDONS=ON` and correct map/DBC validation.
+- CI covers deterministic bot/controller tests with safe fixtures and no client archives. Local integration covers real maps, sessions and content. Seed randomness and retain compact structured metrics under ignored `local/` so regressions are reproducible.
+
+## 9. Non-goals for the first release
+
+- LLM inference for all 500 bots, a model per character, or an LLM issuing combat decisions every tick.
+- Human-level mastery of every class, dungeon, raid, quest or PvP battleground.
+- Unrestricted autonomous economy, auctions, player harassment, or public-server operation.
+- Fork replacement, importing someone else's accounts/characters, model fine-tuning or changing party-size rules.
+- Fabricating missing world content to conceal portal, script or loot defects.
+
+## 10. Open decisions
+
+1. **Resolved:** use a combination of persistent population and simultaneous activity with adaptive simulation detail. The world must continue doing things away from the player; preserve separate counters and the explicit 500-active capacity benchmark. Exact measured capacity and regional budgets remain engineering decisions.
+2. **Resolved:** the 2–5 smart bots are personal companions. Independent adventuring belongs to the larger ambient population; companion autonomy is limited to carrying out the player's goals and party tactics.
+3. Which classes, first quest set and first known-working dungeon should define acceptance? Default: support the current warlock with tank/healer/DPS coverage; choose exact scenarios in P0.
+4. Should companions level normally from the player’s current level or use an optional catch-up policy? Default: initial matched-level provisioning, then normal progression; no ongoing auto-leveling without a decision.
+5. What exact budgets should balance capital-city atmosphere, nearby quest activity and distant-world coverage? Independent distant activity is now confirmed; tune regional floors and nearby caps using the density and independent-world gates rather than prioritizing only the player's location.
+
+## 11. Planning evidence and status
+
+Source checks: `src/game/PlayerBots/PlayerBotMgr.cpp`, `PlayerBotAI.cpp`, `PlayerBotAI.h`, `docker/server.py`, `modules/README.md`, and existing `docker/bots.md`. This PRD supersedes the older feasibility note's proposed scale while retaining its warnings about unproven behavior.
+
+The 2026-09-13 upstream review in `docs/bots/azerothcore-reference-review.md`
+compares AzerothCore's current repositories and official getting-started guide.
+Its useful inputs are the maintained playerbots strategy/role model,
+AzerothGhost's paced scenario orchestration, AutoBalance diagnostics, and
+database-driven event/action behavior. These remain design and test references:
+AzerothCore targets 3.3.5a, the maintained playerbots module requires a custom
+WotLK core fork, and neither is a drop-in dependency for Turtle 1.18.1.
+
+Retrieval registration and Docker services are present, but the first code-index snapshot was not available during this draft; the initial sync call timed out. Bounded current-source reads were used instead, without claiming indexed evidence. A fresh local worker completed a read-only source review with verified file hashes; the head independently checked its useful lifecycle/scaling findings and excluded unsupported claims about guaranteed player aggression, account-row creation and dominant resource bottlenecks. No bot implementation or live configuration changes belong to this planning task.
+
+Version 0.4 adds the technical plan using directly verified current launcher source. SHA256: `park-models.ps1` = `144c0e58b1f0bfb44935befe5f312818feb4b828000b208b1204574c3fc7387a`; `park-agent.ps1` = `13c55d7593f030df25c78aa2253e4307197f010a0ebd0a3b41ab9d6f4fcf0e53`. A fresh bounded local review was attempted with a versioned evidence card, but the launcher rejected it because another session owned the shared model; no worker review is claimed for this revision. The head reviewed the plan directly. Retrieval/index synchronization is deferred while the operator works on the embedding containers; no new sync was started and no embedding/derived-write counts or token savings are claimed for this revision.
