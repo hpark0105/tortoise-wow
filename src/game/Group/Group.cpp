@@ -546,6 +546,8 @@ void Group::ChangeLeader(ObjectGuid guid)
 
 void Group::Disband(bool hideDestroy, ObjectGuid initiator)
 {
+    sLog.outString("Group::Disband id:%u initiator:%u empty:%d",
+                   m_Id, initiator.GetCounter(), initiator.IsEmpty() ? 1 : 0);
     ScriptRegistry<GroupScript>::ForEach([&](GroupScript* script)
     {
         script->OnDisband(this);

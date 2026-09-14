@@ -97,8 +97,8 @@ uint32 const kDefendTargetGraceMs = 5000;
 class BotDefendScan
 {
 public:
-    BotDefendScan(Unit const* source, Unit const* owner)
-        : me(source), owner(owner), m_best(nullptr) {}
+    BotDefendScan(Unit const* source, Unit const* owner, bool verbose = false)
+        : me(source), owner(owner), m_best(nullptr), m_verbose(verbose) {}
 
     bool operator()(Creature* u)
     {
@@ -121,7 +121,18 @@ public:
         if (!u->IsWithinDistInMap(me, kDefendSearchRange, false, SizeFactor::None))
             return false;
         if (me->IsFriendlyTo(u) || !me->CanAttack(u))
+        {
+            // Diagnostic (verbose only): a candidate with real attack
+            // evidence that fails the legality gate is otherwise silent.
+            if (m_verbose)
+                sLog.outString("[PlayerBot][Defend] reject GUID:%u target:%u friendly:%u canatk:%u tflags:%u tfaction:%u bfaction:%u dist:%.2f",
+                                me->GetGUIDLow(), u->GetGUIDLow(),
+                                (uint32)me->IsFriendlyTo(u), (uint32)me->CanAttack(u),
+                                u->GetUInt32Value(UNIT_FIELD_FLAGS),
+                                u->GetFactionTemplateId(), me->GetFactionTemplateId(),
+                                me->GetDistance(u));
             return false;
+        }
         if (!m_best)
         {
             m_best = u;
@@ -149,6 +160,7 @@ private:
     Unit const* me;
     Unit const* owner;
     Creature* m_best;
+    bool m_verbose;
 };
 
 class BotDefendProbe
@@ -1881,6 +1893,16 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
                         (uint32)nearest->GetAttackers().size(),
                         (uint32)!nearest->GetThreatManager().isThreatListEmpty(),
                         me->GetDistance(nearest));
+                }
+                // Diagnostic (2 s cadence, debug only): re-run the evidence
+                // scan verbosely so a candidate rejected by the legality
+                // gate is identified with the exact failing sub-checks.
+                if (Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid)))
+                {
+                    BotDefendScan vscan(me, owner, true);
+                    Creature* vfound = nullptr;
+                    MaNGOS::CreatureLastSearcher<BotDefendScan> vsearcher(vfound, vscan);
+                    Cell::VisitGridObjects(me, vsearcher, kDefendSearchRange);
                 }
             }
         }
