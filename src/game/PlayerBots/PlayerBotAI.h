@@ -51,6 +51,10 @@ class PlayerBotAI: public PlayerAI
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
         uint32 _pursuitLeashMs = 0; // PORT-008: remaining (ms) of the pursuit reach budget; 0 = disarmed
+        bool _recoveryDead = false; // PORT-009: recovery state armed (dead with an active order)
+        uint32 _recoveryReportMs = 0; // PORT-009: bounded report pace remaining (ms)
+        uint32 _recoveryWalkMs = 0; // PORT-009: corpse walk re-issue window remaining (ms)
+        bool _recoveryDeathAck = false; // PORT-009: dead-ack (BuildPlayerRepop) issued for the current death
         float _followPathX = 0.0f; // PORT-008: last issued follow path target (throttle)
         float _followPathY = 0.0f;
         float _followPathZ = 0.0f;
@@ -87,6 +91,7 @@ class PlayerBotAI: public PlayerAI
         void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
         bool PursuitLeashTick(Unit* target, uint32 diff); // PORT-008: one tick of the pursuit reach budget
+        bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
         bool IsFollowOwnerAvailable() const;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);

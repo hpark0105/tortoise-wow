@@ -1,5 +1,6 @@
 #include "PlayerBotAI.h"
 #include "Player.h"
+#include "Corpse.h"
 #include "DBCStores.h"
 #include "Log.h"
 #include "SocialMgr.h"
@@ -41,6 +42,14 @@ uint32 const kLootWindowMs = 20000;
 // unbounded kill time. Phase-1 named constant; per-entry config is
 // future work.
 uint32 const kPursuitLeashMs = 30000;
+// PORT-009 (KAP-558): while a dead companion cannot yet reclaim its
+// corpse (no corpse, reclaim delay not over, or out of range), the
+// recovery state is reported at most this often (ms).
+uint32 const kRecoveryReportMs = 30000;
+// PORT-009 (KAP-558): while out of range of its own corpse, the
+// companion re-issues the path to the corpse only when its motion is
+// empty and at least this many ms have passed since the last issue.
+uint32 const kRecoveryWalkRetryMs = 5000;
 // PORT-008 (KAP-558): while the companion keeps walking toward the owner,
 // the follow path is re-issued at most this often (ms) unless the owner
 // moved further than 2.0 yd (2D) from the last issued target.
@@ -201,6 +210,18 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (!me->IsInWorld())
         return;
 
+    // PORT-009 (KAP-558): a socketless bot session can never answer the
+    // first-logon racial cinematic (no client sends CMSG_CINEMATIC_DONE);
+    // while watching, IsTargetable() is false for NPC attackers, so hostile
+    // mobs would never retaliate. Dismiss it on the first tick.
+    if (me->watching_cinematic_entry != 0)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] cinematic dismissed entry:%u GUID:%u",
+                           me->watching_cinematic_entry, me->GetGUIDLow());
+        me->CinematicEnd();
+    }
+
     // Detect manual level changes in case GiveLevel hook missed
     if (_lastLevel != me->GetLevel())
     {
@@ -241,7 +262,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             _obsTimer -= diff;
     }
 
-    if (!me->IsAlive())
+    // PORT-009 (KAP-558): while alive, UpdateRecovery only resets its
+    // state (so the next death re-arms the death-ack); while dead it
+    // runs the one normal recovery path (corpse reclaim) and everything else
+    // stays dead-idle.
+    if (UpdateRecovery(diff) || !me->IsAlive())
         return;
 
     if (UpdateCompanion(diff))
@@ -1895,6 +1920,129 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
 }
 
 // ---------------------------------------------------------------------------
+// PORT-009 (KAP-558): one normal companion death and recovery path. While
+// dead, Update() skips every offensive, loot and quest path; an owned
+// companion (the same gate as UpdateCompanion) reclaims its own corpse
+// through the normal CMSG_RECLAIM_CORPSE handler: it waits out the
+// standard reclaim delay, walks to the corpse when out of range, and
+// issues the reclaim the first tick inside CORPSE_RECLAIM_RADIUS. The
+// handler's ResurrectPlayer(0.5f) applies the normal 50% restore - no
+// free resurrection, no teleport, no second mechanism. Unavailable
+// states (no corpse, delay not over, out of range) hold and report at a
+// bounded pace.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::UpdateRecovery(uint32 diff)
+{
+    if (!me || !me->GetMap())
+        return false;
+    if (me->IsAlive())
+    {
+        _recoveryDead = false;
+        _recoveryReportMs = 0;
+        _recoveryWalkMs = 0;
+        _recoveryDeathAck = false;
+        return false;
+    }
+    // Owned companions with an active order only; ambient dead bots keep
+    // the legacy dead-idle behavior.
+    if (!_following && !_held && !_assistTargetGuid)
+        return false;
+    if (!_recoveryDead)
+    {
+        _recoveryDead = true;
+        _recoveryReportMs = 0;
+        _recoveryWalkMs = 0;
+        _recoveryDeathAck = false;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] entered GUID:%u",
+                           me->GetGUIDLow());
+    }
+    Corpse* corpse = me->GetCorpse();
+    if ((!corpse || !corpse->IsInWorld()) && !_recoveryDeathAck)
+    {
+        // PORT-009: KillPlayer defers corpse creation to the client's
+        // CMSG_MOVE_DEADACK, which a socketless session never sends (the
+        // fallback is the 6 min repop timer). Build the corpse now, the way the
+        // client's dead-ack would, so the standard reclaim path can run.
+        _recoveryDeathAck = true;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] death-ack issued GUID:%u",
+                           me->GetGUIDLow());
+        me->BuildPlayerRepop();
+        corpse = me->GetCorpse();
+    }
+    if (!corpse || !corpse->IsInWorld())
+    {
+        // The corpse is not (yet) available: hold and report at a bounded
+        // pace. There is no fallback teleport or free resurrection.
+        if (_recoveryReportMs <= diff)
+        {
+            _recoveryReportMs = kRecoveryReportMs;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][Recovery] unavailable GUID:%u reason:no-corpse",
+                               me->GetGUIDLow());
+        }
+        else
+            _recoveryReportMs -= diff;
+        return true;
+    }
+    // Mirror the handler's reclaim gate: ghost time plus the standard
+    // reclaim delay must have passed before the reclaim is legal.
+    if (corpse->GetGhostTime() +
+            me->GetCorpseReclaimDelay(corpse->GetType() == CORPSE_RESURRECTABLE_PVP) >
+        time(nullptr))
+    {
+        if (_recoveryReportMs <= diff)
+        {
+            _recoveryReportMs = kRecoveryReportMs;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][Recovery] waiting GUID:%u dist:%.1f",
+                               me->GetGUIDLow(), me->GetDistance(corpse));
+        }
+        else
+            _recoveryReportMs -= diff;
+        return true;
+    }
+    if (corpse->IsWithinDistInMap(me, CORPSE_RECLAIM_RADIUS, true))
+    {
+        me->GetMotionMaster()->Clear(true);
+        WorldPacket packet(CMSG_RECLAIM_CORPSE);
+        packet << me->GetObjectGuid();
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] reclaim issued GUID:%u",
+                           me->GetGUIDLow());
+        // The normal handler path: it re-validates death, ghost flag,
+        // corpse, delay and range, then resurrects at 50% and spawns the
+        // bones (the standard reclaim penalty, no free resurrection).
+        me->GetSession()->HandleReclaimCorpseOpcode(packet);
+        return true;
+    }
+    // Out of range: walk to the corpse. The path is re-issued only when
+    // the motion is empty and the retry window has elapsed, so a failed
+    // path is retried at a bounded pace and the companion is never
+    // trapped by an unreachable corpse.
+    if (me->GetMotionMaster()->empty() && _recoveryWalkMs <= diff)
+    {
+        _recoveryWalkMs = kRecoveryWalkRetryMs;
+        me->GetMotionMaster()->MovePoint(0, corpse->GetPositionX(),
+                                         corpse->GetPositionY(),
+                                         corpse->GetPositionZ(), MOVE_PATHFINDING);
+    }
+    else
+        _recoveryWalkMs = (_recoveryWalkMs > diff) ? _recoveryWalkMs - diff : 0;
+    if (_recoveryReportMs <= diff)
+    {
+        _recoveryReportMs = kRecoveryReportMs;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] walking GUID:%u dist:%.1f",
+                           me->GetGUIDLow(), me->GetDistance(corpse));
+    }
+    else
+        _recoveryReportMs -= diff;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // PORT-008 (KAP-558): one tick of the bounded pursuit budget. While the
 // companion cannot land a melee hit on the named target it may keep
 // chasing for at most kPursuitLeashMs; on expiry the caller abandons the
@@ -1991,6 +2139,47 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        if (sPlayerBotMgr.IsDebugEnabled())
+        {
+            // PORT-009 diagnostic: the target never retaliated against a
+            // player bot; log the exact creature-side and player-side
+            // checks that selectNextVictim/IsTargetable use, each combat
+            // tick, until the missing condition is identified.
+            float const assistThreat = target->GetThreatManager().getThreat(me, true);
+            sLog.outString(
+                "[PlayerBot][Assist] probe GUID:%u t:%u v:%u evade:%u combat:%u "
+                "react:%u atk:%u tlist:%u threat:%.1f valid:%u outarea:%u "
+                "canatk:%u pacified:%u selfcombat:%u selfgm:%u selfimmnpc:%u "
+                "selftgt:%u selfdet:%u rawflags:%x bytes1:%x cin:%u feign:%u "
+                "taxi:%u inworld:%u mounted:%u canatkself:%u canauto:%u",
+                me->GetGUIDLow(),
+                target->GetGUIDLow(),
+                target->GetVictim() ? (uint32)target->GetVictim()->GetGUIDLow() : 0,
+                (uint32)target->IsInEvadeMode(),
+                (uint32)target->IsInCombat(),
+                (uint32)target->GetReactState(),
+                (uint32)target->GetAttackers().size(),
+                (uint32)!target->GetThreatManager().isThreatListEmpty(),
+                assistThreat,
+                (uint32)target->IsValidAttackTarget(me),
+                (uint32)target->IsOutOfThreatArea(me),
+                (uint32)target->CanInitiateAttack(),
+                (uint32)target->IsTempPacified(),
+                (uint32)me->IsInCombat(),
+                (uint32)me->IsGameMaster(),
+                (uint32)me->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC),
+                (uint32)me->IsTargetable(true, false, false, true),
+                (uint32)me->CanBeDetected(),
+                me->GetUInt32Value(UNIT_FIELD_FLAGS),
+                me->GetUInt32Value(UNIT_FIELD_BYTES_1),
+                me->watching_cinematic_entry,
+                (uint32)me->HasUnitState(UNIT_STAT_FEIGN_DEATH),
+                (uint32)me->IsTaxiFlying(),
+                (uint32)me->IsInWorld(),
+                (uint32)me->IsMounted(),
+                (uint32)me->CanAttack(target),
+                (uint32)(me->CanAutoAttackTarget(target) == ATTACK_RESULT_OK));
+        }
         if (!me->CanReachWithMeleeAutoAttack(target))
             me->GetMotionMaster()->MoveChase(target);
         else
