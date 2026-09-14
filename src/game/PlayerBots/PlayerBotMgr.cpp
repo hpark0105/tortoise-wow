@@ -117,6 +117,10 @@ void PlayerBotMgr::LoadConfig()
     // MVP-006: one declared quest the companion progresses through the
     // normal quest APIs (accept, objective credit, turn-in).
     confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
+    // PORT-007 (KAP-558): lab-only idle-wander clamp. Default 0 keeps
+    // the legacy frand(8,20) radius; fixtures set a small value so
+    // seeded bots stay geometrically stable before scripted holds land.
+    confWanderRadius = sConfig.GetFloatDefault("PlayerBot.WanderRadius", 0.0f);
     if (confQuestId)
         sLog.outString("Playerbot: declared quest %u enabled (MVP-006)", confQuestId);
     // TW-014 (KAP-557) lab-only deterministic follow/stop script (default

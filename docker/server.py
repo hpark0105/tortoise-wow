@@ -65,6 +65,7 @@ def main():
             "PlayerBot.TestLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_LOGIN", ""),
             "PlayerBot.TestStaleLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_STALE_LOGIN", ""),
             "PlayerBot.QuestId": os.environ.get("PLAYERBOT_QUEST_ID", "0"),
+            "PlayerBot.WanderRadius": os.environ.get("PLAYERBOT_WANDER_RADIUS", "0"),
             "PlayerBot.FollowScript": '"%s"' % os.environ.get("PLAYERBOT_FOLLOW_SCRIPT", ""),
             "PlayerBot.PartyInviteScript": '"%s"' % os.environ.get("PLAYERBOT_PARTY_INVITE_SCRIPT", ""),
             "Perf.ProcessingTelemetry": os.environ.get("PERF_PROCESSING_TELEMETRY", "0"),

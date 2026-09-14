@@ -4,12 +4,13 @@
 // Value-only observations: policies never retain world pointers or access sessions/DB.
 namespace Companion
 {
-enum class Action { None, Hold, Follow, ContinueCombat, Assist };
+enum class Action { None, Hold, Follow, ContinueCombat, Assist, Loot };
 struct Observation
 {
     uint32_t generation = 0;
     uint64_t target = 0;
     uint64_t assistTarget = 0; // PORT-005: owner-selected hostile; the executor re-resolves it
+    uint64_t lootTarget = 0; // PORT-007: dead, in-world corpse to loot; the executor re-resolves it
     bool following = false;
     bool held = false;
     bool ownerAvailable = false;
@@ -27,10 +28,15 @@ inline Intent AssistPolicy(Observation const& o)
 {
     return {o.assistTarget ? Action::Assist : Action::None, o.generation, o.assistTarget};
 }
-// Priority: Hold > Assist > ContinueCombat > Follow. An assist suspends the
-// follow goal (it resumes once the assisted target is gone) and overrides an
-// incidental engagement; only a hold (or a missing owner while following)
-// stops everything.
+inline Intent LootPolicy(Observation const& o)
+{
+    return {o.lootTarget ? Action::Loot : Action::None, o.generation, o.lootTarget};
+}
+// Priority: Hold > Assist > ContinueCombat > Loot > Follow. An assist
+// suspends the follow goal (it resumes once the assisted target is gone)
+// and overrides an incidental engagement; a dead corpse the companion is
+// meant to loot is collected before it resumes the follow; only a hold (or
+// a missing owner while following) stops everything.
 inline Intent Select(Observation const& o)
 {
     if (o.held || (o.following && !o.ownerAvailable))
@@ -39,7 +45,12 @@ inline Intent Select(Observation const& o)
     if (assist.action != Action::None)
         return assist;
     Intent combat = ExistingCombatPolicy(o);
-    return combat.action != Action::None ? combat : FollowPolicy(o);
+    if (combat.action != Action::None)
+        return combat;
+    Intent loot = LootPolicy(o);
+    if (loot.action != Action::None)
+        return loot;
+    return FollowPolicy(o);
 }
 inline bool IsCurrent(Intent const& i, uint32_t generation) { return i.generation == generation; }
 }

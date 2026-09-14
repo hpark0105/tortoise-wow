@@ -29,6 +29,12 @@ namespace
 // TW-014 (KAP-557): the companion holds this range around its owner.
 const float kFollowRange = 2.0f;
 
+// PORT-007 (KAP-558): a corpse loot attempt is bounded by this window (ms) so
+// a denied or unreachable corpse cannot trap the companion; on expiry the
+// prior order (follow) resumes. Phase-1 named constant; per-entry config
+// is future work.
+uint32 const kLootWindowMs = 20000;
+
 // MVP-006: nearest alive creature offering the declared quest within a
 // bounded radius; the search range shrinks as closer matches are found.
 class NearestQuestGiverCheck
@@ -370,7 +376,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 float x = me->GetPositionX();
                 float y = me->GetPositionY();
                 float z = me->GetPositionZ();
-                float radius = frand(8.0f, 20.0f);
+                // PORT-007 (KAP-558): PlayerBot.WanderRadius clamps the
+                // idle wander for lab fixtures (0 = legacy frand(8,20)).
+                float const maxRadius = sPlayerBotMgr.GetWanderRadius();
+                float radius = (maxRadius > 0.0f) ? frand(0.0f, maxRadius)
+                                                  : frand(8.0f, 20.0f);
 
                 if (Map* map = me->GetMap())
                 {
@@ -402,6 +412,7 @@ void PlayerBotAI::ClearTarget()
 {
     _lootTargetGuid = ObjectGuid();
     _lootRetryCount = 0;
+    _lootWindowMs = 0;
 }
 
 bool PlayerBotAI::TryLootDefeatedTarget()
@@ -417,6 +428,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
                            me->GetGUIDLow(), _lootTargetGuid.GetCounter());
         _lootTargetGuid = ObjectGuid();
         _lootRetryCount = 0;
+        _lootWindowMs = 0;
         return false;
     }
     if (creature->IsAlive())
@@ -425,6 +437,18 @@ bool PlayerBotAI::TryLootDefeatedTarget()
         // combat loop keeps pursuing. Do not clear it here.
         return false;
     }
+    return CorpseLootStep(creature);
+}
+// PORT-007 (KAP-558): one bounded corpse-loot step against a known dead,
+// in-world creature. Shared by the legacy fallback (TryLootDefeatedTarget)
+// and the companion Loot intent (ExecuteLoot): walk into range, tap the
+// corpse, auto-store the eligible loot, then release. A silent denial is
+// retried a bounded number of times before giving up so the companion is
+// never trapped. Every clear path resets the retry count and the loot window.
+bool PlayerBotAI::CorpseLootStep(Creature* creature)
+{
+    if (!creature || !me->GetMap() || creature->IsAlive())
+        return false;
     float const maxLootDist = me->GetMaxLootDistance(creature);
     if (!creature->IsWithinDistInMap(me, maxLootDist, true, SizeFactor::None))
     {
@@ -457,6 +481,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
                            me->GetGUIDLow(), guid.GetCounter());
         _lootTargetGuid = ObjectGuid();
         _lootRetryCount = 0;
+        _lootWindowMs = 0;
         return true;
     }
 
@@ -479,6 +504,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
                            me->GetGUIDLow(), guid.GetCounter());
         _lootTargetGuid = ObjectGuid();
         _lootRetryCount = 0;
+        _lootWindowMs = 0;
     }
     return true;
 }
@@ -1759,6 +1785,16 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
         target = GetAliveHeldTarget();
     if (target && target->GetTypeId() == TYPEID_UNIT && target->IsAlive())
         observation.target = target->GetObjectGuid().GetRawValue();
+    // PORT-007 (KAP-558): a dead, in-world corpse the companion is meant to
+    // loot becomes a first-class Loot target. The value is read here so the
+    // policy stays pure; the executor re-resolves it from the GUID and
+    // re-validates the world before acting.
+    if (_lootTargetGuid && me->GetMap())
+    {
+        Creature* loot = me->GetMap()->GetCreature(_lootTargetGuid);
+        if (loot && !loot->IsAlive() && loot->IsInWorld())
+            observation.lootTarget = loot->GetObjectGuid().GetRawValue();
+    }
     Companion::Intent intent = Companion::Select(observation);
     // PORT-006 (KAP-558): reactive defend. Fires only when the selection
     // would otherwise be Follow (no hold, no assist, no current target)
@@ -1766,7 +1802,9 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // attacking the owner or this companion. Priority stays
     // Hold > Assist > ContinueCombat > Defend > Follow, so a hold always
     // wins and an active fight is never abandoned for a new defender.
-    if (intent.action == Companion::Action::Follow && botEntry && botEntry->defendEnabled)
+    // PORT-007: defend also interrupts a Loot goal (life over loot).
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot) &&
+        botEntry && botEntry->defendEnabled)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
         {
@@ -1910,6 +1948,12 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         ClearTarget();
         return;
     }
+    if (intent.action == Companion::Action::Loot)
+    {
+        Creature* corpse = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+        ExecuteLoot(corpse, diff);
+        return;
+    }
     if (intent.action == Companion::Action::Follow)
     {
         UpdateFollow(diff);
@@ -1955,6 +1999,40 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         }
     }
     me->Attack(target, true);
+}
+
+// PORT-007 (KAP-558): one bounded execution tick of the companion Loot
+// intent. The named corpse is re-validated against the world; a vanished,
+// re-embodied or illegal corpse drops the goal so the prior order resumes.
+// The attempt is time-bounded by kLootWindowMs (a diff countdown, no wall
+// clock) so a denied or unreachable corpse can never trap the companion:
+// on expiry the follow goal resumes (regroup). The walk/tap/store body is
+// shared with the legacy fallback through CorpseLootStep.
+void PlayerBotAI::ExecuteLoot(Creature* corpse, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap() || !corpse ||
+        !corpse->IsInWorld() || corpse->IsAlive())
+    {
+        ClearTarget();
+        return;
+    }
+    if (_lootWindowMs == 0)
+    {
+        _lootWindowMs = kLootWindowMs;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] loot intent GUID:%u target:%u window:%u",
+                           me->GetGUIDLow(), corpse->GetGUIDLow(), _lootWindowMs);
+    }
+    _lootWindowMs = (_lootWindowMs > diff) ? _lootWindowMs - diff : 0;
+    if (_lootWindowMs == 0)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] corpse loot timeout GUID:%u target:%u",
+                           me->GetGUIDLow(), corpse->GetGUIDLow());
+        ClearTarget();
+        return;
+    }
+    CorpseLootStep(corpse);
 }
 
 // PORT-006 (KAP-558): one execution tick of the defend engagement. The
@@ -2028,6 +2106,10 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
 
     if (me->GetDistance(leader) > kFollowRange)
     {
+        // PORT-007: re-arm the reached latch while out of range so the
+        // "reached" line marks every out-of-range -> in-range transition
+        // (a completed regroup), not just the first approach.
+        _followReached = false;
         // The same path-find-to-position pattern idle wander and the quest
         // giver pursuit use (a player chase is a no-op without a victim).
         me->GetMotionMaster()->MovePoint(0, leader->GetPositionX(), leader->GetPositionY(),

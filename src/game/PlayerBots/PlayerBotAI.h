@@ -49,6 +49,7 @@ class PlayerBotAI: public PlayerAI
         uint32 _abilityTimer;
         ObjectGuid _lootTargetGuid;
         uint8 _lootRetryCount = 0;
+        uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
         bool _obsAlive = true;
         uint32 _obsTimer = 0;
         // MVP-006: one declared supported quest progressed through the
@@ -77,6 +78,8 @@ class PlayerBotAI: public PlayerAI
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberLootTarget(Unit* unit);
+        bool CorpseLootStep(Creature* creature);
+        void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
         bool UpdateCompanion(uint32 diff);
         bool IsFollowOwnerAvailable() const;

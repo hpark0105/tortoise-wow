@@ -105,6 +105,7 @@ class PlayerBotMgr
         bool IsPermanentBot(uint32 playerGuid);
         bool IsChatBot(uint32 playerGuid);
         bool IsDebugEnabled() const { return confDebug; }
+        float GetWanderRadius() const { return confWanderRadius; }
         uint32 GetQuestId() const { return confQuestId; }
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
@@ -167,6 +168,7 @@ class PlayerBotMgr
         std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
         uint32 confQuestId; // MVP-006: one declared supported quest (0 = disabled)
+        float confWanderRadius; // PORT-007 lab: 0 = legacy frand(8,20); >0 = max idle-wander radius (yd)
         bool forceLogoutDelay;
 
         // MVP-002 (KAP-552) lab-only stale-completion probe, armed from
