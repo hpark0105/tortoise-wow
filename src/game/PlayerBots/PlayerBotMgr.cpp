@@ -1557,8 +1557,9 @@ bool PlayerBotMgr::BotHold(Player* issuer, const std::string& botName)
 // ---------------------------------------------------------------------------
 // PORT-005 (KAP-558): owner-selected assist (.botassist <botname> <target>).
 // The companion must be in the issuer's party; the target is looked up by
-// name around the companion (grid visit, nearest match wins, dead matches
-// kept so the caller can report target-dead). Every outcome, accepted or
+// name around the companion (grid visit, nearest live match wins; a dead
+// match is kept as fallback so the caller can report target-dead when no
+// live match exists). Every outcome, accepted or
 // rejected, is logged. The AI re-validates the target and the order
 // generation at execution time.
 // ---------------------------------------------------------------------------
@@ -1571,22 +1572,45 @@ class BotAssistNameCheck
 {
 public:
     BotAssistNameCheck(Unit const* source, const std::string& name)
-        : me(source), name(name), m_range(kBotAssistSearchRange) {}
+        : me(source), name(name), m_alive(nullptr), m_aliveDist(0.0f),
+          m_dead(nullptr), m_deadDist(0.0f) {}
 
     bool operator()(Unit* u)
     {
         if (me == u || u->GetName() != name)
             return false;
-        if (!u->IsWithinDistInMap(me, m_range, false, SizeFactor::None))
+        if (!u->IsWithinDistInMap(me, kBotAssistSearchRange, false, SizeFactor::None))
             return false;
-        m_range = me->GetDistance(u); // nearest match wins
+        float const dist = me->GetDistance(u);
+        // The companion farms its own corpses, so a dead-first selection
+        // would make assist unusable right after a kill: track the nearest
+        // live and nearest dead match separately.
+        if (u->IsAlive())
+        {
+            if (!m_alive || dist < m_aliveDist)
+            {
+                m_alive = u;
+                m_aliveDist = dist;
+            }
+        }
+        else if (!m_dead || dist < m_deadDist)
+        {
+            m_dead = u;
+            m_deadDist = dist;
+        }
         return true;
     }
+
+    // Nearest live match wins; dead fallback kept for the target-dead report.
+    Unit* Best() const { return m_alive ? m_alive : m_dead; }
 
 private:
     Unit const* me;
     std::string const& name;
-    float m_range;
+    Unit* m_alive;
+    float m_aliveDist;
+    Unit* m_dead;
+    float m_deadDist;
 };
 }
 
@@ -1639,6 +1663,7 @@ bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const s
         TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, GridTypeMapContainer> grid_searcher(searcher);
         cell.Visit(p, world_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
         cell.Visit(p, grid_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+        target = check.Best();
     }
     if (!target)
     {
