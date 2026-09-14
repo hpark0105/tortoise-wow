@@ -5,6 +5,14 @@ single-companion MVP through populated-world scaling. Written for handoff:
 a new developer or session should be able to pick this up and implement
 without additional context.
 
+## Current implementation and handoff status
+
+Use the [phase handoffs](ralph/companion-port/README.md) for current implementation,
+validation status, unresolved decisions and next assignments. This architecture
+contains future design sketches, not proof that those modules or protocols exist.
+The handoffs' ownership, cancellation and execution safety requirements constrain
+those sketches; resolve conflicting examples before implementing them.
+
 ## Vision
 
 A WoW server where bots feel like people playing the game. Your companion

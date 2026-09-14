@@ -1,5 +1,16 @@
 # One useful Turtle companion: hosted-governed port queue
 
+## Phase handoffs (required at each session stop and phase exit)
+
+- [Phase 1: deterministic companion and current checkpoint](phase-1-handoff.md)
+- [Phase 2: personality and model integration](phase-2-handoff.md)
+- [Phase 3: populated world and recruitment](phase-3-handoff.md)
+- [Phase 4: learning, progression and social behavior](phase-4-handoff.md)
+
+Each handoff records code entry points, invariants, acceptance gates, evidence,
+known gaps and the next bounded assignment. Planned phases are not implementation
+claims. Follow the handoff update contract before transferring work to another session.
+
 Jira API review and scope mapping: [KAP-543 reconciliation](jira-reconciliation.md).
 Local passing evidence and Jira delivery status are tracked separately.
 
