@@ -1,6 +1,6 @@
 # Phase 1 handoff: one useful deterministic companion
 
-Status: **PORT-002..006 implemented and fixture-verified; not accepted**. Last checkpoint: 2026-09-14.
+Status: **PORT-002..007 implemented and fixture-verified; not accepted**. Last checkpoint: 2026-09-14.
 Tracking: KAP-558 under the KAP-543 plan; no Jira transition made by this checkpoint.
 
 ## Goal and boundaries
@@ -13,10 +13,10 @@ general questing, population scale and model integration are not phase-1 accepta
 ## Current checkpoint
 
 Branch: `feature/kap-558-port-companion-port`.
-Reviewed baseline at this checkpoint: `c5da5a9` (PORT-005 assist), docs head
-`b329bc1` (PORT-005 checkpoint in this file).
-Resulting commit: `0305a5e` (PORT-006 defend). Working tree is clean apart
-from ignored `local/` evidence and the user's untracked `.idea/`.
+Reviewed baseline at this checkpoint: `0305a5e` (PORT-006 defend); docs head
+`727fbeb` (PORT-006 checkpoint in this file).
+Resulting commit: `c91a0b1` (PORT-007 corpse loot + regroup). Working tree is
+clean apart from ignored `local/` evidence and the user's untracked `.idea/`.
 
 - `293743c`: excludes owned companions from ambient selection.
 - `7b577bb`: follow/combat priority change. A commit title or earlier CI green
@@ -46,6 +46,17 @@ from ignored `local/` evidence and the user's untracked `.idea/`.
   found the flap; it stays for later cards. The flag is session-scoped
   (`PlayerBotEntry.defendEnabled`) and the authorization ladder mirrors
   BotStop/BotHold.
+- `c91a0b1` (PORT-007): a dead, in-world corpse the companion last fought
+  becomes a first-class Loot intent (Hold > Assist > ContinueCombat > Loot >
+  Follow). `CorpseLootStep` is extracted from the legacy fallback and shared
+  with `ExecuteLoot`; the attempt is bounded by a 20 s diff-countdown window
+  (`kLootWindowMs`), reset on every clear path, so a denied or unreachable
+  corpse never traps the companion - on release or expiry the follow goal
+  resumes and the companion regroups to the owner. `UpdateFollow` re-arms the
+  reached latch while out of range so the `reached` log marks every completed
+  regroup, not just the first approach. New lab-only `PlayerBot.WanderRadius`
+  config (default 0 = legacy frand(8,20)) clamps idle wander for seeded
+  fixtures; `docker/server.py` passes `PLAYERBOT_WANDER_RADIUS`.
 - Canonical command is `.bothold <botname>`; `.bothyld` remains an alias.
   Hold suppresses autonomous offense until a new authorized order in this session.
 - Disposable tests cover priority, bench/restart, hold, assist and defend
@@ -58,14 +69,17 @@ from ignored `local/` evidence and the user's untracked `.idea/`.
 - `PlayerBotAI.cpp`: `UpdateCompanion`, `ExecuteCompanion`,
   `IsFollowOwnerAvailable`, `FollowGoal`, `Hold`, `AssistTarget`,
   `SelectDefendTarget`, `ExecuteDefend`, `SetDefendTarget`,
-  `ClearDefendTarget`, `BotDefendScan`, `BotDefendProbe`. Execution
+  `ClearDefendTarget`, `BotDefendScan`, `BotDefendProbe`,
+  `CorpseLootStep`, `ExecuteLoot` (window: `kLootWindowMs`, `_lootWindowMs`). Execution
   re-resolves targets and validates current owner, group and world state;
   stale orders cannot resume. The assist re-validates the named creature
   (alive, attackable, non-friendly, LOS, 35 yd) on every execution and, when
   it becomes illegal, drops it and resumes the prior order - it never
-  substitutes an unrelated enemy. Defend only fires on a would-be Follow
-  intent, and a locked target is dropped (never substituted) when the scan
-  reads the owner safe past the grace window.
+substitutes an unrelated enemy. Defend only fires on a would-be Follow
+intent, and a locked target is dropped (never substituted) when the scan
+reads the owner safe past the grace window. The Loot intent re-resolves the
+named corpse and re-validates it (dead, in-world) on every execution tick,
+  and the defend gate also interrupts an active Loot goal (life over loot).
 - `PlayerBotMgr.cpp`: population reconciliation, owner authorization and
   order generation; `BotAssist` owns the `.botassist` validation ladder and
   the 30 yd nearest-name grid lookup; `BotDefend` owns the `.botdefend`
@@ -76,6 +90,7 @@ from ignored `local/` evidence and the user's untracked `.idea/`.
   legacy stop semantics separately from hold.
 - `docker/test_bot_companion_priority.py`, `test_bot_companion_hold.py`,
   `test_bot_companion_assist.py`, `test_bot_companion_defend.py`,
+  `test_bot_companion_regroup.py`,
   `test_bot_bench.py`: isolated synthetic labs, not evidence of human gameplay.
 
 ## Validation checkpoint
@@ -84,9 +99,10 @@ Repair-set image: `tortoise-local:dev`
 (config sha256:71f8957e5528b230af4968efb9ac4a703665e04eb5eef4905b0a22f4b8c2f430),
 built with `docker compose build world` after the `3fa6b13` C++ repairs.
 Current image: `tortoise-local:dev`
-(image sha256:c14486d92bb31806a2431db7e7ca476948177d7c379719d0905f578620e7eb0c),
-rebuilt 2026-09-14 08:31Z after the PORT-006 grace/widening C++ work
-(`local/build-probe3.log`).
+(image sha256:f54d197f7440402940b469e1eaa8b97dd25a7dd06d2b5f60f55a37fc48554e02),
+rebuilt 2026-09-14 11:39Z after the PORT-007 C++ (reached re-arm +
+`PlayerBot.WanderRadius`; `local/port007-build3.log`). The previous current
+was `c14486d92bb3...` (PORT-006).
 
 Image history for the defend arc (all `tortoise-local:dev` tags):
 
@@ -95,8 +111,13 @@ Image history for the defend arc (all `tortoise-local:dev` tags):
 - `8e2e9081da0d` (short ID; runs 1-3): + PORT-006 defend C++ before the probe.
 - manifest sha256:1ecc6ae5333a39910e9734b408c4ca01326b144d757d610c9730d589df9b7c69
   (run 4): + debug probe only.
-- `c14486d92bb3...` (run 5, current): + grace hysteresis and attacker-set
-  scan widening.
+- `c14486d92bb3...` (run 5): + grace hysteresis and attacker-set
+  scan widening (PORT-006).
+- `d059e3a` (short id): + PORT-007 Loot intent/window, before the re-arm.
+- manifest sha256:e9c74e69efaad6a0f3609272547f41f8720ade4312a54111152eb6b97ad7b651:
+  + the `UpdateFollow` reached re-arm.
+- `f54d197f7440402940b469e1eaa8b97dd25a7dd06d2b5f60f55a37fc48554e02` (current):
+  + the `PlayerBot.WanderRadius` clamp (PORT-007).
 
 Focused fixtures against the repair-set image, 2026-09-14 (evidence under
 ignored `local/`; run logs `bench-run1.log`, `priority-run4.log`,
@@ -159,6 +180,20 @@ Defend fixtures (this checkpoint), 2026-09-14, `test_bot_companion_defend.py`
   within 2.0 yd), stop withdraws the goal, not-owner rejected, stranger never
   referenced, personal volumes untouched.
 
+PORT-007 fixtures (this checkpoint), 2026-09-14,
+`test_bot_companion_regroup.py` (evidence under ignored `local/`):
+
+- run4 on `f54d197f...`: **15/15 OK in 254 s** (`port007-run4.log`). Two
+  labs: loot + regroup (owner 610100 pinned at -130.5, companion 610101
+  spawn -200.5, Kobold Vermin entry 6 pinned 150 HP / regen 0 at -163.5,
+  loot 990101 -> item 117) and lootless no-trap (610400/610401, 2500040,
+  loot_id 0). In both: the assist lands mid-follow-walk (18-19 yd from the
+  vermin), the companion is the sole party damager, the Loot intent fires on
+  the death, Lab A stores 117 (log + saved-inventory DB delta = 1), Lab B's
+  tap succeeds and stores 0 (delta 0, attempt terminates), and the companion
+  walks back ~33 yd and logs `reached dist:<2.0`. Personal containers
+  untouched in both labs. In-game verification remains PORT-010.
+
 ## Superseded failure evidence
 
 Retained per the update contract; none of it is valid acceptance evidence.
@@ -194,6 +229,28 @@ PORT-005 debug arc (retained from the previous checkpoint):
   t=+4 s before the t=+8 s recruit) plus the pinned creature templates;
   `assist-run3` is 10/10.
 
+PORT-007 debug arc (this checkpoint):
+
+- `port007-run1`: FAILED in setUpClass - the unowned stranger in the original
+  3-bot fixture auto-aggroed the vermin (~14 yd away) and looted it before
+  the t30 assist; `assist rejected target-dead`. The stranger was removed
+  (2-bot roster).
+- `port007-run2` (image `d059e3a`): 12/15 - all loot mechanics green in both
+  labs, but the post-loot `reached` anchor was missing: `_followReached`
+  latched true on the first approach and never re-armed; and the owner's 30 yd
+  legacy aggro had carried it to the corpse, so the companion never left
+  follow range. Fixed by the out-of-range re-arm in `UpdateFollow`.
+- `port007-run3` (image `e9c74e69`, vermin at 15 yd): 12/15 - the owner and
+  the companion auto-aggroed from 14-29 yd at spawn and both fought the
+  vermin before the scripted holds landed. Established the stationary
+  impossibility: the assist lookup is 30 yd from the companion while the
+  owner's aggro needs the vermin beyond ~31.2 yd (size-adjusted) of the
+  owner, so a companion parked on the owner can satisfy neither. Final
+  geometry: vermin 33 yd from the owner, assist fires mid-walk; the
+  idle-wander flake (the legacy 8-20 yd wander could drift the owner into
+  aggro radius in a large share of runs) is killed by
+  `PLAYERBOT_WANDER_RADIUS=0.5`.
+
 Defend debug arc (this checkpoint):
 
 - `defend-run1/2` (4/11 each, image `8e2e9081da0d`): the old bystander test
@@ -218,6 +275,10 @@ Defend debug arc (this checkpoint):
   widening plus the 5 s grace; `defend-run5` is 11/11.
 
 Remaining gaps (fixture evidence does not cover these):
+
+- PORT-007 residual gaps (not fixture-satisfiable this wave): full-bag
+  no-store, missing loot rights, inaccessible corpse, and the owner moving
+  away during the loot window (documented in the test docstring).
 
 - Hold during active combat is covered by the priority path, the assist
   fixture's hold-cancels-active-assist window, and now the defend fixture's
