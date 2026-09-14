@@ -11,6 +11,8 @@
 #include "Opcodes.h"
 #include "Config/Config.h"
 #include "Chat.h"
+#include "GridNotifiersImpl.h"
+#include "CellImpl.h"
 #include "Group.h"
 #include "Player.h"
 #include "Group.h"
@@ -1449,6 +1451,134 @@ bool PlayerBotMgr::BotHold(Player* issuer, const std::string& botName)
     e->ai->Hold(++e->followSeq);
     sLog.outString("hold accepted bot:%s guid:%u issuer:%u",
                    botName.c_str(), e->playerGUID, issuer->GetGUIDLow());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-005 (KAP-558): owner-selected assist (.botassist <botname> <target>).
+// The companion must be in the issuer's party; the target is looked up by
+// name around the companion (grid visit, nearest match wins, dead matches
+// kept so the caller can report target-dead). Every outcome, accepted or
+// rejected, is logged. The AI re-validates the target and the order
+// generation at execution time.
+// ---------------------------------------------------------------------------
+namespace
+{
+// Search radius for the .botassist name lookup, centered on the companion.
+float const kBotAssistSearchRange = 30.0f;
+
+class BotAssistNameCheck
+{
+public:
+    BotAssistNameCheck(Unit const* source, const std::string& name)
+        : me(source), name(name), m_range(kBotAssistSearchRange) {}
+
+    bool operator()(Unit* u)
+    {
+        if (me == u || u->GetName() != name)
+            return false;
+        if (!u->IsWithinDistInMap(me, m_range, false, SizeFactor::None))
+            return false;
+        m_range = me->GetDistance(u); // nearest match wins
+        return true;
+    }
+
+private:
+    Unit const* me;
+    std::string const& name;
+    float m_range;
+};
+}
+
+bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const std::string& targetName)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty() || targetName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("assist rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("assist rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("assist rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("assist rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    Player* bot = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID)));
+    if (!bot || bot->GetSession() != e->session || !bot->GetMap())
+    {
+        sLog.outError("assist rejected not-in-world bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!issuer->GetGroup() || bot->GetGroup() != issuer->GetGroup())
+    {
+        sLog.outError("assist rejected not-in-party bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    Unit* target = nullptr;
+    {
+        CellPair const p(MaNGOS::ComputeCellPair(bot->GetPositionX(), bot->GetPositionY()));
+        Cell cell(p);
+        cell.SetNoCreate();
+        BotAssistNameCheck check(bot, targetName);
+        MaNGOS::UnitLastSearcher<BotAssistNameCheck> searcher(target, check);
+        TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, WorldTypeMapContainer> world_searcher(searcher);
+        TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, GridTypeMapContainer> grid_searcher(searcher);
+        cell.Visit(p, world_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+        cell.Visit(p, grid_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+    }
+    if (!target)
+    {
+        sLog.outError("assist rejected target-not-found bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (target->IsPlayer())
+    {
+        sLog.outError("assist rejected target-is-player bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!target->IsAlive())
+    {
+        sLog.outError("assist rejected target-dead bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (bot->IsFriendlyTo(target))
+    {
+        sLog.outError("assist rejected target-friendly bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!bot->CanAttack(target))
+    {
+        sLog.outError("assist rejected target-invalid bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!bot->IsWithinLOSInMap(target))
+    {
+        sLog.outError("assist rejected target-not-in-sight bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->ai->AssistTarget(target->GetObjectGuid().GetRawValue(), ++e->followSeq);
+    sLog.outString("assist accepted bot:%s target:%s guid:%u seq:%u",
+                   e->name.c_str(), targetName.c_str(), target->GetGUIDLow(), e->followSeq);
     return true;
 }
 

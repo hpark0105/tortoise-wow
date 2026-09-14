@@ -165,6 +165,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                                me->GetGUIDLow(), victim->GetGUIDLow(), me->GetDistance(victim));
             if (!me->CanReachWithMeleeAutoAttack(victim))
                 me->GetMotionMaster()->MoveChase(victim);
+            else
+                me->SetFacingToObject(victim);
 
             if (_abilityTimer == 0)
             {
@@ -189,6 +191,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             }
             else if (me->CanReachWithMeleeAutoAttack(held))
             {
+                me->SetFacingToObject(held);
                 if (sPlayerBotMgr.IsDebugEnabled())
                     sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f hp:%u/%u",
                                    me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
@@ -1496,6 +1499,7 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
     _following = true;
     _followReached = false;
     _held = false; // PORT-004: a new follow order cancels the hold
+    _assistTargetGuid = 0; // PORT-005: a new follow order cancels an assist
     // PORT-003: do not stop an active engagement; the follow goal takes
     // effect once combat resolves (UpdateAI gate).
     if (!me->IsInCombat())
@@ -1527,6 +1531,7 @@ void PlayerBotAI::Hold(uint32 seq)
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
+    _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
     ClearTarget();
     me->InterruptNonMeleeSpells(false);
     if (me->GetVictim())
@@ -1534,6 +1539,33 @@ void PlayerBotAI::Hold(uint32 seq)
     me->GetMotionMaster()->Clear(true);
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Hold] active GUID:%u seq:%u", me->GetGUIDLow(), seq);
+}
+
+// PORT-005 (KAP-558): owner-selected assist. The manager validated
+// ownership, party membership and the target (name -> legal hostile
+// creature in sight) before calling this; the AI re-validates at execution
+// time because grids, combat state and the target's life can change between
+// order and action. The follow goal is kept: the assist suspends it, and
+// Select resumes it once the assisted target is gone (priority:
+// Hold > Assist > ContinueCombat > Follow).
+void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
+{
+    if (!me)
+        return;
+    if (seq <= _followSeq)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Assist] goal rejected stale seq:%u current:%u GUID:%u",
+                           seq, _followSeq, me->GetGUIDLow());
+        return;
+    }
+    _followSeq = seq;
+    _assistTargetGuid = targetGuid;
+    _held = false; // a new authorized order cancels the hold
+    ClearTarget(); // the assist target is the only target; never keep an incidental one
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Assist] active GUID:%u target:%u seq:%u",
+                       me->GetGUIDLow(), (uint32)ObjectGuid(targetGuid).GetCounter(), seq);
 }
 
 bool PlayerBotAI::IsFollowOwnerAvailable() const
@@ -1552,13 +1584,30 @@ bool PlayerBotAI::IsFollowOwnerAvailable() const
 
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
-    if (!_following && !_held)
+    if (!_following && !_held && !_assistTargetGuid)
         return false;
     Companion::Observation observation;
     observation.generation = _followSeq;
     observation.following = _following;
     observation.held = _held;
     observation.ownerAvailable = IsFollowOwnerAvailable();
+    // PORT-005: re-resolve the assisted target from its GUID every tick; a
+    // dead, vanished or unloaded target clears the assist (the companion
+    // resumes its previous order) and never substitutes another enemy.
+    if (_assistTargetGuid)
+    {
+        uint64_t const assistGuid = _assistTargetGuid;
+        Creature* assist = me->GetMap() ? me->GetMap()->GetCreature(ObjectGuid(assistGuid)) : nullptr;
+        if (assist && assist->IsAlive() && assist->IsInWorld())
+            observation.assistTarget = assist->GetObjectGuid().GetRawValue();
+        else
+        {
+            _assistTargetGuid = 0;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][Assist] target gone GUID:%u target:%u",
+                               me->GetGUIDLow(), (uint32)ObjectGuid(assistGuid).GetCounter());
+        }
+    }
     Unit* target = me->GetVictim();
     if (!target)
         target = GetAliveHeldTarget();
@@ -1572,6 +1621,64 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
 {
     if (!Companion::IsCurrent(intent, _followSeq) || !me || !me->IsAlive() || !me->GetMap())
         return;
+    // PORT-005: the assist runs before the owner-availability gate: helping
+    // a party member is valid even while the follow leader is momentarily
+    // unavailable (dead, loading, grouped elsewhere).
+    if (intent.action == Companion::Action::Assist)
+    {
+        Creature* target = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+        if (!target || !target->IsAlive() || !target->IsInWorld() ||
+            !me->CanAttack(target) || me->IsFriendlyTo(target) ||
+            !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
+        {
+            // The named target is no longer a legal engagement. Drop it and
+            // resume the prior order; never substitute an unrelated enemy.
+            _assistTargetGuid = 0;
+            if (me->GetVictim())
+                me->CombatStop();
+            me->GetMotionMaster()->Clear(false);
+            ClearTarget();
+            if (sPlayerBotMgr.IsDebugEnabled())
+            {
+                if (target && target->IsAlive())
+                    sLog.outString("[PlayerBot][Assist] target out of reach GUID:%u target:%u dist:%.2f",
+                                   me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+                else
+                    sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
+                                   me->GetGUIDLow(), (uint32)ObjectGuid(intent.target).GetCounter());
+            }
+            return;
+        }
+        if (_abilityTimer > diff)
+            _abilityTimer -= diff;
+        else
+            _abilityTimer = 0;
+        if (_combatCheckTimer > diff)
+        {
+            _combatCheckTimer -= diff;
+            return;
+        }
+        _combatCheckTimer = 2000;
+        RememberLootTarget(target);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        if (!me->CanReachWithMeleeAutoAttack(target))
+            me->GetMotionMaster()->MoveChase(target);
+        else
+            me->SetFacingToObject(target);
+        if (!_abilityTimer && me->IsWithinLOSInMap(target))
+        {
+            if (uint32 spellId = SelectOffensiveSpell(target))
+            {
+                me->CastSpell(target, spellId, false);
+                _abilityTimer = urand(2000, 4000);
+                return;
+            }
+        }
+        me->Attack(target, true);
+        return;
+    }
     if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
     {
         me->InterruptNonMeleeSpells(false);
@@ -1614,6 +1721,8 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
                        me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
     if (!me->CanReachWithMeleeAutoAttack(target))
         me->GetMotionMaster()->MoveChase(target);
+    else
+        me->SetFacingToObject(target);
     if (!_abilityTimer && me->IsWithinLOSInMap(target))
     {
         if (uint32 spellId = SelectOffensiveSpell(target))

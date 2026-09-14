@@ -16,10 +16,12 @@ PERSONAL_CONTAINERS = ("tortoise-local-db-1", "tortoise-local-realmd-1",
 
 # At 3s the owner issues .botfollow to the companion.
 # The companion should already be in combat with the seeded creature.
-# The creature is Kobold Laborer (entry 80, level 3-4, ~95 HP, same
-# attackable faction as the original fixture): a bare-handed level-10 bot
-# takes ~1-2 min to bring it down, so combat is still live when the follow
-# goal fires at 3 s, and it ends well before the 240 s follow wait window.
+# The creature is a Kobold Laborer (entry 80, level 3-4, armor 52) whose
+# lab-only template is pinned to 300 HP (see _seed_sql): combat outlives
+# the 3 s follow goal and ends well inside the 240 s window. (The earlier
+# zero-damage stall was root-caused to the bot never turning to face its
+# target: melee auto-attacks are dropped outside the 120 deg facing arc,
+# and PlayerBotAI now sets facing in every melee branch.)
 # (creature.health_percent is clamped to 100 at world load; HP must come
 # from the template itself.)
 # The owner sits 60 yd away: outside the companion's 30 yd target range,
@@ -34,10 +36,21 @@ def _seed_sql():
     # range (so only the companion engages) but close enough that the
     # post-combat follow walk is short.
     # Companion starts near the creature (within aggro range).
-    # Creature 80 = Kobold Laborer (level 3-4, ~95 HP, armor 52),
-    # attackable by the test bots; the bare-handed level-10 companion needs
-    # ~1-2 min to kill it, so combat outlives the 3s follow goal and still
-    # ends inside the 240s follow wait window with margin.
+    # Creature 80 = Kobold Laborer (level 3-4, ~78-86 HP, armor 52),
+    # attackable by the test bots. The lab-only override below pins BOTH
+    # health_min and health_max to 300 so the kill takes ~10-20 s: past
+    # the 3 s follow goal and well inside the 240 s follow wait window.
+    # Both columns must be pinned: SelectLevel rolls the level (3 or 4)
+    # and interpolates spawn HP between health_min and health_max, so an
+    # override of only health_max left a 50/50 coin flip (level-3 spawns
+    # came up at 78 HP and died before the follow goal fired).
+    # The override is a fixture constant, applied only to the disposable
+    # lab database.
+    # regeneration is cleared (0): an unowned creature regenerates
+    # maxHealth/3 per 4 s tick while out of combat, and this passive
+    # NPC never enters combat (its AI takes no victim), so with the
+    # stock regeneration=3 it would never die (run 10: HP oscillated
+    # 185-300 for the whole 240 s window).
     return """
 INSERT INTO tw_char.characters
  (guid,account,name,race,class,gender,level,money,position_x,position_y,position_z,map,
@@ -51,6 +64,7 @@ INSERT INTO tw_char.playerbot (char_guid,chance,ai)
  VALUES (610100,100,'Default'),(610101,100,'Default');
 INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)
  VALUES (610100,1000610100,1,2,NULL),(610101,1000610101,1,2,1000610100);
+UPDATE tw_world.creature_template SET health_min = 300, health_max = 300, regeneration = 0 WHERE entry = 80;
 INSERT INTO tw_world.creature
  (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,
   spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)

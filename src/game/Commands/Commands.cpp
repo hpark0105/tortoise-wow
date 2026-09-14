@@ -19415,6 +19415,48 @@ bool ChatHandler::HandleBotHoldCommand(char* args)
     }
     return ok;
 }
+// ---------------------------------------------------------------------------
+// PORT-005 (KAP-558): owner-selected companion assist.
+// .botassist <botname> <targetname>: the target is the remainder of the
+// args (spaces allowed, creature names contain spaces); the companion must
+// be in the issuer's party and the target a legal hostile creature. All
+// rejections are logged in PlayerBotMgr::BotAssist.
+// ---------------------------------------------------------------------------
+bool ChatHandler::HandleBotAssistCommand(char* args)
+{
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::string rest(args ? args : "");
+    size_t const end = rest.find_first_of(" \t\r\n");
+    std::string botName = (end == std::string::npos) ? "" : rest.substr(0, end);
+    std::string targetName = (end == std::string::npos) ? "" : rest.substr(end + 1);
+    size_t const tstart = targetName.find_first_not_of(" \t\r\n");
+    if (tstart != std::string::npos)
+        targetName = targetName.substr(tstart);
+    size_t const tend = targetName.find_last_not_of(" \t\r\n");
+    if (tend != std::string::npos)
+        targetName = targetName.substr(0, tend + 1);
+    if (botName.empty() || targetName.empty())
+    {
+        PSendSysMessage("Usage: .botassist <botname> <targetname>");
+        return false;
+    }
+
+    bool ok = sPlayerBotMgr.BotAssist(p, botName, targetName);
+    if (!ok)
+    {
+        SendSysMessage("Bot assist rejected.");
+        SetSentErrorMessage(true);
+    }
+    return ok;
+}
+
 bool ChatHandler::HandleBotRecruitCommand(char* args)
 {
     return HandleBotPartyCommand(args, 0);

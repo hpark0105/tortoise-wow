@@ -117,6 +117,12 @@ class PlayerBotMgr
         bool BotFollow(Player* issuer, const std::string& botName);
         bool BotStop(Player* issuer, const std::string& botName);
         bool BotHold(Player* issuer, const std::string& botName); // PORT-004
+        // PORT-005 (KAP-558): owner-selected assist. The companion must be
+        // in the issuer's party; the target must be a legal hostile
+        // creature in the companion's vicinity (never a player or friendly).
+        // Every outcome is logged; the AI re-validates target and order
+        // generation at execution time.
+        bool BotAssist(Player* issuer, const std::string& botName, const std::string& targetName);
 
         // NEXT-002 (post-MVP): deterministic party-invite handling for
         // socketless companion sessions. A bot session never answers the

@@ -31,6 +31,13 @@ class PlayerBotAI: public PlayerAI
         void FollowGoal(uint32 leaderGuid, uint32 seq);
         void FollowStop();
         void Hold(uint32 seq); // invalidate prior orders; persist until a new order
+        // PORT-005 (KAP-558): owner-selected assist target. The manager
+        // validated ownership, party membership and the target before
+        // calling this; the AI re-validates at execution time. A newer
+        // order (seq above the current one) re-arms the companion against
+        // the named hostile and suspends the follow goal, which resumes
+        // once the target is gone.
+        void AssistTarget(uint64_t targetGuid, uint32 seq);
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         // Helpers
@@ -58,6 +65,7 @@ class PlayerBotAI: public PlayerAI
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
         bool _held = false; // PORT-004: owner-directed hold; persists until new order
+        uint64_t _assistTargetGuid = 0; // PORT-005: raw assist target guid (0 = none)
         uint32 _followSeq = 0;
         uint32 _followLeaderGuid = 0;
         uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
