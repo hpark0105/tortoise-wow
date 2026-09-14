@@ -19456,6 +19456,46 @@ bool ChatHandler::HandleBotAssistCommand(char* args)
     }
     return ok;
 }
+// ---------------------------------------------------------------------------
+// PORT-006 (KAP-558): owner-toggled reactive defend.
+// .botdefend <botname> on|off: while enabled and the companion follows the
+// owner, the companion engages a legal creature that is actually attacking
+// the owner or the companion (never a bystander). Hold always wins.
+// ---------------------------------------------------------------------------
+bool ChatHandler::HandleBotDefendCommand(char* args)
+{
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::string rest(args ? args : "");
+    size_t const end = rest.find_first_of(" \t\r\n");
+    std::string botName = (end == std::string::npos) ? "" : rest.substr(0, end);
+    std::string mode = (end == std::string::npos) ? "" : rest.substr(end + 1);
+    size_t const mstart = mode.find_first_not_of(" \t\r\n");
+    if (mstart != std::string::npos)
+        mode = mode.substr(mstart);
+    size_t const mend = mode.find_last_not_of(" \t\r\n");
+    if (mend != std::string::npos)
+        mode = mode.substr(0, mend + 1);
+    if (botName.empty() || (mode != "on" && mode != "off"))
+    {
+        PSendSysMessage("Usage: .botdefend <botname> on|off");
+        return false;
+    }
+
+    bool ok = sPlayerBotMgr.BotDefend(p, botName, mode == "on");
+    if (!ok)
+    {
+        SendSysMessage("Bot defend rejected.");
+        SetSentErrorMessage(true);
+    }
+    return ok;
+}
 
 bool ChatHandler::HandleBotRecruitCommand(char* args)
 {

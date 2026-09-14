@@ -66,6 +66,9 @@ class PlayerBotAI: public PlayerAI
         bool _following = false;
         bool _held = false; // PORT-004: owner-directed hold; persists until new order
         uint64_t _assistTargetGuid = 0; // PORT-005: raw assist target guid (0 = none)
+        uint64_t _defendTargetGuid = 0; // PORT-006: current defend candidate (0 = none)
+        uint32 _defendProbeTimer = 0; // PORT-006: debug probe pacing (2000 ms)
+        uint32 _defendTargetGrace = 0; // PORT-006: grace remaining (ms) for a locked defend target
         uint32 _followSeq = 0;
         uint32 _followLeaderGuid = 0;
         uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
@@ -78,6 +81,15 @@ class PlayerBotAI: public PlayerAI
         bool UpdateCompanion(uint32 diff);
         bool IsFollowOwnerAvailable() const;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
+        // PORT-006 (KAP-558): reactive defend (owner-enabled via
+        // .botdefend). SelectDefendTarget scans for a creature actually
+        // attacking the owner or this companion; ExecuteDefend drives the
+        // engagement; the state marker is diagnostic and is cleared when
+        // the owner is safe, held, assisted, or the goal is withdrawn.
+        Creature* SelectDefendTarget() const;
+        void ExecuteDefend(Creature* target, uint32 diff);
+        void SetDefendTarget(uint64_t guid);
+        void ClearDefendTarget(const char* reason);
         Creature* GetAliveHeldTarget() const;
         void ClearTarget();
         void InitQuestState();

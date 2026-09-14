@@ -36,13 +36,14 @@ struct PlayerBotEntry
     uint32 loginGeneration; // increments on every session creation (TW-009, AC2)
     uint32 followSeq; // TW-014: monotonic follow-goal sequence (0 = no goal yet)
     uint32 ownerAccountId; // TW-014: human account allowed to command this bot (0 = unowned)
+    bool defendEnabled; // PORT-006: owner-enabled reactive defend (session-scoped)
     uint32 partySeq; // CMP-010: invalidates pending recruit/recall work
     uint32 pendingPartySeq; // sequence captured by an asynchronous recall
     uint32 pendingPartyLeaderGuid; // human leader to revalidate after login
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
     {}
 };
 
@@ -123,6 +124,7 @@ class PlayerBotMgr
         // Every outcome is logged; the AI re-validates target and order
         // generation at execution time.
         bool BotAssist(Player* issuer, const std::string& botName, const std::string& targetName);
+        bool BotDefend(Player* issuer, const std::string& botName, bool enable); // PORT-006
 
         // NEXT-002 (post-MVP): deterministic party-invite handling for
         // socketless companion sessions. A bot session never answers the

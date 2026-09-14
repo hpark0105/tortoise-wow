@@ -1582,6 +1582,47 @@ bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const s
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// PORT-006 (KAP-558): owner-toggled reactive defend (.botdefend <bot> on|off).
+// While enabled, a following companion engages a legal creature that is
+// actually attacking the owner or the companion (AI side, every tick).
+// The flag is session-scoped: a world restart clears it. Every outcome is
+// logged; the authorization ladder mirrors BotStop/BotHold.
+// ---------------------------------------------------------------------------
+bool PlayerBotMgr::BotDefend(Player* issuer, const std::string& botName, bool enable)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("defend rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("defend rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("defend rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("defend rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->defendEnabled = enable;
+    sLog.outString("defend %s bot:%s guid:%u issuer:%u acc:%u",
+                   enable ? "enabled" : "disabled", botName.c_str(), e->playerGUID,
+                   issuer->GetGUIDLow(), issuerAcc);
+    return true;
+}
+
 bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const char* action) const
 {
     if (!issuer || !issuer->GetSession() || !e)

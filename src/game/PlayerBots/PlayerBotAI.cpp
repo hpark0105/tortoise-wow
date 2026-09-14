@@ -53,6 +53,108 @@ private:
     float i_range;
     NearestQuestGiverCheck(NearestQuestGiverCheck const&);
 };
+
+// PORT-006 (KAP-558): defend candidate scan. A creature qualifies only
+// while it is actually attacking - its current victim is the follow
+// leader (the owner) or this companion. Neutrals, bystanders and
+// unengaged creatures are never pulled. Deterministic selection: an
+// owner attacker beats a companion attacker, then nearest to the
+// companion, then lowest GUID.
+float const kDefendSearchRange = 30.0f;
+// PORT-006: a locked defend target survives this long after the last
+// confirmed candidate. The owner's melee state flaps between the 2 s
+// legacy combat checks, so the attacker's victim can read null on a
+// scan tick even mid-fight; the grace keeps the engagement alive until
+// the companion's own swing connects (verified by the run4 probe).
+uint32 const kDefendTargetGraceMs = 5000;
+
+class BotDefendScan
+{
+public:
+    BotDefendScan(Unit const* source, Unit const* owner)
+        : me(source), owner(owner), m_best(nullptr) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive())
+            return false;
+        Unit const* const victim = u->GetVictim();
+        // Candidate evidence, in priority order: the creature's victim is
+        // the owner or this companion, or the owner / companion is still in
+        // the creature's attacker set while its victim state flaps between
+        // the owner's melee swings. Only creatures that have actually hit
+        // one of ours ever enter the attacker set, so bystanders stay
+        // excluded.
+        bool const attacksOwner = owner != nullptr && victim == owner;
+        bool const attacksMe = victim == me;
+        bool const hitsOwner = owner != nullptr &&
+            u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+        bool const hitsMe = u->GetAttackers().count(const_cast<Unit*>(me)) != 0;
+        if (!attacksOwner && !attacksMe && !hitsOwner && !hitsMe)
+            return false;
+        if (!u->IsWithinDistInMap(me, kDefendSearchRange, false, SizeFactor::None))
+            return false;
+        if (me->IsFriendlyTo(u) || !me->CanAttack(u))
+            return false;
+        if (!m_best)
+        {
+            m_best = u;
+            return true;
+        }
+        int const cls = attacksOwner ? 0 : attacksMe ? 1 : hitsOwner ? 2 : 3;
+        Unit const* const bestVictim = m_best->GetVictim();
+        int const clsBest =
+            (owner && bestVictim == owner) ? 0 :
+            bestVictim == me ? 1 :
+            (owner && m_best->GetAttackers().count(const_cast<Unit*>(owner)) != 0) ? 2 : 3;
+        float const d = me->GetDistance(u);
+        float const dBest = me->GetDistance(m_best);
+        if (cls < clsBest ||
+            (cls == clsBest && (d < dBest ||
+             (d == dBest && u->GetGUIDLow() < m_best->GetGUIDLow()))))
+            m_best = u;
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotDefendScan(BotDefendScan const&);
+    Unit const* me;
+    Unit const* owner;
+    Creature* m_best;
+};
+
+class BotDefendProbe
+{
+public:
+    BotDefendProbe(Unit const* source)
+        : me(source), m_best(nullptr), m_dist(0.0f) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive())
+            return false;
+        float const d = me->GetDistance(u);
+        if (d > kDefendSearchRange)
+            return false;
+        if (!m_best || d < m_dist ||
+            (d == m_dist && u->GetGUIDLow() < m_best->GetGUIDLow()))
+        {
+            m_best = u;
+            m_dist = d;
+        }
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotDefendProbe(BotDefendProbe const&);
+    Unit const* me;
+    Creature* m_best;
+    float m_dist;
+};
 }
 
 bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
@@ -1568,6 +1670,50 @@ void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
                        me->GetGUIDLow(), (uint32)ObjectGuid(targetGuid).GetCounter(), seq);
 }
 
+// PORT-006 (KAP-558): resolve the follow leader as the defend owner with
+// the same availability rules as follow (alive, in world, same account,
+// and the same group when the follow goal is group-bound). A missing or
+// unavailable owner yields no candidate; the goal stays a plain follow.
+Creature* PlayerBotAI::SelectDefendTarget() const
+{
+    if (!me || !me->GetMap() || !botEntry || !botEntry->ownerAccountId)
+        return nullptr;
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner || !owner->IsAlive() || !owner->GetSession() ||
+        owner->GetSession()->GetAccountId() != botEntry->ownerAccountId)
+        return nullptr;
+    if (_followGroupId && (!me->GetGroup() || me->GetGroup()->GetId() != _followGroupId ||
+        owner->GetGroup() != me->GetGroup()))
+        return nullptr;
+    BotDefendScan scan(me, owner);
+    Creature* found = nullptr;
+    MaNGOS::CreatureLastSearcher<BotDefendScan> searcher(found, scan);
+    Cell::VisitGridObjects(me, searcher, kDefendSearchRange);
+    return scan.Best();
+}
+
+void PlayerBotAI::SetDefendTarget(uint64_t guid)
+{
+    if (_defendTargetGuid == guid)
+        return;
+    _defendTargetGuid = guid;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Defend] active GUID:%u target:%u",
+                       me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter());
+}
+
+void PlayerBotAI::ClearDefendTarget(const char* reason)
+{
+    if (!_defendTargetGuid)
+        return;
+    uint64_t const guid = _defendTargetGuid;
+    _defendTargetGuid = 0;
+    _defendTargetGrace = 0;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Defend] cleared GUID:%u target:%u reason:%s",
+                       me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter(), reason);
+}
+
 bool PlayerBotAI::IsFollowOwnerAvailable() const
 {
     if (!me || !me->GetMap() || !botEntry || !botEntry->ownerAccountId)
@@ -1613,7 +1759,83 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
         target = GetAliveHeldTarget();
     if (target && target->GetTypeId() == TYPEID_UNIT && target->IsAlive())
         observation.target = target->GetObjectGuid().GetRawValue();
-    ExecuteCompanion(Companion::Select(observation), diff);
+    Companion::Intent intent = Companion::Select(observation);
+    // PORT-006 (KAP-558): reactive defend. Fires only when the selection
+    // would otherwise be Follow (no hold, no assist, no current target)
+    // and the owner enabled it: engage a legal creature that is actually
+    // attacking the owner or this companion. Priority stays
+    // Hold > Assist > ContinueCombat > Defend > Follow, so a hold always
+    // wins and an active fight is never abandoned for a new defender.
+    if (intent.action == Companion::Action::Follow && botEntry && botEntry->defendEnabled)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+        {
+            _defendProbeTimer += diff;
+            if (_defendProbeTimer >= 2000)
+            {
+                _defendProbeTimer = 0;
+                // PORT-006 probe: what the defend scan sees each tick,
+                // victim state or not. near:0 means an empty 30 yd radius.
+                BotDefendProbe probe(me);
+                Creature* nearest = nullptr;
+                MaNGOS::CreatureLastSearcher<BotDefendProbe> searcher(nearest, probe);
+                Cell::VisitGridObjects(me, searcher, kDefendSearchRange);
+                nearest = probe.Best();
+                if (!nearest)
+                {
+                    sLog.outString("[PlayerBot][Defend] probe GUID:%u near:0",
+                                   me->GetGUIDLow());
+                }
+                else
+                {
+                    Unit const* const nv = nearest->GetVictim();
+                    sLog.outString(
+                        "[PlayerBot][Defend] probe GUID:%u near:%u v:%u evade:%u "
+                        "combat:%u react:%u atk:%u threat:%u dist:%.2f",
+                        me->GetGUIDLow(),
+                        (uint32)ObjectGuid(nearest->GetObjectGuid()).GetCounter(),
+                        nv ? (uint32)ObjectGuid(nv->GetObjectGuid()).GetCounter() : 0,
+                        (uint32)nearest->IsInEvadeMode(),
+                        (uint32)nearest->IsInCombat(),
+                        (uint32)nearest->GetReactState(),
+                        (uint32)nearest->GetAttackers().size(),
+                        (uint32)!nearest->GetThreatManager().isThreatListEmpty(),
+                        me->GetDistance(nearest));
+                }
+            }
+        }
+        Creature* defender = SelectDefendTarget();
+        if (defender)
+        {
+            SetDefendTarget(defender->GetObjectGuid().GetRawValue());
+            _defendTargetGrace = kDefendTargetGraceMs;
+            ExecuteDefend(defender, diff);
+            return true;
+        }
+        if (_defendTargetGuid)
+        {
+            // Grace hysteresis: the scan can read the attacker as safe on a
+            // flap tick. Keep the locked target through kDefendTargetGraceMs
+            // after the last confirmed candidate; ExecuteDefend re-validates
+            // world state each tick, and the companion's first swing hands
+            // the fight to the continue-combat path.
+            Creature* held = me->GetMap()->GetCreature(ObjectGuid(_defendTargetGuid));
+            if (held && held->IsAlive() && _defendTargetGrace > 0)
+            {
+                _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
+                ExecuteDefend(held, diff);
+                return true;
+            }
+            ClearDefendTarget("owner safe");
+        }
+    }
+    else if (_defendTargetGuid && !me->GetVictim() && !GetAliveHeldTarget())
+    {
+        ClearDefendTarget(intent.action == Companion::Action::Hold ? "hold"
+                          : intent.action == Companion::Action::Assist ? "assist"
+                          : "no goal");
+    }
+    ExecuteCompanion(intent, diff);
     return true;
 }
 
@@ -1718,6 +1940,52 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     RememberLootTarget(target);
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
+                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+    if (!me->CanReachWithMeleeAutoAttack(target))
+        me->GetMotionMaster()->MoveChase(target);
+    else
+        me->SetFacingToObject(target);
+    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+    {
+        if (uint32 spellId = SelectOffensiveSpell(target))
+        {
+            me->CastSpell(target, spellId, false);
+            _abilityTimer = urand(2000, 4000);
+            return;
+        }
+    }
+    me->Attack(target, true);
+}
+
+// PORT-006 (KAP-558): one execution tick of the defend engagement. The
+// named creature is re-validated against world state; an illegal
+// candidate is dropped (reason logged) and the prior order resumes - a
+// bystander is never substituted. Once the attack lands, the companion
+// keeps the victim through the normal continue-combat path until the
+// defender is dead, and the follow intent resumes on the next tick.
+void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap() || !target ||
+        !target->IsAlive() || !target->IsInWorld() ||
+        !me->CanAttack(target) || me->IsFriendlyTo(target) ||
+        !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
+    {
+        ClearDefendTarget("target invalid");
+        return;
+    }
+    if (_abilityTimer > diff)
+        _abilityTimer -= diff;
+    else
+        _abilityTimer = 0;
+    if (_combatCheckTimer > diff)
+    {
+        _combatCheckTimer -= diff;
+        return;
+    }
+    _combatCheckTimer = 2000;
+    RememberLootTarget(target);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
                        me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
     if (!me->CanReachWithMeleeAutoAttack(target))
         me->GetMotionMaster()->MoveChase(target);
