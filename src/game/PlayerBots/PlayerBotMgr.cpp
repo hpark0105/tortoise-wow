@@ -374,7 +374,10 @@ void PlayerBotMgr::Load()
     // TW-012: clamp both ends to real roster capacity while preserving exact
     // boundaries. The old >= / +1 normalization changed a one-bot 1..1
     // request into 0..1 and could produce a target above capacity.
-    uint32 const capacity = (uint32)m_bots.size();
+      uint32 capacity = 0;
+    for (auto const& entry : m_bots)
+        if (!entry.second->customBot && !entry.second->isChatBot && !entry.second->ownerAccountId)
+            ++capacity;
     confMinBots = std::min(confMinBots, capacity);
     confMaxBots = std::min(confMaxBots, capacity);
     if (confMaxBots < confMinBots)
@@ -487,14 +490,7 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
     e->ai->SetPlayer(player);
     e->ai->OnPlayerLogin();
 
-    // A recalled bot may have been saved in a dead state (health=0, corpse
-    // pending). Restore it to full health before any party recruit can run.
-    if (player->IsDead())
-    {
-        player->ResurrectPlayer(1.0f, false);
-        sLog.outString("[PlayerBot][Login] resurrected dead bot:%s guid:%u",
-                       e->name.c_str(), e->playerGUID);
-    }
+    // Preserve saved death state; recovery must use normal game paths.
 
     // CMP-010: a recall may have queued this login. Revalidate every mutable
     // condition after the bot is actually in-world; a newer dismiss/recruit
@@ -506,7 +502,7 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
         e->pendingPartyLeaderGuid = 0;
         e->pendingPartySeq = 0;
         Player* leader = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, leaderGuid));
-        if (!CompletePartyRecruit(leader, e, sequence))
+        if (!CompletePartyRecruit(leader, e, sequence, player))
             sLog.outError("party recall completion rejected bot:%s guid:%u leader:%u seq:%u",
                           e->name.c_str(), e->playerGUID, leaderGuid, sequence);
     }
@@ -678,7 +674,11 @@ bool PlayerBotMgr::AddOrRemoveBot()
 {
     uint32 const target = confMinBots == confMaxBots
         ? confMinBots : urand(confMinBots, confMaxBots);
-    uint32 const active = m_stats.onlineCount + m_stats.loadingCount;
+    uint32 active = 0;
+    for (auto const& entry : m_bots)
+        if (!entry.second->customBot && !entry.second->isChatBot && !entry.second->ownerAccountId &&
+            (entry.second->state == PB_STATE_ONLINE || entry.second->state == PB_STATE_LOADING))
+            ++active;
     /*
     10 --- --- --- --- --- --- --- --- --- --- 20 bots
                 NumActuel
@@ -1419,6 +1419,39 @@ bool PlayerBotMgr::BotStop(Player* issuer, const std::string& botName)
     return true;
 }
 
+bool PlayerBotMgr::BotHold(Player* issuer, const std::string& botName)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("hold rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("hold rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("hold rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("hold rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->ai->Hold(++e->followSeq);
+    sLog.outString("hold accepted bot:%s guid:%u issuer:%u",
+                   botName.c_str(), e->playerGUID, issuer->GetGUIDLow());
+    return true;
+}
+
 bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const char* action) const
 {
     if (!issuer || !issuer->GetSession() || !e)
@@ -1438,7 +1471,7 @@ bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const c
     return true;
 }
 
-bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint32 sequence)
+bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint32 sequence, Player* knownBot)
 {
     if (!ValidatePartyOwner(issuer, e, "recruit"))
         return false;
@@ -1453,8 +1486,7 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
         sLog.outError("party recruit rejected offline bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
         return false;
     }
-    ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
-    Player* bot = sObjectAccessor.FindPlayer(botGuid);
+    Player* bot = knownBot ? knownBot : sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID)));
     if (!bot || bot->GetSession() != e->session)
     {
         sLog.outError("party recruit rejected missing in-world bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());

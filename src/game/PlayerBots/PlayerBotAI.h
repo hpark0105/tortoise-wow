@@ -3,6 +3,7 @@
 
 #include "PlayerAI.h"
 #include "WorldSession.h"
+#include "Companion/Policy.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -29,6 +30,7 @@ class PlayerBotAI: public PlayerAI
         // seq is at or below the current one is stale and never resumes.
         void FollowGoal(uint32 leaderGuid, uint32 seq);
         void FollowStop();
+        void Hold(uint32 seq); // invalidate prior orders; persist until a new order
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         // Helpers
@@ -55,14 +57,19 @@ class PlayerBotAI: public PlayerAI
         uint8 _questDenyCount = 0;
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
+        bool _held = false; // PORT-004: owner-directed hold; persists until new order
         uint32 _followSeq = 0;
         uint32 _followLeaderGuid = 0;
+        uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
         bool _followReached = false;
         uint32 _followDebugTimer = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberLootTarget(Unit* unit);
         bool UpdateFollow(uint32 diff);
+        bool UpdateCompanion(uint32 diff);
+        bool IsFollowOwnerAvailable() const;
+        void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
         Creature* GetAliveHeldTarget() const;
         void ClearTarget();
         void InitQuestState();

@@ -7,6 +7,7 @@
 #include "ObjectMgr.h"
 #include "MoveSpline.h"
 #include "PlayerBotMgr.h"
+#include "Group.h"
 #include "WorldPacket.h"
 #include "Map.h"
 #include "Maps/GridSearchers.h"
@@ -124,15 +125,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (!me->IsAlive())
         return;
 
-    // PORT-003: an owner-directed follow goal is suspended while the bot has
-    // an active combat engagement (current victim or held target). Once combat
-    // resolves, the bot resumes following its owner. Following without combat
-    // still works as before.
-    if (_following && !me->IsInCombat() && !GetAliveHeldTarget())
-    {
-        if (UpdateFollow(diff))
-            return;
-    }
+    if (UpdateCompanion(diff))
+        return;
 
     if (TryLootDefeatedTarget())
         return;
@@ -1498,8 +1492,10 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
     }
     _followSeq = seq;
     _followLeaderGuid = leaderGuid;
+    _followGroupId = me->GetGroup() ? me->GetGroup()->GetId() : 0;
     _following = true;
     _followReached = false;
+    _held = false; // PORT-004: a new follow order cancels the hold
     // PORT-003: do not stop an active engagement; the follow goal takes
     // effect once combat resolves (UpdateAI gate).
     if (!me->IsInCombat())
@@ -1520,6 +1516,114 @@ void PlayerBotAI::FollowStop()
     me->GetMotionMaster()->Clear(true);
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Follow] inactive GUID:%u", me->GetGUIDLow());
+}
+
+void PlayerBotAI::Hold(uint32 seq)
+{
+    if (!me || seq <= _followSeq)
+        return;
+    _followSeq = seq;
+    _held = true;
+    _following = false;
+    _followLeaderGuid = 0;
+    _followReached = false;
+    ClearTarget();
+    me->InterruptNonMeleeSpells(false);
+    if (me->GetVictim())
+        me->CombatStop();
+    me->GetMotionMaster()->Clear(true);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Hold] active GUID:%u seq:%u", me->GetGUIDLow(), seq);
+}
+
+bool PlayerBotAI::IsFollowOwnerAvailable() const
+{
+    if (!me || !me->GetMap() || !botEntry || !botEntry->ownerAccountId)
+        return false;
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner || !owner->IsAlive() || !owner->GetSession() ||
+        owner->GetSession()->GetAccountId() != botEntry->ownerAccountId)
+        return false;
+    if (_followGroupId && (!me->GetGroup() || me->GetGroup()->GetId() != _followGroupId ||
+        owner->GetGroup() != me->GetGroup()))
+        return false;
+    return true;
+}
+
+bool PlayerBotAI::UpdateCompanion(uint32 diff)
+{
+    if (!_following && !_held)
+        return false;
+    Companion::Observation observation;
+    observation.generation = _followSeq;
+    observation.following = _following;
+    observation.held = _held;
+    observation.ownerAvailable = IsFollowOwnerAvailable();
+    Unit* target = me->GetVictim();
+    if (!target)
+        target = GetAliveHeldTarget();
+    if (target && target->GetTypeId() == TYPEID_UNIT && target->IsAlive())
+        observation.target = target->GetObjectGuid().GetRawValue();
+    ExecuteCompanion(Companion::Select(observation), diff);
+    return true;
+}
+
+void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
+{
+    if (!Companion::IsCurrent(intent, _followSeq) || !me || !me->IsAlive() || !me->GetMap())
+        return;
+    if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
+    {
+        me->InterruptNonMeleeSpells(false);
+        if (me->GetVictim())
+            me->CombatStop();
+        me->GetMotionMaster()->Clear(false);
+        ClearTarget();
+        return;
+    }
+    if (intent.action == Companion::Action::Follow)
+    {
+        UpdateFollow(diff);
+        return;
+    }
+    if (intent.action != Companion::Action::ContinueCombat)
+        return;
+    Creature* target = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+    if (!target || !target->IsAlive() || !target->IsInWorld() ||
+        !me->CanAttack(target) || me->IsFriendlyTo(target) || me->GetDistance(target) > 35.0f ||
+        (me->GetVictim() != target && GetAliveHeldTarget() != target))
+    {
+        if (me->GetVictim())
+            me->CombatStop();
+        ClearTarget();
+        return;
+    }
+    if (_abilityTimer > diff)
+        _abilityTimer -= diff;
+    else
+        _abilityTimer = 0;
+    if (_combatCheckTimer > diff)
+    {
+        _combatCheckTimer -= diff;
+        return;
+    }
+    _combatCheckTimer = 2000;
+    RememberLootTarget(target);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
+                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+    if (!me->CanReachWithMeleeAutoAttack(target))
+        me->GetMotionMaster()->MoveChase(target);
+    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+    {
+        if (uint32 spellId = SelectOffensiveSpell(target))
+        {
+            me->CastSpell(target, spellId, false);
+            _abilityTimer = urand(2000, 4000);
+            return;
+        }
+    }
+    me->Attack(target, true);
 }
 
 bool PlayerBotAI::UpdateFollow(uint32 diff)

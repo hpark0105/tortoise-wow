@@ -14,35 +14,49 @@ COMP_ACC = 1000610101
 PERSONAL_CONTAINERS = ("tortoise-local-db-1", "tortoise-local-realmd-1",
                        "tortoise-local-world-1")
 
-# At 10s the owner issues .botfollow to the companion.
+# At 3s the owner issues .botfollow to the companion.
 # The companion should already be in combat with the seeded creature.
+# The creature is Kobold Laborer (entry 80, level 3-4, ~95 HP, same
+# attackable faction as the original fixture): a bare-handed level-10 bot
+# takes ~1-2 min to bring it down, so combat is still live when the follow
+# goal fires at 3 s, and it ends well before the 240 s follow wait window.
+# (creature.health_percent is clamped to 100 at world load; HP must come
+# from the template itself.)
+# The owner sits 60 yd away: outside the companion's 30 yd target range,
+# so only the companion fights (single attacker, predictable duration).
 # After the fix: companion keeps fighting, then follows after combat ends.
 # Before the fix: companion stops fighting immediately and follows.
-PRIORITY_SCRIPT = "10000:%d:botfollow" % OWNER_GUID
+PRIORITY_SCRIPT = "3000:%d:botfollow Prioritycomp" % OWNER_GUID
 
 
 def _seed_sql():
-    # Owner is far from the combat so the companion must move to follow.
+    # Owner is 60 yd from the combat: outside the companion's 30 yd target
+    # range (so only the companion engages) but close enough that the
+    # post-combat follow walk is short.
     # Companion starts near the creature (within aggro range).
-    # Creature 6 = Chicken (weak, dies quickly to a level-10 bot).
+    # Creature 80 = Kobold Laborer (level 3-4, ~95 HP, armor 52),
+    # attackable by the test bots; the bare-handed level-10 companion needs
+    # ~1-2 min to kill it, so combat outlives the 3s follow goal and still
+    # ends inside the 240s follow wait window with margin.
     return """
 INSERT INTO tw_char.characters
  (guid,account,name,race,class,gender,level,money,position_x,position_y,position_z,map,
   orientation,zone,health,power1,power2,power3,power4,power5,xp,xp_gain)
 VALUES
- (610100,1000610100,'Priorityowner',1,1,0,10,100000,-8949.95,-120.493,83.5312,0,
-  0,12,100,0,0,0,0,0,0,0,1),
+ (610100,1000610100,'Priowner',1,1,0,10,100000,-8949.95,-195.493,83.5312,0,
+  0,12,100,0,0,0,0,0,0,1),
  (610101,1000610101,'Prioritycomp',1,1,0,10,100000,-8949.95,-134.493,83.5312,0,
-  0,12,100,0,0,0,0,0,0,0,1);
-INSERT INTO tw_char.playerbot (char_guid,chance,ai) VALUES (610101,100,'Default');
-INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version)
- VALUES (610101,1000610101,1,2);
+  0,12,100,0,0,0,0,0,0,1);
+INSERT INTO tw_char.playerbot (char_guid,chance,ai)
+ VALUES (610100,100,'Default'),(610101,100,'Default');
+INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)
+ VALUES (610100,1000610100,1,2,NULL),(610101,1000610101,1,2,1000610100);
 INSERT INTO tw_world.creature
  (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,
   spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)
-VALUES (2500010,6,0,-8949.95,-135.493,83.5312,0,600,600,0,100,100,0,1);
+VALUES (2500010,80,0,-8949.95,-135.493,83.5312,0,600,600,0,100,100,0,1);
 DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910
- AND position_y BETWEEN -170 AND -100 AND guid <> 2500010;
+ AND position_y BETWEEN -230 AND -100 AND guid <> 2500010;
 """
 
 
@@ -90,7 +104,7 @@ class BotCompanionPriorityTests(unittest.TestCase):
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, _seed_sql())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"],
                       env=cls.env)
-            # Wait for the follow goal to be issued (10s mark).
+            # Wait for the follow goal to be issued (3s script event).
             cls.logs = p.wait_for(cls.base, cls.env, lambda text:
                                   "[PlayerBot][Follow] active" in text,
                                   deadline=180)
@@ -99,7 +113,7 @@ class BotCompanionPriorityTests(unittest.TestCase):
             # We look for a "reached" or "leader unavailable" log AFTER the
             # follow goal was active, proving the bot transitioned from
             # combat to follow.
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 240
             while time.monotonic() < deadline:
                 cls.logs = p.command(["docker", "compose"] + cls.base +
                                      ["logs", "--no-color", "world"], env=cls.env, timeout=60)
@@ -121,17 +135,18 @@ class BotCompanionPriorityTests(unittest.TestCase):
             if cls.base is not None:
                 p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.personal_after = cls._personal_state()
-
     def test_01_companion_engaged_combat(self):
         """The companion fought the creature before the follow goal arrived.
 
-        The creature is within aggro range at spawn; the companion's normal
-        AI should pick it up and engage before the 10s follow script fires.
+        The creature is within aggro range at spawn; the companion picks it
+        up immediately. Pre-follow engagement logs "engage" via the legacy
+        path; post-follow combat logs "fighting" via ExecuteCompanion.
+        Either proves the companion engaged the creature.
         """
-        self.assertIn("fighting GUID:610101", self.logs)
+        self.assertTrue(
+            "engage GUID:610101" in self.logs or
+            "fighting GUID:610101" in self.logs,
+            "No combat activity found for the companion")
 
     def test_02_follow_goal_activated(self):
         """The follow goal was accepted and activated."""
@@ -160,7 +175,7 @@ class BotCompanionPriorityTests(unittest.TestCase):
 
     def test_05_personal_containers_untouched(self):
         """No personal server containers were affected."""
-        self.assertEqual(self.personal_before, self.personal_after)
+        self.assertEqual(self.personal_before, self._personal_state())
 
 
 if __name__ == "__main__":

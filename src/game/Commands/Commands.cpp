@@ -19387,6 +19387,34 @@ bool ChatHandler::HandleBotFollowStopCommand(char* args, bool follow)
     return ok;
 }
 
+bool ChatHandler::HandleBotHoldCommand(char* args)
+{
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::string botName(args ? args : "");
+    size_t const end = botName.find_first_of(" \t\r\n");
+    if (end != std::string::npos)
+        botName = botName.substr(0, end);
+    if (botName.empty())
+    {
+        PSendSysMessage("Usage: .bothold <botname>");
+        return false;
+    }
+
+    bool ok = sPlayerBotMgr.BotHold(p, botName);
+    if (!ok)
+    {
+        SendSysMessage("Bot hold rejected.");
+        SetSentErrorMessage(true);
+    }
+    return ok;
+}
 bool ChatHandler::HandleBotRecruitCommand(char* args)
 {
     return HandleBotPartyCommand(args, 0);

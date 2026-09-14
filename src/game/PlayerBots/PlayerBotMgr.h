@@ -116,6 +116,7 @@ class PlayerBotMgr
         // every outcome, accepted or rejected, is logged.
         bool BotFollow(Player* issuer, const std::string& botName);
         bool BotStop(Player* issuer, const std::string& botName);
+        bool BotHold(Player* issuer, const std::string& botName); // PORT-004
 
         // NEXT-002 (post-MVP): deterministic party-invite handling for
         // socketless companion sessions. A bot session never answers the
@@ -188,7 +189,7 @@ class PlayerBotMgr
         };
         void UpdateFollowScript();
         PlayerBotEntry* FindBotByName(const std::string& name) const;
-        bool CompletePartyRecruit(Player* issuer, PlayerBotEntry* entry, uint32 sequence);
+        bool CompletePartyRecruit(Player* issuer, PlayerBotEntry* entry, uint32 sequence, Player* knownBot = nullptr);
         bool ValidatePartyOwner(Player* issuer, PlayerBotEntry* entry, const char* action) const;
         std::vector<FollowScriptEvent> m_followScript;
         uint32 m_followScriptStartMs;

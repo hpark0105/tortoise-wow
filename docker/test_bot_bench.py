@@ -39,7 +39,7 @@ def _seed_sql():
     ownership = []
     for guid, account in zip(ALL_GUIDS, accounts):
         # Only the companion is owned; ambient bots have no owner.
-        owner = str(OWNER_ACC) if guid == COMP_GUID else "NULL"
+        owner = str(OWNER_ACC) if guid in (OWNER_GUID, COMP_GUID) else "NULL"
         ownership.append("(%d,%d,1,2,%s)" % (guid, account, owner))
     roster = ",".join("(%d,100,'Default')" % guid for guid in ALL_GUIDS)
     return """
@@ -59,6 +59,9 @@ DELETE FROM tw_world.creature WHERE map=0
 class BotBenchTests(unittest.TestCase):
     base = env = project = evidence = None
     logs = ""
+    bench_samples = []
+    restart_samples = []
+    saved_before = saved_after = ""
     personal_before = {}
     personal_after = {}
 
@@ -108,9 +111,32 @@ class BotBenchTests(unittest.TestCase):
             cls.logs = p.wait_for(cls.base, cls.env, lambda text:
                                   "party dismiss accepted bot:Benchcomp" in text,
                                   deadline=120)
+            # Observe actual online rows across multiple reconciliation intervals.
+            for _ in range(5):
+                time.sleep(5)
+                cls.bench_samples.append(p.db_exec(cls.base, cls.env,
+                    "SELECT guid,online FROM characters WHERE guid BETWEEN 600101 AND 600105 ORDER BY guid"))
+            p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
+            cls.saved_before = p.db_exec(cls.base, cls.env,
+                "SELECT guid,account,level,xp,money FROM characters WHERE guid=600101")
+            # Restart the same disposable world without test-logging the companion.
+            # Recall is deliberately delayed until after two more refresh intervals.
+            world["PLAYERBOT_TEST_LOGIN"] = str(OWNER_GUID)
+            world["PLAYERBOT_FOLLOW_SCRIPT"] = "30000:%d:botrecall Benchcomp" % OWNER_GUID
+            p.write_compose(cls.evidence, world)
+            p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            cls.logs = p.wait_for(cls.base, cls.env, lambda text:
+                "[PlayerBot][FollowScript] started" in text, deadline=420)
+            for _ in range(4):
+                time.sleep(5)
+                cls.restart_samples.append(p.db_int(cls.base, cls.env,
+                    "SELECT online FROM characters WHERE guid=600101"))
+            cls.saved_after = p.db_exec(cls.base, cls.env,
+                "SELECT guid,account,level,xp,money FROM characters WHERE guid=600101")
             # Wait for the recall (60s) to complete.
             cls.logs = p.wait_for(cls.base, cls.env, lambda text:
-                                  text.count("party recruit accepted bot:Benchcomp") >= 2,
+                                  "party recall queued bot:Benchcomp" in text and
+                                  "party recruit accepted bot:Benchcomp" in text,
                                   deadline=180)
             time.sleep(5)
             cls.logs = p.command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
@@ -120,17 +146,14 @@ class BotBenchTests(unittest.TestCase):
             if cls.base is not None:
                 p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.personal_after = cls._personal_state()
-
     def test_01_companion_recruited(self):
         """The owner can recruit the owned companion."""
         self.assertIn("party recruit accepted bot:Benchcomp", self.logs)
 
     def test_02_companion_dismissed(self):
         """The owner can dismiss the owned companion."""
-        self.assertIn("party dismiss accepted bot:Benchcomp", self.logs)
+        self.assertTrue(self.bench_samples)
+        self.assertTrue(all("600101\t0" in sample for sample in self.bench_samples))
 
     def test_03_no_unauthorized_relogin_between_dismiss_and_recall(self):
         """After dismiss, the population system must NOT re-login the companion.
@@ -153,12 +176,9 @@ class BotBenchTests(unittest.TestCase):
         # We look for the specific pattern of a population-triggered login
         # (which would appear as a PlayerBot login without a preceding
         # "party recall" log line nearby).
-        dismiss_idx = self.logs.find("party dismiss accepted bot:Benchcomp")
-        recall_idx = self.logs.find(
-            "party recall queued bot:Benchcomp")
-        if dismiss_idx < 0 or recall_idx < 0 or recall_idx < dismiss_idx:
-            self.fail("Could not locate dismiss/recall markers in logs")
-        between = self.logs[dismiss_idx:recall_idx]
+        recall_idx = self.logs.find("party recall queued bot:Benchcomp")
+        self.assertGreaterEqual(recall_idx, 0)
+        between = self.logs[:recall_idx]
         # A population-driven re-login would show as a new PlayerBot login
         # for Benchcomp between the dismiss and the recall.
         bench_relogins = [
@@ -173,7 +193,9 @@ class BotBenchTests(unittest.TestCase):
     def test_04_companion_recalled(self):
         """Recall reactivates the companion, preserving ownership."""
         self.assertGreaterEqual(
-            self.logs.count("party recruit accepted bot:Benchcomp"), 2)
+            self.logs.count("party recruit accepted bot:Benchcomp"), 1)
+        self.assertEqual(self.restart_samples, [0, 0, 0, 0])
+        self.assertEqual(self.saved_before, self.saved_after)
 
     def test_05_ambient_population_maintained(self):
         """The ambient population target is still met by ambient bots.
@@ -182,16 +204,16 @@ class BotBenchTests(unittest.TestCase):
         bot to maintain the population target of 3.
         """
         # At least 3 ambient bots should have logged in at some point.
-        ambient_logins = sum(
-            1 for name in ("Ambone", "Ambtwo", "Ambthree", "Ambfour")
-            if name in self.logs and "[Login]" in self.logs)
-        self.assertGreaterEqual(
-            ambient_logins, 2,
-            "Expected at least 2 ambient bot logins, got %d" % ambient_logins)
+        # The synthetic owner is owned too: only actual ambient bots count.
+        self.assertTrue(self.bench_samples)
+        for sample in self.bench_samples[-2:]:
+            online = [row for row in sample.splitlines()
+                      if not row.startswith("600101\t") and row.endswith("\t1")]
+            self.assertEqual(len(online), 3, sample)
 
     def test_06_personal_containers_untouched(self):
         """No personal server containers were affected."""
-        self.assertEqual(self.personal_before, self.personal_after)
+        self.assertEqual(self.personal_before, self._personal_state())
 
 
 if __name__ == "__main__":

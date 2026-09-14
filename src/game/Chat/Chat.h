@@ -727,6 +727,7 @@ class ChatHandler
         // TW-014 (KAP-557): owner-only companion follow/stop.
         bool HandleBotFollowCommand(char* args);
         bool HandleBotStopCommand(char* args);
+        bool HandleBotHoldCommand(char* args);
         bool HandleBotFollowStopCommand(char* args, bool follow);
         bool HandleBotRecruitCommand(char* args);
         bool HandleBotDismissCommand(char* args);
