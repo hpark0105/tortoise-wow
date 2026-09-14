@@ -124,10 +124,15 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (!me->IsAlive())
         return;
 
-    // TW-014 (KAP-557): an owner-directed follow goal preempts normal
-    // behavior; while active the bot only pursues its owner.
-    if (UpdateFollow(diff))
-        return;
+    // PORT-003: an owner-directed follow goal is suspended while the bot has
+    // an active combat engagement (current victim or held target). Once combat
+    // resolves, the bot resumes following its owner. Following without combat
+    // still works as before.
+    if (_following && !me->IsInCombat() && !GetAliveHeldTarget())
+    {
+        if (UpdateFollow(diff))
+            return;
+    }
 
     if (TryLootDefeatedTarget())
         return;
@@ -1491,13 +1496,14 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
                            seq, _followSeq, me->GetGUIDLow());
         return;
     }
-    if (me->GetVictim())
-        me->CombatStop();
     _followSeq = seq;
     _followLeaderGuid = leaderGuid;
     _following = true;
     _followReached = false;
-    me->GetMotionMaster()->Clear(false);
+    // PORT-003: do not stop an active engagement; the follow goal takes
+    // effect once combat resolves (UpdateAI gate).
+    if (!me->IsInCombat())
+        me->GetMotionMaster()->Clear(false);
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Follow] active GUID:%u leader:%u seq:%u",
                        me->GetGUIDLow(), leaderGuid, seq);
