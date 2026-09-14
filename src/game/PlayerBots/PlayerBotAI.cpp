@@ -94,6 +94,32 @@ float const kDefendSearchRange = 30.0f;
 // the companion's own swing connects (verified by the run4 probe).
 uint32 const kDefendTargetGraceMs = 5000;
 
+// PORT-005 (KAP-558): defend legality. The faction masks can read an
+// active attacker as neutral (Turtle faction data: template 32 vs
+// player template 1), yet the player melee path gates only on
+// IsFriendlyTo and Unit::Attack performs no hostility check, so the
+// owner can fight such a mob. A creature with real attack evidence on
+// the owner or this companion is defendable even when IsHostileTo is
+// false; bystanders stay excluded because only creatures that actually
+// hit one of ours carry that evidence (victim pointer or
+// attacker-set membership), and stale evidence decays when the fight
+// ends.
+static bool DefendTargetLegal(Unit const* me, Unit const* owner, Creature const* u)
+{
+    if (me->IsFriendlyTo(u))
+        return false;
+    if (me->CanAttack(u))
+        return true;
+    if (!u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
+        return false;
+    Unit const* const victim = u->GetVictim();
+    if (victim == me || (owner && victim == owner))
+        return true;
+    if (u->GetAttackers().count(const_cast<Unit*>(me)) != 0)
+        return true;
+    return owner != nullptr && u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+}
+
 class BotDefendScan
 {
 public:
@@ -120,7 +146,7 @@ public:
             return false;
         if (!u->IsWithinDistInMap(me, kDefendSearchRange, false, SizeFactor::None))
             return false;
-        if (me->IsFriendlyTo(u) || !me->CanAttack(u))
+        if (!DefendTargetLegal(me, owner, u))
         {
             // Diagnostic (verbose only): a candidate with real attack
             // evidence that fails the legality gate is otherwise silent.
@@ -2332,9 +2358,15 @@ void PlayerBotAI::ExecuteLoot(Creature* corpse, uint32 diff)
 // defender is dead, and the follow intent resumes on the next tick.
 void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
 {
+    Unit const* owner = nullptr;
+    if (me && me->GetMap())
+    {
+        if (Player* p = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid)))
+            owner = p;
+    }
     if (!me || !me->IsAlive() || !me->GetMap() || !target ||
         !target->IsAlive() || !target->IsInWorld() ||
-        !me->CanAttack(target) || me->IsFriendlyTo(target) ||
+        !DefendTargetLegal(me, owner, target) ||
         !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
     {
         ClearDefendTarget("target invalid");
