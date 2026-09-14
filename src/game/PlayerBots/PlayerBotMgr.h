@@ -180,6 +180,17 @@ class PlayerBotMgr
         uint32 m_staleProbeGuid;
         int m_staleProbeStage;
         uint32 m_staleProbeOldGen;
+        // PORT-008 (KAP-558) lab-only owner logout/relogin probe (default
+        // off): at logoutMs after the probed bot's first ONLINE state the
+        // session is deleted (DeleteBot, the normal logout path); at
+        // reloginMs it is queued back (AddBot). Offsets in ms from that
+        // baseline, so fixtures reason in the follow-script clock.
+        void UpdateTestLogoutScript();
+        uint32 m_logoutProbeGuid;
+        uint32 m_logoutProbeLogoutMs;
+        uint32 m_logoutProbeReloginMs;
+        uint32 m_logoutProbeLoginMs;
+        int m_logoutProbeStage;
 
         // TW-014 (KAP-557) lab-only deterministic follow/stop script, armed
         // from PlayerBot.FollowScript (default empty = disabled). Event

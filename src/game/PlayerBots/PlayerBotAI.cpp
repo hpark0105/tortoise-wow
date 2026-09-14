@@ -34,6 +34,17 @@ const float kFollowRange = 2.0f;
 // prior order (follow) resumes. Phase-1 named constant; per-entry config
 // is future work.
 uint32 const kLootWindowMs = 20000;
+// PORT-008 (KAP-558): bounded pursuit. While the companion chases a valid
+// target it cannot land a melee hit on, the pursuit is budgeted to this
+// many ms; on expiry the pursuit is abandoned and the prior order resumes.
+// A target within melee reach disarms the budget, so an actual fight has
+// unbounded kill time. Phase-1 named constant; per-entry config is
+// future work.
+uint32 const kPursuitLeashMs = 30000;
+// PORT-008 (KAP-558): while the companion keeps walking toward the owner,
+// the follow path is re-issued at most this often (ms) unless the owner
+// moved further than 2.0 yd (2D) from the last issued target.
+uint32 const kFollowPathRefreshMs = 5000;
 
 // MVP-006: nearest alive creature offering the declared quest within a
 // bounded radius; the search range shrinks as closer matches are found.
@@ -1628,6 +1639,8 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
     _followReached = false;
     _held = false; // PORT-004: a new follow order cancels the hold
     _assistTargetGuid = 0; // PORT-005: a new follow order cancels an assist
+    _pursuitLeashMs = 0; // PORT-008: a new order starts a fresh pursuit budget
+    _followPathAgeMs = 0; // PORT-008: a new order starts a fresh path window
     // PORT-003: do not stop an active engagement; the follow goal takes
     // effect once combat resolves (UpdateAI gate).
     if (!me->IsInCombat())
@@ -1644,6 +1657,7 @@ void PlayerBotAI::FollowStop()
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
+    _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
     // Invalidate the current goal immediately (TW-014 AC1).
     me->GetMotionMaster()->Clear(true);
     if (sPlayerBotMgr.IsDebugEnabled())
@@ -1660,6 +1674,7 @@ void PlayerBotAI::Hold(uint32 seq)
     _followLeaderGuid = 0;
     _followReached = false;
     _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
+    _pursuitLeashMs = 0; // PORT-008: a hold starts a fresh pursuit budget
     ClearTarget();
     me->InterruptNonMeleeSpells(false);
     if (me->GetVictim())
@@ -1690,6 +1705,7 @@ void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
     _followSeq = seq;
     _assistTargetGuid = targetGuid;
     _held = false; // a new authorized order cancels the hold
+    _pursuitLeashMs = 0; // PORT-008: a new assist starts a fresh pursuit budget
     ClearTarget(); // the assist target is the only target; never keep an incidental one
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Assist] active GUID:%u target:%u seq:%u",
@@ -1735,6 +1751,7 @@ void PlayerBotAI::ClearDefendTarget(const char* reason)
     uint64_t const guid = _defendTargetGuid;
     _defendTargetGuid = 0;
     _defendTargetGrace = 0;
+    _pursuitLeashMs = 0; // PORT-008: the defend pursuit is over; fresh budget
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Defend] cleared GUID:%u target:%u reason:%s",
                        me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter(), reason);
@@ -1877,6 +1894,44 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// PORT-008 (KAP-558): one tick of the bounded pursuit budget. While the
+// companion cannot land a melee hit on the named target it may keep
+// chasing for at most kPursuitLeashMs; on expiry the caller abandons the
+// pursuit (drops the target, stops combat, clears motion) so the prior
+// order resumes. A target within melee reach disarms the budget - an
+// actual fight has unbounded kill time.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::PursuitLeashTick(Unit* target, uint32 diff)
+{
+    if (!target)
+    {
+        _pursuitLeashMs = 0;
+        return false;
+    }
+    if (me && me->CanReachWithMeleeAutoAttack(target))
+    {
+        _pursuitLeashMs = 0;
+        return false;
+    }
+    if (_pursuitLeashMs == 0)
+    {
+        _pursuitLeashMs = kPursuitLeashMs;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] pursuit leash armed GUID:%u target:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow());
+        return false;
+    }
+    _pursuitLeashMs = (_pursuitLeashMs > diff) ? _pursuitLeashMs - diff : 0;
+    if (_pursuitLeashMs == 0)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] pursuit leash expired GUID:%u target:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow());
+        return true;
+    }
+    return false;
+}
 void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
 {
     if (!Companion::IsCurrent(intent, _followSeq) || !me || !me->IsAlive() || !me->GetMap())
@@ -1894,6 +1949,7 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
             // The named target is no longer a legal engagement. Drop it and
             // resume the prior order; never substitute an unrelated enemy.
             _assistTargetGuid = 0;
+            _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
             if (me->GetVictim())
                 me->CombatStop();
             me->GetMotionMaster()->Clear(false);
@@ -1907,6 +1963,18 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
                     sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
                                    me->GetGUIDLow(), (uint32)ObjectGuid(intent.target).GetCounter());
             }
+            return;
+        }
+        // PORT-008 (KAP-558): pursuit reach budget; runs every tick outside
+        // the 2 s combat check pacing. On expiry the assist is abandoned
+        // exactly like an invalid target and the prior order resumes.
+        if (PursuitLeashTick(target, diff))
+        {
+            _assistTargetGuid = 0;
+            if (me->GetVictim())
+                me->CombatStop();
+            me->GetMotionMaster()->Clear(false);
+            ClearTarget();
             return;
         }
         if (_abilityTimer > diff)
@@ -1965,6 +2033,16 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     if (!target || !target->IsAlive() || !target->IsInWorld() ||
         !me->CanAttack(target) || me->IsFriendlyTo(target) || me->GetDistance(target) > 35.0f ||
         (me->GetVictim() != target && GetAliveHeldTarget() != target))
+    {
+        _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+        if (me->GetVictim())
+            me->CombatStop();
+        ClearTarget();
+        return;
+    }
+    // PORT-008 (KAP-558): pursuit reach budget for a held target; a victim
+    // the companion cannot land a melee hit on is abandoned on expiry.
+    if (PursuitLeashTick(target, diff))
     {
         if (me->GetVictim())
             me->CombatStop();
@@ -2051,6 +2129,14 @@ void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
         ClearDefendTarget("target invalid");
         return;
     }
+    // PORT-008 (KAP-558): pursuit reach budget for the defend engagement.
+    if (PursuitLeashTick(target, diff))
+    {
+        if (me->GetVictim() == target)
+            me->CombatStop();
+        ClearDefendTarget("leash");
+        return;
+    }
     if (_abilityTimer > diff)
         _abilityTimer -= diff;
     else
@@ -2112,13 +2198,36 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
         _followReached = false;
         // The same path-find-to-position pattern idle wander and the quest
         // giver pursuit use (a player chase is a no-op without a victim).
-        me->GetMotionMaster()->MovePoint(0, leader->GetPositionX(), leader->GetPositionY(),
-                                         leader->GetPositionZ(), MOVE_PATHFINDING);
+        // PORT-008 (KAP-558): throttle follow path re-issuance. The path is
+        // re-issued only when the motion master is empty (the walk finished
+        // but the owner is still out of range), the owner moved more than
+        // 2.0 yd (2D) from the last issued target, or the issued target is
+        // stale (kFollowPathRefreshMs).
+        {
+            float const lx = leader->GetPositionX();
+            float const ly = leader->GetPositionY();
+            float const lz = leader->GetPositionZ();
+            float const dpx = lx - _followPathX;
+            float const dpy = ly - _followPathY;
+            bool const moved = (dpx * dpx + dpy * dpy) > (2.0f * 2.0f);
+            if (me->GetMotionMaster()->empty() || moved ||
+                _followPathAgeMs >= kFollowPathRefreshMs)
+            {
+                _followPathX = lx;
+                _followPathY = ly;
+                _followPathZ = lz;
+                _followPathAgeMs = 0;
+                me->GetMotionMaster()->MovePoint(0, lx, ly, lz, MOVE_PATHFINDING);
+            }
+            else
+                _followPathAgeMs += diff;
+        }
         return true;
     }
 
     if (!me->GetMotionMaster()->empty())
         me->GetMotionMaster()->Clear(false);
+    _followPathAgeMs = 0; // PORT-008: fresh path window after a completed approach
     if (!_followReached)
     {
         _followReached = true;

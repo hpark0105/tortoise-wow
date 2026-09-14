@@ -50,6 +50,11 @@ class PlayerBotAI: public PlayerAI
         ObjectGuid _lootTargetGuid;
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
+        uint32 _pursuitLeashMs = 0; // PORT-008: remaining (ms) of the pursuit reach budget; 0 = disarmed
+        float _followPathX = 0.0f; // PORT-008: last issued follow path target (throttle)
+        float _followPathY = 0.0f;
+        float _followPathZ = 0.0f;
+        uint32 _followPathAgeMs = 0; // PORT-008: age (ms) of the last issued follow path
         bool _obsAlive = true;
         uint32 _obsTimer = 0;
         // MVP-006: one declared supported quest progressed through the
@@ -81,6 +86,7 @@ class PlayerBotAI: public PlayerAI
         bool CorpseLootStep(Creature* creature);
         void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
+        bool PursuitLeashTick(Unit* target, uint32 diff); // PORT-008: one tick of the pursuit reach budget
         bool UpdateCompanion(uint32 diff);
         bool IsFollowOwnerAvailable() const;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);

@@ -92,6 +92,11 @@ PlayerBotMgr::PlayerBotMgr()
     m_staleProbeGuid = 0;
     m_staleProbeStage = 0;
     m_staleProbeOldGen = 0;
+    m_logoutProbeGuid = 0;
+    m_logoutProbeLogoutMs = 0;
+    m_logoutProbeReloginMs = 0;
+    m_logoutProbeLoginMs = 0;
+    m_logoutProbeStage = 0;
     m_followScriptStartMs = 0;
     m_followScriptIdx = 0;
     m_partyInviteScriptStartMs = 0;
@@ -257,6 +262,32 @@ void PlayerBotMgr::LoadConfig()
     m_staleProbeGuid = (staleTokenValid && staleProbeGuid != 0) ? staleProbeGuid : 0;
     if (m_staleProbeGuid)
         sLog.outString("Playerbot: stale-probe armed for %u (MVP-002 lab probe)", m_staleProbeGuid);
+    // PORT-008 (KAP-558) lab-only probe (default off): deterministic owner
+    // logout/relogin at fixed offsets after the owner's own login. Format:
+    // <guid>,<logoutMs>,<reloginMs>. Never set outside the Docker lab.
+    m_logoutProbeGuid = 0;
+    m_logoutProbeLogoutMs = 0;
+    m_logoutProbeReloginMs = 0;
+    m_logoutProbeLoginMs = 0;
+    m_logoutProbeStage = 0;
+    {
+        std::string logoutToken = sConfig.GetStringDefault("PlayerBot.TestLogoutScript", "");
+        size_t c1 = logoutToken.find(',');
+        size_t c2 = (c1 == std::string::npos) ? std::string::npos : logoutToken.find(',', c1 + 1);
+        if (c1 != std::string::npos && c2 != std::string::npos)
+        {
+            m_logoutProbeGuid = (uint32)atoll(logoutToken.substr(0, c1).c_str());
+            m_logoutProbeLogoutMs = (uint32)atoll(logoutToken.substr(c1 + 1, c2 - c1 - 1).c_str());
+            m_logoutProbeReloginMs = (uint32)atoll(logoutToken.substr(c2 + 1).c_str());
+        }
+        else if (!logoutToken.empty())
+            sLog.outError("Playerbot: test-logout-script malformed; skipped: %s", logoutToken.c_str());
+        if (!(m_logoutProbeGuid && m_logoutProbeReloginMs > m_logoutProbeLogoutMs))
+            m_logoutProbeGuid = 0;
+        if (m_logoutProbeGuid)
+            sLog.outString("Playerbot: test-logout armed guid:%u out:%u re:%u (PORT-008 lab probe)",
+                           m_logoutProbeGuid, m_logoutProbeLogoutMs, m_logoutProbeReloginMs);
+    }
     if (!forceLogoutDelay)
         m_tempBots.clear();
 }
@@ -550,6 +581,9 @@ void PlayerBotMgr::Update(uint32 diff)
     // MVP-002 (KAP-552): deterministic stale-completion probe (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateStaleLoginProbe();
+    // PORT-008 (KAP-558): deterministic owner logout/relogin probe
+    // (lab-only, config-gated; cheap state check when disabled).
+    UpdateTestLogoutScript();
     // TW-014 (KAP-557): deterministic follow/stop script (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateFollowScript();
@@ -673,9 +707,71 @@ void PlayerBotMgr::UpdateStaleLoginProbe()
     }
 }
 
+// PORT-008 (KAP-558): lab-only owner logout/relogin probe (default off).
+// At logoutMs after the probed bot's first observed ONLINE state its
+// session is deleted (DeleteBot - the normal logout path), and at
+// reloginMs it is queued back with AddBot. Offsets are relative to that
+// login, so fixtures can reason in the same clock as the follow script.
+// The probe is a pure driver; all companion behavior under owner loss is
+// the AI's existing gate (hold safe) and the manager's order handling.
+// ---------------------------------------------------------------------------
+void PlayerBotMgr::UpdateTestLogoutScript()
+{
+    if (!m_logoutProbeGuid || m_logoutProbeStage >= 2)
+        return;
+
+    std::map<uint32, PlayerBotEntry*>::iterator iter = m_bots.find(m_logoutProbeGuid);
+    if (iter == m_bots.end())
+    {
+        sLog.outError("Playerbot: test-logout %u has no entry; probe aborted (PORT-008)", m_logoutProbeGuid);
+        m_logoutProbeStage = 2;
+        return;
+    }
+    PlayerBotEntry* e = iter->second;
+
+    switch (m_logoutProbeStage)
+    {
+        case 0:
+            if (e->state != PB_STATE_ONLINE)
+                return; // wait for the owner's login to finish
+            if (m_logoutProbeLoginMs == 0)
+            {
+                m_logoutProbeLoginMs = m_elapsedTime;
+                if (confDebug)
+                    sLog.outString("Playerbot: test-logout %u baseline at %u (PORT-008)",
+                                   m_logoutProbeGuid, m_elapsedTime);
+                return;
+            }
+            if (m_elapsedTime < m_logoutProbeLoginMs + m_logoutProbeLogoutMs)
+                return;
+            sLog.outString("Playerbot: test-logout %u at %u (PORT-008)",
+                           m_logoutProbeGuid, m_elapsedTime);
+            DeleteBot(m_logoutProbeGuid);
+            m_logoutProbeStage = 1;
+            break;
+        case 1:
+            if (sWorld.FindSession(e->accountId))
+                return; // wait for the old session to be dropped by WorldSession::Update
+            if (m_elapsedTime < m_logoutProbeLoginMs + m_logoutProbeReloginMs)
+                return;
+            if (!AddBot(m_logoutProbeGuid, false))
+            {
+                sLog.outError("Playerbot: test-logout %u re-login rejected; probe aborted (PORT-008)", m_logoutProbeGuid);
+                m_logoutProbeStage = 2;
+                return;
+            }
+            sLog.outString("Playerbot: test-relogin %u at %u (PORT-008)",
+                           m_logoutProbeGuid, m_elapsedTime);
+            m_logoutProbeStage = 2;
+            break;
+        default:
+            break;
+    }
+}
 /*
 Toutes les X minutes, ajoute ou enleve un bot.
 */
+// ---------------------------------------------------------------------------
 bool PlayerBotMgr::AddOrRemoveBot()
 {
     uint32 const target = confMinBots == confMaxBots
