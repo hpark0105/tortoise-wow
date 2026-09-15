@@ -114,6 +114,12 @@ class PlayerBotAI: public PlayerAI
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
         bool IsFollowOwnerAvailable() const;
+        // KAP-558 hardening: an owned companion without an active order
+        // follows its owner instead of running the legacy auto-hunt
+        // (autonomous acquisition + wander stay for ambient bots only).
+        bool IsOwnedCompanion() const;
+        Player* FindOwnerByAccount() const;
+        static constexpr float kOwnerFollowChaseDist = 25.0f;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
         // PORT-006 (KAP-558): reactive defend (owner-enabled via
         // .botdefend). SelectDefendTarget scans for a creature actually

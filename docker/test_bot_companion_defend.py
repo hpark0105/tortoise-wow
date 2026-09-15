@@ -2,7 +2,8 @@
 
 One disposable, port-free lab. Three roster bots are seeded in the
 combat-proven corridor (the assist fixture area, X -8949.95, ground
-Z ~79-85): the owner (610300, its own reserved account), the
+Z ~79-85): the owner (610300, its own reserved account; unowned
+on purpose - its legacy idle acquisition is the combat starter), the
 companion (610301, bound to the owner) 45 yd south of the owner, and
 an unowned stranger (610302) 31 yd west / 46 yd south of the owner.
 One creature is seeded: the attacker (2500040, entry 51600,
@@ -44,12 +45,12 @@ Mechanics: the owner bot's idle target acquisition (30 yd) engages
 the attacker within seconds and the attacker fights back (its victim
 becomes the owner - victim equality is the only defend trigger;
 neutrals and unengaged creatures are never pulled). The companion
-starts 45 yd south so its first legacy wander step (the wander timer
-starts at 0 and fires on the first AI tick) can never reach the
-attacker's 30 yd scan radius; the follow order binds it to the owner
-before any later step, and while the follow goal is active the
-companion's legacy idle acquisition is suppressed - so the defend
-path, not the legacy acquisition, is what engages the attacker:
+starts 45 yd south so its first idle step (default owner-follow
+stops 25 yd from the owner; the timer starts at 0 and fires on the
+first AI tick) can never reach the attacker's 30 yd scan radius; the
+follow order binds it to the owner before any later step, and an owned
+companion never autonomously acquires - so the defend path, not idle
+acquisition, is what engages the attacker:
 defend fires once the companion is inside the 30 yd scan radius
 while the attacker's victim is the owner.
 
@@ -144,7 +145,7 @@ VALUES (610300,1000610300,'Defendowner',1,1,0,10,100000,-8949.95,-130.493,86.0,0
 INSERT INTO tw_char.playerbot (char_guid,chance,ai)
  VALUES (610300,100,'Default'),(610301,100,'Default'),(610302,100,'Default');
 INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)
- VALUES (610300,1000610300,1,2,1000610300),
+ VALUES (610300,1000610300,1,2,NULL),
         (610301,1000610301,1,2,1000610300),
         (610302,1000610302,1,2,NULL);
 INSERT INTO tw_world.creature

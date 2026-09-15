@@ -387,7 +387,17 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         }
         else
         {
-            if (Unit* target = me->SelectNearestTarget(30.0f))
+            // KAP-558 hardening: an owned companion without an order never
+            // autonomously acquires targets; the legacy auto-hunt
+            // acquisition stays for ambient bots (ownerAccountId == 0).
+            // It idles near its owner (owner-follow below) and fights
+            // only via self-defense or explicit assist/defend orders.
+            if (IsOwnedCompanion())
+            {
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot] no-order idle GUID:%u", me->GetGUIDLow());
+            }
+            else if (Unit* target = me->SelectNearestTarget(30.0f))
             {
                 // Autonomous companions never initiate PvP. A hostile player
                 // may still be the current victim while defending; this guard
@@ -421,7 +431,30 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             // A held or detected hostile is handled by the combat check
             // above; wandering here would overwrite the chase and lose the
             // target.
-            if (GetAliveHeldTarget() || me->SelectNearestTarget(30.0f))
+            if (IsOwnedCompanion())
+            {
+                // KAP-558 hardening: default owner-follow replaces the
+                // auto-hunt wander. Close distance when the owner is far
+                // on this map; otherwise hold position. Stays within
+                // loot distance of its kills so the owner shares party
+                // XP, and never roams into solo fights.
+                Player* owner = FindOwnerByAccount();
+                if (owner && owner->GetMapId() == me->GetMapId() &&
+                    me->GetDistance(owner) > kOwnerFollowChaseDist)
+                {
+                    _wanderTimer = urand(1500, 3000);
+                    me->GetMotionMaster()->MovePoint(0, owner->GetPositionX(),
+                                                     owner->GetPositionY(), owner->GetPositionZ(),
+                                                     MOVE_PATHFINDING);
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[PlayerBot] owner-follow GUID:%u owner:%u dist:%.2f",
+                                       me->GetGUIDLow(), owner->GetGUIDLow(),
+                                       me->GetDistance(owner));
+                }
+                else
+                    _wanderTimer = urand(2000, 5000);
+            }
+            else if (GetAliveHeldTarget() || me->SelectNearestTarget(30.0f))
             {
                 _wanderTimer = urand(2000, 4000);
                 if (sPlayerBotMgr.IsDebugEnabled())
@@ -1874,6 +1907,26 @@ bool PlayerBotAI::IsFollowOwnerAvailable() const
         owner->GetGroup() != me->GetGroup()))
         return false;
     return true;
+}
+
+bool PlayerBotAI::IsOwnedCompanion() const
+{
+    return botEntry && botEntry->ownerAccountId != 0;
+}
+
+Player* PlayerBotAI::FindOwnerByAccount() const
+{
+    if (!botEntry || !botEntry->ownerAccountId)
+        return nullptr;
+    HashMapHolder<Player>::MapType const& players = sObjectAccessor.GetPlayers();
+    for (auto const& itr : players)
+    {
+        Player* p = itr.second;
+        if (p && p->GetSession() &&
+            p->GetSession()->GetAccountId() == botEntry->ownerAccountId && p->IsAlive())
+            return p;
+    }
+    return nullptr;
 }
 
 bool PlayerBotAI::UpdateCompanion(uint32 diff)

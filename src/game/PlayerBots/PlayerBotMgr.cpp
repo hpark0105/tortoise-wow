@@ -1964,11 +1964,13 @@ bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
     }
     ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
     Player* bot = sObjectAccessor.FindPlayer(botGuid);
-    // KAP-558 hardening: no combat gate (same rationale as recruit).
+    // KAP-558 hardening: no combat gate (same rationale as recruit), and
+    // dismiss no longer benches the bot: it stays online and returns to
+    // its default owner-follow (the command reference promises "stays
+    // online"). DeleteBot here forced a .botrecall after every dismiss.
     if (bot && e->ai)
         e->ai->FollowStop();
     group->RemoveMember(botGuid, GROUP_KICK);
-    DeleteBot(e->playerGUID); // bench through the normal save/logout path
     sLog.outString("party dismiss accepted bot:%s guid:%u leader:%u seq:%u",
                    e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq);
     return true;
