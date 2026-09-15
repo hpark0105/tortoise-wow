@@ -117,11 +117,11 @@ class PlayerBotAI: public PlayerAI
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
         // PORT-006 (KAP-558): reactive defend (owner-enabled via
         // .botdefend). SelectDefendTarget scans for a creature actually
-        // attacking the owner or this companion; ExecuteDefend drives the
-        // engagement; the state marker is diagnostic and is cleared when
-        // the owner is safe, held, assisted, or the goal is withdrawn.
+        // attacking the owner or this companion; the Defend intent runs
+        // the engagement through the shared combat executor; the state
+        // marker is diagnostic and is cleared when the owner is safe,
+        // held, assisted, or the goal is withdrawn.
         Creature* SelectDefendTarget() const;
-        void ExecuteDefend(Creature* target, uint32 diff);
         void SetDefendTarget(uint64_t guid);
         void ClearDefendTarget(const char* reason);
         Creature* GetAliveHeldTarget() const;

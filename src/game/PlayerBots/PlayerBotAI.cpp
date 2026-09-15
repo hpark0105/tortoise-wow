@@ -991,7 +991,14 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
 bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
 {
     uint32 spellId = SelectOffensiveSpell(target);
-    if (spellId && me->CastSpell(target, spellId, false) == SPELL_CAST_OK)
+    SpellCastResult castRes = SPELL_FAILED_UNKNOWN;
+    if (spellId)
+        castRes = me->CastSpell(target, spellId, false);
+    // Hardening diag (KAP-558): which branch engaged (spell vs melee).
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Offense] cast GUID:%u t:%u spell:%u res:%u",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)castRes);
+    if (spellId && castRes == SPELL_CAST_OK)
     {
         _abilityTimer = urand(2000, 4000);
         return true;
@@ -1972,30 +1979,37 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
                 }
             }
         }
+        // Hardening item 5 (KAP-558): defend is a typed intent. The scan
+        // and grace bookkeeping only fill the observation; the policy
+        // re-selects and the shared executor drives the engagement (the
+        // grace counts down per tick in ExecuteCompanion while the Defend
+        // intent is active).
         Creature* defender = SelectDefendTarget();
         if (defender)
         {
             SetDefendTarget(defender->GetObjectGuid().GetRawValue());
             _defendTargetGrace = kDefendTargetGraceMs;
-            ExecuteDefend(defender, diff);
-            return true;
+            observation.defendTarget = defender->GetObjectGuid().GetRawValue();
         }
-        if (_defendTargetGuid)
+        else if (_defendTargetGuid && _defendTargetGrace > 0)
         {
             // Grace hysteresis: the scan can read the attacker as safe on a
             // flap tick. Keep the locked target through kDefendTargetGraceMs
-            // after the last confirmed candidate; ExecuteDefend re-validates
+            // after the last confirmed candidate; the executor re-validates
             // world state each tick, and the companion's first swing hands
             // the fight to the continue-combat path.
             Creature* held = me->GetMap()->GetCreature(ObjectGuid(_defendTargetGuid));
-            if (held && held->IsAlive() && _defendTargetGrace > 0)
-            {
-                _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
-                ExecuteDefend(held, diff);
-                return true;
-            }
+            if (held && held->IsAlive())
+                observation.defendTarget = held->GetObjectGuid().GetRawValue();
+            else
+                ClearDefendTarget("owner safe");
+        }
+        else if (_defendTargetGuid)
+        {
             ClearDefendTarget("owner safe");
         }
+        if (observation.defendTarget)
+            intent = Companion::Select(observation);
     }
     else if (_defendTargetGuid && !me->GetVictim() && !GetAliveHeldTarget())
     {
@@ -2347,6 +2361,22 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
         if (req.source == CombatSource::Assist)
             LogAssistProbe(target);
+        // Hardening diag (KAP-558): the four swing-gate conditions from
+        // UpdateMeleeAttackingState, sampled each offense step, so a
+        // stopped swing is identified by its failing predicate.
+        if (req.source == CombatSource::Assist)
+            sLog.outString(
+                "[PlayerBot][Assist] swing GUID:%u t:%u victim:%u cast:%u "
+                "ready:%u atktimer:%u facing:%u auto:%u los:%u abltimer:%u",
+                me->GetGUIDLow(), target->GetGUIDLow(),
+                me->GetVictim() ? (uint32)me->GetVictim()->GetGUIDLow() : 0,
+                (uint32)me->IsNonMeleeSpellCasted(false),
+                (uint32)me->IsAttackReady(BASE_ATTACK),
+                me->GetAttackTimer(BASE_ATTACK),
+                (uint32)me->HasInArc(target, 2 * M_PI_F / 3),
+                (uint32)me->CanAutoAttackTarget(target),
+                (uint32)me->IsWithinLOSInMap(target),
+                _abilityTimer);
     }
     if (!me->CanReachWithMeleeAutoAttack(target))
         me->GetMotionMaster()->MoveChase(target);
@@ -2371,6 +2401,17 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         // shared executor; a vanished or out-of-reach target drops the assist
         // (state, motion and combat cleared) and the prior order resumes.
         ExecuteCombat(CombatRequest{intent.target, CombatSource::Assist,
+                                    intent.generation, 35.0f}, diff);
+        return;
+    }
+    if (intent.action == Companion::Action::Defend)
+    {
+        // Hardening item 5 (KAP-558): the defend engagement runs through
+        // the shared executor; the grace counts down per tick while this
+        // intent is active, and a failed engagement drops the defend lock
+        // (reason logged) so the prior order resumes.
+        _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
+        ExecuteCombat(CombatRequest{intent.target, CombatSource::Defend,
                                     intent.generation, 35.0f}, diff);
         return;
     }
@@ -2435,25 +2476,6 @@ void PlayerBotAI::ExecuteLoot(Creature* corpse, uint32 diff)
         return;
     }
     CorpseLootStep(corpse);
-}
-
-// PORT-006 (KAP-558): one execution tick of the defend engagement. The
-// named creature is re-validated against world state; an illegal
-// candidate is dropped (reason logged) and the prior order resumes - a
-// bystander is never substituted. Once the attack lands, the companion
-// keeps the victim through the normal continue-combat path until the
-// defender is dead, and the follow intent resumes on the next tick.
-void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
-{
-    // Hardening item 3 (KAP-558): the engagement runs through the shared
-    // executor keyed on the canonical _defendTargetGuid; the resolved
-    // creature argument is the same object the caller just validated
-    // (fresh candidate or grace-hysteresis hold), so re-resolving from
-    // the GUID is equivalent. Grace/lock bookkeeping stays in
-    // UpdateCompanion.
-    (void)target;
-    ExecuteCombat(CombatRequest{_defendTargetGuid, CombatSource::Defend,
-                                _followSeq, 35.0f}, diff);
 }
 
 bool PlayerBotAI::UpdateFollow(uint32 diff)
