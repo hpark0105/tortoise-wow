@@ -10,8 +10,8 @@ printed in chat (`Bot ... rejected.`) and logged server-side
 
 | Command | What it does |
 | --- | --- |
-| `.botrecruit <botname>` | Invites the bot into your party. The bot session is socketless and never answers invites itself, so the server settles them: the owner's invite is accepted, anyone else's is declined. Rejected if the bot is offline (benched), the party is full, or you are not the owner. |
-| `.botdismiss <botname>` | Removes the bot from your party. It stays online and returns to its default (an owned companion keeps hanging around its owner). |
+| `.botrecruit <botname>` | Invites the bot into your party. The bot session is socketless and never answers invites itself, so the server settles them: the owner's invite is accepted, anyone else's is declined. Rejected if the bot is offline (benched), the party is full, or you are not the owner. Party leadership does not matter: if the bot already holds the party (it becomes leader when you log out, see notes), re-recruiting works, and recruiting a bot that is already in your party is a no-op. |
+| `.botdismiss <botname>` | Removes the bot from your party. It stays online and returns to its default (an owned companion keeps hanging around its owner). Party leadership does not matter: if you lead, the bot is kicked; if the bot leads (see leadership note below), the bot leaves itself. A 2-person party disbands on either path (classic rule). |
 | `.botrecall <botname>` | Logs the bot in. After a world restart, owned companions stay benched (offline) until recalled; recall queues a login for the bot character. |
 | `.botfollow <botname>` | Orders the bot to follow you. It pathfinds to you (same map) and stays within ~2 yards. A new order invalidates the previous one by sequence number, so a stale follow can never re-arm. |
 | `.botstop <botname>` | Cancels the follow order. With no other active order, an owned companion returns to its default: it holds position near you and pathfinds to catch up if you move more than 25 yd away on the same map (ambient bots resume the legacy idle wander and auto-hunt). |
@@ -47,6 +47,10 @@ When several orders are live, selection is deterministic:
   no second mechanism). If it dies with **no** active order (default
   owner-follow, or legacy auto-hunt for an ambient bot), it stays
   dead-idle at the corpse until you give it an order or recall it.
+- Leadership drift: classic rules transfer party leadership to the bot
+  when the owner logs out while the bot is in the party. The bot keeps
+  leading until the owner reclaims it (party frame) or the party disbands;
+  `.botrecruit` and `.botdismiss` work regardless of who leads.
 - Party requirement: `.botassist` requires the bot to be in your party;
   follow/hold/defend do not (ownership is enough).
 - Legacy admin: `.discbot stop` (`SEC_ADMINISTRATOR`) belongs to the

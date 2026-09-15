@@ -1848,14 +1848,13 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
         sLog.outError("party recruit rejected battleground bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
         return false;
     }
-    if (group && !group->IsLeader(issuer->GetObjectGuid()))
-    {
-        sLog.outError("party recruit rejected not-leader bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
-        return false;
-    }
+    // KAP-558 hardening: owner authority, not party leadership. Classic
+    // rules transfer leadership to the bot when the owner logs out, and
+    // the owner must stay able to re-recruit while the bot leads.
+    // Group::AddMember performs no authority check (chat handlers do).
     if (bot->GetGroup())
     {
-        if (bot->GetGroup() == group && group && group->IsLeader(issuer->GetObjectGuid()))
+        if (bot->GetGroup() == group)
         {
             sLog.outString("party recruit already-member bot:%s guid:%u leader:%u seq:%u",
                            e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), sequence);
@@ -1955,7 +1954,7 @@ bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
     }
     e->pendingPartyLeaderGuid = 0;
     e->pendingPartySeq = 0;
-    if (!group || group->isBGGroup() || !group->IsLeader(issuer->GetObjectGuid()) ||
+    if (!group || group->isBGGroup() ||
         !group->IsMember(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID))))
     {
         sLog.outError("party dismiss rejected membership bot:%s issuer:%u seq:%u",
@@ -1970,9 +1969,18 @@ bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
     // online"). DeleteBot here forced a .botrecall after every dismiss.
     if (bot && e->ai)
         e->ai->FollowStop();
-    group->RemoveMember(botGuid, GROUP_KICK);
-    sLog.outString("party dismiss accepted bot:%s guid:%u leader:%u seq:%u",
-                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq);
+    // Owner authority covers both leadership cases: if the issuer leads,
+    // the bot is kicked; if the bot holds leadership (classic rules
+    // transfer it to the bot on owner logout), the bot leaves itself.
+    // A 2-person party disbands on either path (vanilla rule).
+    bool const issuerLeads = group->IsLeader(issuer->GetObjectGuid());
+    if (issuerLeads)
+        group->RemoveMember(botGuid, GROUP_KICK);
+    else
+        group->RemoveMember(botGuid, GROUP_LEAVE);
+    sLog.outString("party dismiss accepted bot:%s guid:%u leader:%u seq:%u method:%s",
+                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq,
+                   issuerLeads ? "kick" : "leave");
     return true;
 }
 
