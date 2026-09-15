@@ -3,6 +3,7 @@
 
 #include "PlayerAI.h"
 #include "WorldSession.h"
+#include "Companion/Policy.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -10,6 +11,20 @@ class PlayerBotAI;
 class Creature;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
+
+// Hardening item 3 (KAP-558): a combat engagement routed through the
+// shared executor (ExecuteCombat). The source intent selects the legality
+// rules and the drop-out cleanup; the request carries values only (target
+// GUID, generation, distance limit) - the executor re-resolves the target
+// from the world each tick and never stores engine pointers.
+enum class CombatSource { Assist, ContinueCombat, Defend };
+struct CombatRequest
+{
+    uint64_t targetGuid;
+    CombatSource source;
+    uint32_t generation;
+    float maxDistance;
+};
 
 class PlayerBotAI: public PlayerAI
 {
@@ -29,6 +44,14 @@ class PlayerBotAI: public PlayerAI
         // seq is at or below the current one is stale and never resumes.
         void FollowGoal(uint32 leaderGuid, uint32 seq);
         void FollowStop();
+        void Hold(uint32 seq); // invalidate prior orders; persist until a new order
+        // PORT-005 (KAP-558): owner-selected assist target. The manager
+        // validated ownership, party membership and the target before
+        // calling this; the AI re-validates at execution time. A newer
+        // order (seq above the current one) re-arms the companion against
+        // the named hostile and suspends the follow goal, which resumes
+        // once the target is gone.
+        void AssistTarget(uint64_t targetGuid, uint32 seq);
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         // Helpers
@@ -38,8 +61,19 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
-        ObjectGuid _lootTargetGuid;
+        ObjectGuid _combatTargetGuid; // Hardening item 4: held live combat target (0 = none)
+        ObjectGuid _lootCorpseGuid; // Hardening item 4: dead corpse pending loot (0 = none)
         uint8 _lootRetryCount = 0;
+        uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
+        uint32 _pursuitLeashMs = 0; // PORT-008: remaining (ms) of the pursuit reach budget; 0 = disarmed
+        bool _recoveryDead = false; // PORT-009: recovery state armed (dead with an active order)
+        uint32 _recoveryReportMs = 0; // PORT-009: bounded report pace remaining (ms)
+        uint32 _recoveryWalkMs = 0; // PORT-009: corpse walk re-issue window remaining (ms)
+        bool _recoveryDeathAck = false; // PORT-009: dead-ack (BuildPlayerRepop) issued for the current death
+        float _followPathX = 0.0f; // PORT-008: last issued follow path target (throttle)
+        float _followPathY = 0.0f;
+        float _followPathZ = 0.0f;
+        uint32 _followPathAgeMs = 0; // PORT-008: age (ms) of the last issued follow path
         bool _obsAlive = true;
         uint32 _obsTimer = 0;
         // MVP-006: one declared supported quest progressed through the
@@ -55,14 +89,47 @@ class PlayerBotAI: public PlayerAI
         uint8 _questDenyCount = 0;
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
+        bool _held = false; // PORT-004: owner-directed hold; persists until new order
+        uint64_t _assistTargetGuid = 0; // PORT-005: raw assist target guid (0 = none)
+        uint64_t _defendTargetGuid = 0; // PORT-006: current defend candidate (0 = none)
+        uint32 _defendProbeTimer = 0; // PORT-006: debug probe pacing (2000 ms)
+        uint32 _defendTargetGrace = 0; // PORT-006: grace remaining (ms) for a locked defend target
         uint32 _followSeq = 0;
         uint32 _followLeaderGuid = 0;
+        uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
         bool _followReached = false;
         uint32 _followDebugTimer = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
-        void RememberLootTarget(Unit* unit);
+        void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
+        bool CorpseLootStep(Creature* creature);
+        void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
+        bool PursuitLeashTick(Unit* target, uint32 diff); // PORT-008: one tick of the pursuit reach budget
+        // Hardening item 3 (KAP-558): shared combat executor for the
+        // Assist, ContinueCombat and Defend intents (see CombatRequest);
+        // the per-source debug lines are the fixture contract.
+        bool ExecuteCombat(CombatRequest const& req, uint32 diff);
+        void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
+        bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
+        bool UpdateCompanion(uint32 diff);
+        bool IsFollowOwnerAvailable() const;
+        // KAP-558 hardening: an owned companion without an active order
+        // follows its owner instead of running the legacy auto-hunt
+        // (autonomous acquisition + wander stay for ambient bots only).
+        bool IsOwnedCompanion() const;
+        Player* FindOwnerByAccount() const;
+        static constexpr float kOwnerFollowChaseDist = 25.0f;
+        void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
+        // PORT-006 (KAP-558): reactive defend (owner-enabled via
+        // .botdefend). SelectDefendTarget scans for a creature actually
+        // attacking the owner or this companion; the Defend intent runs
+        // the engagement through the shared combat executor; the state
+        // marker is diagnostic and is cleared when the owner is safe,
+        // held, assisted, or the goal is withdrawn.
+        Creature* SelectDefendTarget() const;
+        void SetDefendTarget(uint64_t guid);
+        void ClearDefendTarget(const char* reason);
         Creature* GetAliveHeldTarget() const;
         void ClearTarget();
         void InitQuestState();
@@ -71,6 +138,9 @@ class PlayerBotAI: public PlayerAI
         Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
         uint32 SelectOffensiveSpell(Unit* target) const;
+        // Hardening (KAP-558): cast-or-attack step; arms _abilityTimer only
+        // on a successful cast (see TryOffensiveCastOrAttack).
+        bool TryOffensiveCastOrAttack(Unit* target);
         void AutoEquipForLevel();
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;

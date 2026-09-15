@@ -837,8 +837,12 @@ ChatCommand * ChatHandler::getCommandTable()
     {
         { "account",        SEC_PLAYER,          true,  nullptr,                                        "", accountCommandTable  },
         { "blacklist",      SEC_ADMINISTRATOR,   true,  nullptr,                                        "", blacklistCommandTable  },
+        { "botassist",      SEC_PLAYER,          false, &ChatHandler::HandleBotAssistCommand,          "", nullptr },
+        { "botdefend",      SEC_PLAYER,          false, &ChatHandler::HandleBotDefendCommand,          "", nullptr },
         { "botfollow",      SEC_PLAYER,          false, &ChatHandler::HandleBotFollowCommand,           "", nullptr },
         { "botstop",        SEC_PLAYER,          false, &ChatHandler::HandleBotStopCommand,             "", nullptr },
+        { "bothyld",        SEC_PLAYER,          false, &ChatHandler::HandleBotHoldCommand,             "", nullptr },
+        { "bothold",        SEC_PLAYER,          false, &ChatHandler::HandleBotHoldCommand,             "", nullptr },
         { "botrecruit",     SEC_PLAYER,          false, &ChatHandler::HandleBotRecruitCommand,          "", nullptr },
         { "botdismiss",     SEC_PLAYER,          false, &ChatHandler::HandleBotDismissCommand,          "", nullptr },
         { "botrecall",      SEC_PLAYER,          false, &ChatHandler::HandleBotRecallCommand,           "", nullptr },
