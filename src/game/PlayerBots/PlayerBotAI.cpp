@@ -341,7 +341,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             // and keep it as the loot candidate.
             Unit* victim = me->GetVictim();
             if (victim->GetTypeId() == TYPEID_UNIT)
-                RememberLootTarget(victim);
+                RememberCombatTarget(victim);
             if (sPlayerBotMgr.IsDebugEnabled())
                 sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
                                me->GetGUIDLow(), victim->GetGUIDLow(), me->GetDistance(victim));
@@ -395,7 +395,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 if (!target->IsPlayer())
                 {
                     if (target->GetTypeId() == TYPEID_UNIT)
-                        RememberLootTarget(target);
+                        RememberCombatTarget(target);
                     me->Attack(target, true);
                     me->GetMotionMaster()->MoveChase(target);
                     if (sPlayerBotMgr.IsDebugEnabled())
@@ -458,9 +458,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
 
 Creature* PlayerBotAI::GetAliveHeldTarget() const
 {
-    if (!_lootTargetGuid || !me || !me->GetMap())
+    // Hardening item 4 (KAP-558): the held target is a dedicated live-target
+    // guid now; the corpse side lives in _lootCorpseGuid.
+    if (!_combatTargetGuid || !me || !me->GetMap())
         return nullptr;
-    Creature* creature = me->GetMap()->GetCreature(_lootTargetGuid);
+    Creature* creature = me->GetMap()->GetCreature(_combatTargetGuid);
     if (creature && creature->IsAlive())
         return creature;
     return nullptr;
@@ -468,31 +470,52 @@ Creature* PlayerBotAI::GetAliveHeldTarget() const
 
 void PlayerBotAI::ClearTarget()
 {
-    _lootTargetGuid = ObjectGuid();
+    _combatTargetGuid = ObjectGuid();
+    _lootCorpseGuid = ObjectGuid();
     _lootRetryCount = 0;
     _lootWindowMs = 0;
 }
 
 bool PlayerBotAI::TryLootDefeatedTarget()
 {
-    if (!_lootTargetGuid || !me->GetMap())
+    if (!me->GetMap())
         return false;
-
-    Creature* creature = me->GetMap()->GetCreature(_lootTargetGuid);
+    // Hardening item 4 (KAP-558): the single dual-role guid is split; a
+    // held combat target that died in between becomes the pending loot
+    // corpse, and a re-embodied corpse hands the target back to the
+    // combat side (the same duality the single guid used to play).
+    if (_combatTargetGuid)
+    {
+        Creature* held = me->GetMap()->GetCreature(_combatTargetGuid);
+        if (!held)
+            _combatTargetGuid = ObjectGuid();
+        else if (!held->IsAlive())
+        {
+            _lootCorpseGuid = _combatTargetGuid;
+            _combatTargetGuid = ObjectGuid();
+            _lootRetryCount = 0;
+        }
+    }
+    if (!_lootCorpseGuid)
+        return false;
+    Creature* creature = me->GetMap()->GetCreature(_lootCorpseGuid);
     if (!creature)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] loot target missing GUID:%u target:%u",
-                           me->GetGUIDLow(), _lootTargetGuid.GetCounter());
-        _lootTargetGuid = ObjectGuid();
+                           me->GetGUIDLow(), _lootCorpseGuid.GetCounter());
+        _lootCorpseGuid = ObjectGuid();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
         return false;
     }
     if (creature->IsAlive())
     {
-        // The target is still alive; it is the held combat target that the
-        // combat loop keeps pursuing. Do not clear it here.
+        // Re-embodied: it is the held combat target again; the combat loop
+        // keeps pursuing it. Do not clear it here.
+        _combatTargetGuid = _lootCorpseGuid;
+        _lootCorpseGuid = ObjectGuid();
+        _lootWindowMs = 0;
         return false;
     }
     return CorpseLootStep(creature);
@@ -537,7 +560,7 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot processed GUID:%u target:%u",
                            me->GetGUIDLow(), guid.GetCounter());
-        _lootTargetGuid = ObjectGuid();
+        _lootCorpseGuid = ObjectGuid();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
         return true;
@@ -560,21 +583,23 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot giving up GUID:%u target:%u",
                            me->GetGUIDLow(), guid.GetCounter());
-        _lootTargetGuid = ObjectGuid();
+        _lootCorpseGuid = ObjectGuid();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
     }
     return true;
 }
 
-void PlayerBotAI::RememberLootTarget(Unit* unit)
+void PlayerBotAI::RememberCombatTarget(Unit* unit)
 {
+    // Hardening item 4 (KAP-558): renamed; remembers the live combat
+    // target (the corpse side is _lootCorpseGuid).
     if (!unit)
         return;
     ObjectGuid const guid = unit->GetObjectGuid();
-    if (_lootTargetGuid == guid)
+    if (_combatTargetGuid == guid)
         return;
-    _lootTargetGuid = guid;
+    _combatTargetGuid = guid;
     _lootRetryCount = 0;
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot] loot target set GUID:%u target:%u entry:%u hp:%u/%u",
@@ -1861,6 +1886,20 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
                                me->GetGUIDLow(), (uint32)ObjectGuid(assistGuid).GetCounter());
         }
     }
+    // Hardening item 4 (KAP-558): a held combat target that died becomes
+    // the pending loot corpse; the Loot intent picks it up this tick.
+    if (_combatTargetGuid && me->GetMap())
+    {
+        Creature* held = me->GetMap()->GetCreature(_combatTargetGuid);
+        if (!held)
+            _combatTargetGuid = ObjectGuid();
+        else if (!held->IsAlive())
+        {
+            _lootCorpseGuid = _combatTargetGuid;
+            _combatTargetGuid = ObjectGuid();
+            _lootRetryCount = 0;
+        }
+    }
     Unit* target = me->GetVictim();
     if (!target)
         target = GetAliveHeldTarget();
@@ -1870,9 +1909,9 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // loot becomes a first-class Loot target. The value is read here so the
     // policy stays pure; the executor re-resolves it from the GUID and
     // re-validates the world before acting.
-    if (_lootTargetGuid && me->GetMap())
+    if (_lootCorpseGuid && me->GetMap())
     {
-        Creature* loot = me->GetMap()->GetCreature(_lootTargetGuid);
+        Creature* loot = me->GetMap()->GetCreature(_lootCorpseGuid);
         if (loot && !loot->IsAlive() && loot->IsInWorld())
             observation.lootTarget = loot->GetObjectGuid().GetRawValue();
     }
@@ -2294,7 +2333,7 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
         return true;
     }
     _combatCheckTimer = 2000;
-    RememberLootTarget(target);
+    RememberCombatTarget(target);
     if (sPlayerBotMgr.IsDebugEnabled())
     {
         if (req.source == CombatSource::Assist)

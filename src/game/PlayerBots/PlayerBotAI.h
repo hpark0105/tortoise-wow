@@ -61,7 +61,8 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
-        ObjectGuid _lootTargetGuid;
+        ObjectGuid _combatTargetGuid; // Hardening item 4: held live combat target (0 = none)
+        ObjectGuid _lootCorpseGuid; // Hardening item 4: dead corpse pending loot (0 = none)
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
         uint32 _pursuitLeashMs = 0; // PORT-008: remaining (ms) of the pursuit reach budget; 0 = disarmed
@@ -100,7 +101,7 @@ class PlayerBotAI: public PlayerAI
         uint32 _followDebugTimer = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
-        void RememberLootTarget(Unit* unit);
+        void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
         bool CorpseLootStep(Creature* creature);
         void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
