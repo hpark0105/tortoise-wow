@@ -1827,11 +1827,10 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
         sLog.outError("party recruit rejected missing in-world bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
         return false;
     }
-    if (issuer->IsInCombat() || bot->IsInCombat())
-    {
-        sLog.outError("party recruit rejected combat bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
-        return false;
-    }
+    // KAP-558 hardening: no combat gate. The UI-invite settlement path
+    // (HandlePartyInvite) has no combat gate and Group::AddMember is safe
+    // in combat; an owner must stay able to recruit or dismiss a
+    // companion that is defending or in an ongoing fight.
     if (!sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_GROUP) && issuer->GetTeam() != bot->GetTeam())
     {
         sLog.outError("party recruit rejected faction bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
@@ -1965,12 +1964,7 @@ bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
     }
     ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
     Player* bot = sObjectAccessor.FindPlayer(botGuid);
-    if (issuer->IsInCombat() || (bot && bot->IsInCombat()))
-    {
-        sLog.outError("party dismiss rejected combat bot:%s issuer:%u seq:%u",
-                      e->name.c_str(), issuer->GetGUIDLow(), e->partySeq);
-        return false;
-    }
+    // KAP-558 hardening: no combat gate (same rationale as recruit).
     if (bot && e->ai)
         e->ai->FollowStop();
     group->RemoveMember(botGuid, GROUP_KICK);
