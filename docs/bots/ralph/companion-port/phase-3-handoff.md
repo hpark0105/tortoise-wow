@@ -14,7 +14,9 @@ Start with `PlayerBotMgr.cpp` lifecycle/population reconciliation and the compan
 policy boundary. Keep ambient scheduling separate from owned-party behavior.
 Recruitment must atomically validate capacity and ownership; dismissal of an owned
 companion means bench, not accidental re-entry into ambient spawning.
-Keep tank/healer/DPS, quest interaction and travel as independently tested policies.
+Keep tank/healer/DPS, quest interaction and travel as independently tested
+policies. Build broader quest coverage on the single cooperative Phase 2 quest;
+do not treat that vertical slice as general autonomous questing.
 
 ## Exit scenarios
 
