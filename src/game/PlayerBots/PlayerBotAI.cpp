@@ -1,5 +1,6 @@
 #include "PlayerBotAI.h"
 #include "Player.h"
+#include "Corpse.h"
 #include "DBCStores.h"
 #include "Log.h"
 #include "SocialMgr.h"
@@ -7,6 +8,7 @@
 #include "ObjectMgr.h"
 #include "MoveSpline.h"
 #include "PlayerBotMgr.h"
+#include "Group.h"
 #include "WorldPacket.h"
 #include "Map.h"
 #include "Maps/GridSearchers.h"
@@ -27,6 +29,31 @@ namespace
 {
 // TW-014 (KAP-557): the companion holds this range around its owner.
 const float kFollowRange = 2.0f;
+
+// PORT-007 (KAP-558): a corpse loot attempt is bounded by this window (ms) so
+// a denied or unreachable corpse cannot trap the companion; on expiry the
+// prior order (follow) resumes. Phase-1 named constant; per-entry config
+// is future work.
+uint32 const kLootWindowMs = 20000;
+// PORT-008 (KAP-558): bounded pursuit. While the companion chases a valid
+// target it cannot land a melee hit on, the pursuit is budgeted to this
+// many ms; on expiry the pursuit is abandoned and the prior order resumes.
+// A target within melee reach disarms the budget, so an actual fight has
+// unbounded kill time. Phase-1 named constant; per-entry config is
+// future work.
+uint32 const kPursuitLeashMs = 30000;
+// PORT-009 (KAP-558): while a dead companion cannot yet reclaim its
+// corpse (no corpse, reclaim delay not over, or out of range), the
+// recovery state is reported at most this often (ms).
+uint32 const kRecoveryReportMs = 30000;
+// PORT-009 (KAP-558): while out of range of its own corpse, the
+// companion re-issues the path to the corpse only when its motion is
+// empty and at least this many ms have passed since the last issue.
+uint32 const kRecoveryWalkRetryMs = 5000;
+// PORT-008 (KAP-558): while the companion keeps walking toward the owner,
+// the follow path is re-issued at most this often (ms) unless the owner
+// moved further than 2.0 yd (2D) from the last issued target.
+uint32 const kFollowPathRefreshMs = 5000;
 
 // MVP-006: nearest alive creature offering the declared quest within a
 // bounded radius; the search range shrinks as closer matches are found.
@@ -51,6 +78,108 @@ private:
     uint32 i_questId;
     float i_range;
     NearestQuestGiverCheck(NearestQuestGiverCheck const&);
+};
+
+// PORT-006 (KAP-558): defend candidate scan. A creature qualifies only
+// while it is actually attacking - its current victim is the follow
+// leader (the owner) or this companion. Neutrals, bystanders and
+// unengaged creatures are never pulled. Deterministic selection: an
+// owner attacker beats a companion attacker, then nearest to the
+// companion, then lowest GUID.
+float const kDefendSearchRange = 30.0f;
+// PORT-006: a locked defend target survives this long after the last
+// confirmed candidate. The owner's melee state flaps between the 2 s
+// legacy combat checks, so the attacker's victim can read null on a
+// scan tick even mid-fight; the grace keeps the engagement alive until
+// the companion's own swing connects (verified by the run4 probe).
+uint32 const kDefendTargetGraceMs = 5000;
+
+class BotDefendScan
+{
+public:
+    BotDefendScan(Unit const* source, Unit const* owner)
+        : me(source), owner(owner), m_best(nullptr) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive())
+            return false;
+        Unit const* const victim = u->GetVictim();
+        // Candidate evidence, in priority order: the creature's victim is
+        // the owner or this companion, or the owner / companion is still in
+        // the creature's attacker set while its victim state flaps between
+        // the owner's melee swings. Only creatures that have actually hit
+        // one of ours ever enter the attacker set, so bystanders stay
+        // excluded.
+        bool const attacksOwner = owner != nullptr && victim == owner;
+        bool const attacksMe = victim == me;
+        bool const hitsOwner = owner != nullptr &&
+            u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+        bool const hitsMe = u->GetAttackers().count(const_cast<Unit*>(me)) != 0;
+        if (!attacksOwner && !attacksMe && !hitsOwner && !hitsMe)
+            return false;
+        if (!u->IsWithinDistInMap(me, kDefendSearchRange, false, SizeFactor::None))
+            return false;
+        if (me->IsFriendlyTo(u) || !me->CanAttack(u))
+            return false;
+        if (!m_best)
+        {
+            m_best = u;
+            return true;
+        }
+        int const cls = attacksOwner ? 0 : attacksMe ? 1 : hitsOwner ? 2 : 3;
+        Unit const* const bestVictim = m_best->GetVictim();
+        int const clsBest =
+            (owner && bestVictim == owner) ? 0 :
+            bestVictim == me ? 1 :
+            (owner && m_best->GetAttackers().count(const_cast<Unit*>(owner)) != 0) ? 2 : 3;
+        float const d = me->GetDistance(u);
+        float const dBest = me->GetDistance(m_best);
+        if (cls < clsBest ||
+            (cls == clsBest && (d < dBest ||
+             (d == dBest && u->GetGUIDLow() < m_best->GetGUIDLow()))))
+            m_best = u;
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotDefendScan(BotDefendScan const&);
+    Unit const* me;
+    Unit const* owner;
+    Creature* m_best;
+};
+
+class BotDefendProbe
+{
+public:
+    BotDefendProbe(Unit const* source)
+        : me(source), m_best(nullptr), m_dist(0.0f) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive())
+            return false;
+        float const d = me->GetDistance(u);
+        if (d > kDefendSearchRange)
+            return false;
+        if (!m_best || d < m_dist ||
+            (d == m_dist && u->GetGUIDLow() < m_best->GetGUIDLow()))
+        {
+            m_best = u;
+            m_dist = d;
+        }
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotDefendProbe(BotDefendProbe const&);
+    Unit const* me;
+    Creature* m_best;
+    float m_dist;
 };
 }
 
@@ -80,6 +209,18 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
 
     if (!me->IsInWorld())
         return;
+
+    // PORT-009 (KAP-558): a socketless bot session can never answer the
+    // first-logon racial cinematic (no client sends CMSG_CINEMATIC_DONE);
+    // while watching, IsTargetable() is false for NPC attackers, so hostile
+    // mobs would never retaliate. Dismiss it on the first tick.
+    if (me->watching_cinematic_entry != 0)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] cinematic dismissed entry:%u GUID:%u",
+                           me->watching_cinematic_entry, me->GetGUIDLow());
+        me->CinematicEnd();
+    }
 
     // Detect manual level changes in case GiveLevel hook missed
     if (_lastLevel != me->GetLevel())
@@ -121,12 +262,14 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             _obsTimer -= diff;
     }
 
-    if (!me->IsAlive())
+    // PORT-009 (KAP-558): while alive, UpdateRecovery only resets its
+    // state (so the next death re-arms the death-ack); while dead it
+    // runs the one normal recovery path (corpse reclaim) and everything else
+    // stays dead-idle.
+    if (UpdateRecovery(diff) || !me->IsAlive())
         return;
 
-    // TW-014 (KAP-557): an owner-directed follow goal preempts normal
-    // behavior; while active the bot only pursues its owner.
-    if (UpdateFollow(diff))
+    if (UpdateCompanion(diff))
         return;
 
     if (TryLootDefeatedTarget())
@@ -166,6 +309,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                                me->GetGUIDLow(), victim->GetGUIDLow(), me->GetDistance(victim));
             if (!me->CanReachWithMeleeAutoAttack(victim))
                 me->GetMotionMaster()->MoveChase(victim);
+            else
+                me->SetFacingToObject(victim);
 
             if (_abilityTimer == 0)
             {
@@ -190,6 +335,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             }
             else if (me->CanReachWithMeleeAutoAttack(held))
             {
+                me->SetFacingToObject(held);
                 if (sPlayerBotMgr.IsDebugEnabled())
                     sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f hp:%u/%u",
                                    me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
@@ -266,7 +412,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 float x = me->GetPositionX();
                 float y = me->GetPositionY();
                 float z = me->GetPositionZ();
-                float radius = frand(8.0f, 20.0f);
+                // PORT-007 (KAP-558): PlayerBot.WanderRadius clamps the
+                // idle wander for lab fixtures (0 = legacy frand(8,20)).
+                float const maxRadius = sPlayerBotMgr.GetWanderRadius();
+                float radius = (maxRadius > 0.0f) ? frand(0.0f, maxRadius)
+                                                  : frand(8.0f, 20.0f);
 
                 if (Map* map = me->GetMap())
                 {
@@ -298,6 +448,7 @@ void PlayerBotAI::ClearTarget()
 {
     _lootTargetGuid = ObjectGuid();
     _lootRetryCount = 0;
+    _lootWindowMs = 0;
 }
 
 bool PlayerBotAI::TryLootDefeatedTarget()
@@ -313,6 +464,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
                            me->GetGUIDLow(), _lootTargetGuid.GetCounter());
         _lootTargetGuid = ObjectGuid();
         _lootRetryCount = 0;
+        _lootWindowMs = 0;
         return false;
     }
     if (creature->IsAlive())
@@ -321,6 +473,18 @@ bool PlayerBotAI::TryLootDefeatedTarget()
         // combat loop keeps pursuing. Do not clear it here.
         return false;
     }
+    return CorpseLootStep(creature);
+}
+// PORT-007 (KAP-558): one bounded corpse-loot step against a known dead,
+// in-world creature. Shared by the legacy fallback (TryLootDefeatedTarget)
+// and the companion Loot intent (ExecuteLoot): walk into range, tap the
+// corpse, auto-store the eligible loot, then release. A silent denial is
+// retried a bounded number of times before giving up so the companion is
+// never trapped. Every clear path resets the retry count and the loot window.
+bool PlayerBotAI::CorpseLootStep(Creature* creature)
+{
+    if (!creature || !me->GetMap() || creature->IsAlive())
+        return false;
     float const maxLootDist = me->GetMaxLootDistance(creature);
     if (!creature->IsWithinDistInMap(me, maxLootDist, true, SizeFactor::None))
     {
@@ -353,6 +517,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
                            me->GetGUIDLow(), guid.GetCounter());
         _lootTargetGuid = ObjectGuid();
         _lootRetryCount = 0;
+        _lootWindowMs = 0;
         return true;
     }
 
@@ -375,6 +540,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
                            me->GetGUIDLow(), guid.GetCounter());
         _lootTargetGuid = ObjectGuid();
         _lootRetryCount = 0;
+        _lootWindowMs = 0;
     }
     return true;
 }
@@ -1491,13 +1657,19 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
                            seq, _followSeq, me->GetGUIDLow());
         return;
     }
-    if (me->GetVictim())
-        me->CombatStop();
     _followSeq = seq;
     _followLeaderGuid = leaderGuid;
+    _followGroupId = me->GetGroup() ? me->GetGroup()->GetId() : 0;
     _following = true;
     _followReached = false;
-    me->GetMotionMaster()->Clear(false);
+    _held = false; // PORT-004: a new follow order cancels the hold
+    _assistTargetGuid = 0; // PORT-005: a new follow order cancels an assist
+    _pursuitLeashMs = 0; // PORT-008: a new order starts a fresh pursuit budget
+    _followPathAgeMs = 0; // PORT-008: a new order starts a fresh path window
+    // PORT-003: do not stop an active engagement; the follow goal takes
+    // effect once combat resolves (UpdateAI gate).
+    if (!me->IsInCombat())
+        me->GetMotionMaster()->Clear(false);
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Follow] active GUID:%u leader:%u seq:%u",
                        me->GetGUIDLow(), leaderGuid, seq);
@@ -1510,10 +1682,678 @@ void PlayerBotAI::FollowStop()
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
+    _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
     // Invalidate the current goal immediately (TW-014 AC1).
     me->GetMotionMaster()->Clear(true);
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Follow] inactive GUID:%u", me->GetGUIDLow());
+}
+
+void PlayerBotAI::Hold(uint32 seq)
+{
+    if (!me || seq <= _followSeq)
+        return;
+    _followSeq = seq;
+    _held = true;
+    _following = false;
+    _followLeaderGuid = 0;
+    _followReached = false;
+    _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
+    _pursuitLeashMs = 0; // PORT-008: a hold starts a fresh pursuit budget
+    ClearTarget();
+    me->InterruptNonMeleeSpells(false);
+    if (me->GetVictim())
+        me->CombatStop();
+    me->GetMotionMaster()->Clear(true);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Hold] active GUID:%u seq:%u", me->GetGUIDLow(), seq);
+}
+
+// PORT-005 (KAP-558): owner-selected assist. The manager validated
+// ownership, party membership and the target (name -> legal hostile
+// creature in sight) before calling this; the AI re-validates at execution
+// time because grids, combat state and the target's life can change between
+// order and action. The follow goal is kept: the assist suspends it, and
+// Select resumes it once the assisted target is gone (priority:
+// Hold > Assist > ContinueCombat > Follow).
+void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
+{
+    if (!me)
+        return;
+    if (seq <= _followSeq)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Assist] goal rejected stale seq:%u current:%u GUID:%u",
+                           seq, _followSeq, me->GetGUIDLow());
+        return;
+    }
+    _followSeq = seq;
+    _assistTargetGuid = targetGuid;
+    _held = false; // a new authorized order cancels the hold
+    _pursuitLeashMs = 0; // PORT-008: a new assist starts a fresh pursuit budget
+    ClearTarget(); // the assist target is the only target; never keep an incidental one
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Assist] active GUID:%u target:%u seq:%u",
+                       me->GetGUIDLow(), (uint32)ObjectGuid(targetGuid).GetCounter(), seq);
+}
+
+// PORT-006 (KAP-558): resolve the follow leader as the defend owner with
+// the same availability rules as follow (alive, in world, same account,
+// and the same group when the follow goal is group-bound). A missing or
+// unavailable owner yields no candidate; the goal stays a plain follow.
+Creature* PlayerBotAI::SelectDefendTarget() const
+{
+    if (!me || !me->GetMap() || !botEntry || !botEntry->ownerAccountId)
+        return nullptr;
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner || !owner->IsAlive() || !owner->GetSession() ||
+        owner->GetSession()->GetAccountId() != botEntry->ownerAccountId)
+        return nullptr;
+    if (_followGroupId && (!me->GetGroup() || me->GetGroup()->GetId() != _followGroupId ||
+        owner->GetGroup() != me->GetGroup()))
+        return nullptr;
+    BotDefendScan scan(me, owner);
+    Creature* found = nullptr;
+    MaNGOS::CreatureLastSearcher<BotDefendScan> searcher(found, scan);
+    Cell::VisitGridObjects(me, searcher, kDefendSearchRange);
+    return scan.Best();
+}
+
+void PlayerBotAI::SetDefendTarget(uint64_t guid)
+{
+    if (_defendTargetGuid == guid)
+        return;
+    _defendTargetGuid = guid;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Defend] active GUID:%u target:%u",
+                       me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter());
+}
+
+void PlayerBotAI::ClearDefendTarget(const char* reason)
+{
+    if (!_defendTargetGuid)
+        return;
+    uint64_t const guid = _defendTargetGuid;
+    _defendTargetGuid = 0;
+    _defendTargetGrace = 0;
+    _pursuitLeashMs = 0; // PORT-008: the defend pursuit is over; fresh budget
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Defend] cleared GUID:%u target:%u reason:%s",
+                       me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter(), reason);
+}
+
+bool PlayerBotAI::IsFollowOwnerAvailable() const
+{
+    if (!me || !me->GetMap() || !botEntry || !botEntry->ownerAccountId)
+        return false;
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner || !owner->IsAlive() || !owner->GetSession() ||
+        owner->GetSession()->GetAccountId() != botEntry->ownerAccountId)
+        return false;
+    if (_followGroupId && (!me->GetGroup() || me->GetGroup()->GetId() != _followGroupId ||
+        owner->GetGroup() != me->GetGroup()))
+        return false;
+    return true;
+}
+
+bool PlayerBotAI::UpdateCompanion(uint32 diff)
+{
+    if (!_following && !_held && !_assistTargetGuid)
+        return false;
+    Companion::Observation observation;
+    observation.generation = _followSeq;
+    observation.following = _following;
+    observation.held = _held;
+    observation.ownerAvailable = IsFollowOwnerAvailable();
+    // PORT-005: re-resolve the assisted target from its GUID every tick; a
+    // dead, vanished or unloaded target clears the assist (the companion
+    // resumes its previous order) and never substitutes another enemy.
+    if (_assistTargetGuid)
+    {
+        uint64_t const assistGuid = _assistTargetGuid;
+        Creature* assist = me->GetMap() ? me->GetMap()->GetCreature(ObjectGuid(assistGuid)) : nullptr;
+        if (assist && assist->IsAlive() && assist->IsInWorld())
+            observation.assistTarget = assist->GetObjectGuid().GetRawValue();
+        else
+        {
+            _assistTargetGuid = 0;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][Assist] target gone GUID:%u target:%u",
+                               me->GetGUIDLow(), (uint32)ObjectGuid(assistGuid).GetCounter());
+        }
+    }
+    Unit* target = me->GetVictim();
+    if (!target)
+        target = GetAliveHeldTarget();
+    if (target && target->GetTypeId() == TYPEID_UNIT && target->IsAlive())
+        observation.target = target->GetObjectGuid().GetRawValue();
+    // PORT-007 (KAP-558): a dead, in-world corpse the companion is meant to
+    // loot becomes a first-class Loot target. The value is read here so the
+    // policy stays pure; the executor re-resolves it from the GUID and
+    // re-validates the world before acting.
+    if (_lootTargetGuid && me->GetMap())
+    {
+        Creature* loot = me->GetMap()->GetCreature(_lootTargetGuid);
+        if (loot && !loot->IsAlive() && loot->IsInWorld())
+            observation.lootTarget = loot->GetObjectGuid().GetRawValue();
+    }
+    Companion::Intent intent = Companion::Select(observation);
+    // PORT-006 (KAP-558): reactive defend. Fires only when the selection
+    // would otherwise be Follow (no hold, no assist, no current target)
+    // and the owner enabled it: engage a legal creature that is actually
+    // attacking the owner or this companion. Priority stays
+    // Hold > Assist > ContinueCombat > Defend > Follow, so a hold always
+    // wins and an active fight is never abandoned for a new defender.
+    // PORT-007: defend also interrupts a Loot goal (life over loot).
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot) &&
+        botEntry && botEntry->defendEnabled)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+        {
+            _defendProbeTimer += diff;
+            if (_defendProbeTimer >= 2000)
+            {
+                _defendProbeTimer = 0;
+                // PORT-006 probe: what the defend scan sees each tick,
+                // victim state or not. near:0 means an empty 30 yd radius.
+                BotDefendProbe probe(me);
+                Creature* nearest = nullptr;
+                MaNGOS::CreatureLastSearcher<BotDefendProbe> searcher(nearest, probe);
+                Cell::VisitGridObjects(me, searcher, kDefendSearchRange);
+                nearest = probe.Best();
+                if (!nearest)
+                {
+                    sLog.outString("[PlayerBot][Defend] probe GUID:%u near:0",
+                                   me->GetGUIDLow());
+                }
+                else
+                {
+                    Unit const* const nv = nearest->GetVictim();
+                    sLog.outString(
+                        "[PlayerBot][Defend] probe GUID:%u near:%u v:%u evade:%u "
+                        "combat:%u react:%u atk:%u threat:%u dist:%.2f",
+                        me->GetGUIDLow(),
+                        (uint32)ObjectGuid(nearest->GetObjectGuid()).GetCounter(),
+                        nv ? (uint32)ObjectGuid(nv->GetObjectGuid()).GetCounter() : 0,
+                        (uint32)nearest->IsInEvadeMode(),
+                        (uint32)nearest->IsInCombat(),
+                        (uint32)nearest->GetReactState(),
+                        (uint32)nearest->GetAttackers().size(),
+                        (uint32)!nearest->GetThreatManager().isThreatListEmpty(),
+                        me->GetDistance(nearest));
+                }
+            }
+        }
+        Creature* defender = SelectDefendTarget();
+        if (defender)
+        {
+            SetDefendTarget(defender->GetObjectGuid().GetRawValue());
+            _defendTargetGrace = kDefendTargetGraceMs;
+            ExecuteDefend(defender, diff);
+            return true;
+        }
+        if (_defendTargetGuid)
+        {
+            // Grace hysteresis: the scan can read the attacker as safe on a
+            // flap tick. Keep the locked target through kDefendTargetGraceMs
+            // after the last confirmed candidate; ExecuteDefend re-validates
+            // world state each tick, and the companion's first swing hands
+            // the fight to the continue-combat path.
+            Creature* held = me->GetMap()->GetCreature(ObjectGuid(_defendTargetGuid));
+            if (held && held->IsAlive() && _defendTargetGrace > 0)
+            {
+                _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
+                ExecuteDefend(held, diff);
+                return true;
+            }
+            ClearDefendTarget("owner safe");
+        }
+    }
+    else if (_defendTargetGuid && !me->GetVictim() && !GetAliveHeldTarget())
+    {
+        ClearDefendTarget(intent.action == Companion::Action::Hold ? "hold"
+                          : intent.action == Companion::Action::Assist ? "assist"
+                          : "no goal");
+    }
+    ExecuteCompanion(intent, diff);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-009 (KAP-558): one normal companion death and recovery path. While
+// dead, Update() skips every offensive, loot and quest path; an owned
+// companion (the same gate as UpdateCompanion) reclaims its own corpse
+// through the normal CMSG_RECLAIM_CORPSE handler: it waits out the
+// standard reclaim delay, walks to the corpse when out of range, and
+// issues the reclaim the first tick inside CORPSE_RECLAIM_RADIUS. The
+// handler's ResurrectPlayer(0.5f) applies the normal 50% restore - no
+// free resurrection, no teleport, no second mechanism. Unavailable
+// states (no corpse, delay not over, out of range) hold and report at a
+// bounded pace.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::UpdateRecovery(uint32 diff)
+{
+    if (!me || !me->GetMap())
+        return false;
+    if (me->IsAlive())
+    {
+        _recoveryDead = false;
+        _recoveryReportMs = 0;
+        _recoveryWalkMs = 0;
+        _recoveryDeathAck = false;
+        return false;
+    }
+    // Owned companions with an active order only; ambient dead bots keep
+    // the legacy dead-idle behavior.
+    if (!_following && !_held && !_assistTargetGuid)
+        return false;
+    if (!_recoveryDead)
+    {
+        _recoveryDead = true;
+        _recoveryReportMs = 0;
+        _recoveryWalkMs = 0;
+        _recoveryDeathAck = false;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] entered GUID:%u",
+                           me->GetGUIDLow());
+    }
+    Corpse* corpse = me->GetCorpse();
+    if ((!corpse || !corpse->IsInWorld()) && !_recoveryDeathAck)
+    {
+        // PORT-009: KillPlayer defers corpse creation to the client's
+        // CMSG_MOVE_DEADACK, which a socketless session never sends (the
+        // fallback is the 6 min repop timer). Build the corpse now, the way the
+        // client's dead-ack would, so the standard reclaim path can run.
+        _recoveryDeathAck = true;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] death-ack issued GUID:%u",
+                           me->GetGUIDLow());
+        me->BuildPlayerRepop();
+        corpse = me->GetCorpse();
+    }
+    if (!corpse || !corpse->IsInWorld())
+    {
+        // The corpse is not (yet) available: hold and report at a bounded
+        // pace. There is no fallback teleport or free resurrection.
+        if (_recoveryReportMs <= diff)
+        {
+            _recoveryReportMs = kRecoveryReportMs;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][Recovery] unavailable GUID:%u reason:no-corpse",
+                               me->GetGUIDLow());
+        }
+        else
+            _recoveryReportMs -= diff;
+        return true;
+    }
+    // Mirror the handler's reclaim gate: ghost time plus the standard
+    // reclaim delay must have passed before the reclaim is legal.
+    if (corpse->GetGhostTime() +
+            me->GetCorpseReclaimDelay(corpse->GetType() == CORPSE_RESURRECTABLE_PVP) >
+        time(nullptr))
+    {
+        if (_recoveryReportMs <= diff)
+        {
+            _recoveryReportMs = kRecoveryReportMs;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][Recovery] waiting GUID:%u dist:%.1f",
+                               me->GetGUIDLow(), me->GetDistance(corpse));
+        }
+        else
+            _recoveryReportMs -= diff;
+        return true;
+    }
+    if (corpse->IsWithinDistInMap(me, CORPSE_RECLAIM_RADIUS, true))
+    {
+        me->GetMotionMaster()->Clear(true);
+        WorldPacket packet(CMSG_RECLAIM_CORPSE);
+        packet << me->GetObjectGuid();
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] reclaim issued GUID:%u",
+                           me->GetGUIDLow());
+        // The normal handler path: it re-validates death, ghost flag,
+        // corpse, delay and range, then resurrects at 50% and spawns the
+        // bones (the standard reclaim penalty, no free resurrection).
+        me->GetSession()->HandleReclaimCorpseOpcode(packet);
+        return true;
+    }
+    // Out of range: walk to the corpse. The path is re-issued only when
+    // the motion is empty and the retry window has elapsed, so a failed
+    // path is retried at a bounded pace and the companion is never
+    // trapped by an unreachable corpse.
+    if (me->GetMotionMaster()->empty() && _recoveryWalkMs <= diff)
+    {
+        _recoveryWalkMs = kRecoveryWalkRetryMs;
+        me->GetMotionMaster()->MovePoint(0, corpse->GetPositionX(),
+                                         corpse->GetPositionY(),
+                                         corpse->GetPositionZ(), MOVE_PATHFINDING);
+    }
+    else
+        _recoveryWalkMs = (_recoveryWalkMs > diff) ? _recoveryWalkMs - diff : 0;
+    if (_recoveryReportMs <= diff)
+    {
+        _recoveryReportMs = kRecoveryReportMs;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Recovery] walking GUID:%u dist:%.1f",
+                           me->GetGUIDLow(), me->GetDistance(corpse));
+    }
+    else
+        _recoveryReportMs -= diff;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-008 (KAP-558): one tick of the bounded pursuit budget. While the
+// companion cannot land a melee hit on the named target it may keep
+// chasing for at most kPursuitLeashMs; on expiry the caller abandons the
+// pursuit (drops the target, stops combat, clears motion) so the prior
+// order resumes. A target within melee reach disarms the budget - an
+// actual fight has unbounded kill time.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::PursuitLeashTick(Unit* target, uint32 diff)
+{
+    if (!target)
+    {
+        _pursuitLeashMs = 0;
+        return false;
+    }
+    if (me && me->CanReachWithMeleeAutoAttack(target))
+    {
+        _pursuitLeashMs = 0;
+        return false;
+    }
+    if (_pursuitLeashMs == 0)
+    {
+        _pursuitLeashMs = kPursuitLeashMs;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] pursuit leash armed GUID:%u target:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow());
+        return false;
+    }
+    _pursuitLeashMs = (_pursuitLeashMs > diff) ? _pursuitLeashMs - diff : 0;
+    if (_pursuitLeashMs == 0)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] pursuit leash expired GUID:%u target:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow());
+        return true;
+    }
+    return false;
+}
+void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
+{
+    if (!Companion::IsCurrent(intent, _followSeq) || !me || !me->IsAlive() || !me->GetMap())
+        return;
+    // PORT-005: the assist runs before the owner-availability gate: helping
+    // a party member is valid even while the follow leader is momentarily
+    // unavailable (dead, loading, grouped elsewhere).
+    if (intent.action == Companion::Action::Assist)
+    {
+        Creature* target = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+        if (!target || !target->IsAlive() || !target->IsInWorld() ||
+            !me->CanAttack(target) || me->IsFriendlyTo(target) ||
+            !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
+        {
+            // The named target is no longer a legal engagement. Drop it and
+            // resume the prior order; never substitute an unrelated enemy.
+            _assistTargetGuid = 0;
+            _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+            if (me->GetVictim())
+                me->CombatStop();
+            me->GetMotionMaster()->Clear(false);
+            ClearTarget();
+            if (sPlayerBotMgr.IsDebugEnabled())
+            {
+                if (target && target->IsAlive())
+                    sLog.outString("[PlayerBot][Assist] target out of reach GUID:%u target:%u dist:%.2f",
+                                   me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+                else
+                    sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
+                                   me->GetGUIDLow(), (uint32)ObjectGuid(intent.target).GetCounter());
+            }
+            return;
+        }
+        // PORT-008 (KAP-558): pursuit reach budget; runs every tick outside
+        // the 2 s combat check pacing. On expiry the assist is abandoned
+        // exactly like an invalid target and the prior order resumes.
+        if (PursuitLeashTick(target, diff))
+        {
+            _assistTargetGuid = 0;
+            if (me->GetVictim())
+                me->CombatStop();
+            me->GetMotionMaster()->Clear(false);
+            ClearTarget();
+            return;
+        }
+        if (_abilityTimer > diff)
+            _abilityTimer -= diff;
+        else
+            _abilityTimer = 0;
+        if (_combatCheckTimer > diff)
+        {
+            _combatCheckTimer -= diff;
+            return;
+        }
+        _combatCheckTimer = 2000;
+        RememberLootTarget(target);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        if (sPlayerBotMgr.IsDebugEnabled())
+        {
+            // PORT-009 diagnostic: the target never retaliated against a
+            // player bot; log the exact creature-side and player-side
+            // checks that selectNextVictim/IsTargetable use, each combat
+            // tick, until the missing condition is identified.
+            float const assistThreat = target->GetThreatManager().getThreat(me, true);
+            sLog.outString(
+                "[PlayerBot][Assist] probe GUID:%u t:%u v:%u evade:%u combat:%u "
+                "react:%u atk:%u tlist:%u threat:%.1f valid:%u outarea:%u "
+                "canatk:%u pacified:%u selfcombat:%u selfgm:%u selfimmnpc:%u "
+                "selftgt:%u selfdet:%u rawflags:%x bytes1:%x cin:%u feign:%u "
+                "taxi:%u inworld:%u mounted:%u canatkself:%u canauto:%u",
+                me->GetGUIDLow(),
+                target->GetGUIDLow(),
+                target->GetVictim() ? (uint32)target->GetVictim()->GetGUIDLow() : 0,
+                (uint32)target->IsInEvadeMode(),
+                (uint32)target->IsInCombat(),
+                (uint32)target->GetReactState(),
+                (uint32)target->GetAttackers().size(),
+                (uint32)!target->GetThreatManager().isThreatListEmpty(),
+                assistThreat,
+                (uint32)target->IsValidAttackTarget(me),
+                (uint32)target->IsOutOfThreatArea(me),
+                (uint32)target->CanInitiateAttack(),
+                (uint32)target->IsTempPacified(),
+                (uint32)me->IsInCombat(),
+                (uint32)me->IsGameMaster(),
+                (uint32)me->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC),
+                (uint32)me->IsTargetable(true, false, false, true),
+                (uint32)me->CanBeDetected(),
+                me->GetUInt32Value(UNIT_FIELD_FLAGS),
+                me->GetUInt32Value(UNIT_FIELD_BYTES_1),
+                me->watching_cinematic_entry,
+                (uint32)me->HasUnitState(UNIT_STAT_FEIGN_DEATH),
+                (uint32)me->IsTaxiFlying(),
+                (uint32)me->IsInWorld(),
+                (uint32)me->IsMounted(),
+                (uint32)me->CanAttack(target),
+                (uint32)(me->CanAutoAttackTarget(target) == ATTACK_RESULT_OK));
+        }
+        if (!me->CanReachWithMeleeAutoAttack(target))
+            me->GetMotionMaster()->MoveChase(target);
+        else
+            me->SetFacingToObject(target);
+        if (!_abilityTimer && me->IsWithinLOSInMap(target))
+        {
+            if (uint32 spellId = SelectOffensiveSpell(target))
+            {
+                me->CastSpell(target, spellId, false);
+                _abilityTimer = urand(2000, 4000);
+                return;
+            }
+        }
+        me->Attack(target, true);
+        return;
+    }
+    if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
+    {
+        me->InterruptNonMeleeSpells(false);
+        if (me->GetVictim())
+            me->CombatStop();
+        me->GetMotionMaster()->Clear(false);
+        ClearTarget();
+        return;
+    }
+    if (intent.action == Companion::Action::Loot)
+    {
+        Creature* corpse = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+        ExecuteLoot(corpse, diff);
+        return;
+    }
+    if (intent.action == Companion::Action::Follow)
+    {
+        UpdateFollow(diff);
+        return;
+    }
+    if (intent.action != Companion::Action::ContinueCombat)
+        return;
+    Creature* target = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+    if (!target || !target->IsAlive() || !target->IsInWorld() ||
+        !me->CanAttack(target) || me->IsFriendlyTo(target) || me->GetDistance(target) > 35.0f ||
+        (me->GetVictim() != target && GetAliveHeldTarget() != target))
+    {
+        _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+        if (me->GetVictim())
+            me->CombatStop();
+        ClearTarget();
+        return;
+    }
+    // PORT-008 (KAP-558): pursuit reach budget for a held target; a victim
+    // the companion cannot land a melee hit on is abandoned on expiry.
+    if (PursuitLeashTick(target, diff))
+    {
+        if (me->GetVictim())
+            me->CombatStop();
+        ClearTarget();
+        return;
+    }
+    if (_abilityTimer > diff)
+        _abilityTimer -= diff;
+    else
+        _abilityTimer = 0;
+    if (_combatCheckTimer > diff)
+    {
+        _combatCheckTimer -= diff;
+        return;
+    }
+    _combatCheckTimer = 2000;
+    RememberLootTarget(target);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
+                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+    if (!me->CanReachWithMeleeAutoAttack(target))
+        me->GetMotionMaster()->MoveChase(target);
+    else
+        me->SetFacingToObject(target);
+    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+    {
+        if (uint32 spellId = SelectOffensiveSpell(target))
+        {
+            me->CastSpell(target, spellId, false);
+            _abilityTimer = urand(2000, 4000);
+            return;
+        }
+    }
+    me->Attack(target, true);
+}
+
+// PORT-007 (KAP-558): one bounded execution tick of the companion Loot
+// intent. The named corpse is re-validated against the world; a vanished,
+// re-embodied or illegal corpse drops the goal so the prior order resumes.
+// The attempt is time-bounded by kLootWindowMs (a diff countdown, no wall
+// clock) so a denied or unreachable corpse can never trap the companion:
+// on expiry the follow goal resumes (regroup). The walk/tap/store body is
+// shared with the legacy fallback through CorpseLootStep.
+void PlayerBotAI::ExecuteLoot(Creature* corpse, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap() || !corpse ||
+        !corpse->IsInWorld() || corpse->IsAlive())
+    {
+        ClearTarget();
+        return;
+    }
+    if (_lootWindowMs == 0)
+    {
+        _lootWindowMs = kLootWindowMs;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] loot intent GUID:%u target:%u window:%u",
+                           me->GetGUIDLow(), corpse->GetGUIDLow(), _lootWindowMs);
+    }
+    _lootWindowMs = (_lootWindowMs > diff) ? _lootWindowMs - diff : 0;
+    if (_lootWindowMs == 0)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] corpse loot timeout GUID:%u target:%u",
+                           me->GetGUIDLow(), corpse->GetGUIDLow());
+        ClearTarget();
+        return;
+    }
+    CorpseLootStep(corpse);
+}
+
+// PORT-006 (KAP-558): one execution tick of the defend engagement. The
+// named creature is re-validated against world state; an illegal
+// candidate is dropped (reason logged) and the prior order resumes - a
+// bystander is never substituted. Once the attack lands, the companion
+// keeps the victim through the normal continue-combat path until the
+// defender is dead, and the follow intent resumes on the next tick.
+void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap() || !target ||
+        !target->IsAlive() || !target->IsInWorld() ||
+        !me->CanAttack(target) || me->IsFriendlyTo(target) ||
+        !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
+    {
+        ClearDefendTarget("target invalid");
+        return;
+    }
+    // PORT-008 (KAP-558): pursuit reach budget for the defend engagement.
+    if (PursuitLeashTick(target, diff))
+    {
+        if (me->GetVictim() == target)
+            me->CombatStop();
+        ClearDefendTarget("leash");
+        return;
+    }
+    if (_abilityTimer > diff)
+        _abilityTimer -= diff;
+    else
+        _abilityTimer = 0;
+    if (_combatCheckTimer > diff)
+    {
+        _combatCheckTimer -= diff;
+        return;
+    }
+    _combatCheckTimer = 2000;
+    RememberLootTarget(target);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
+                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+    if (!me->CanReachWithMeleeAutoAttack(target))
+        me->GetMotionMaster()->MoveChase(target);
+    else
+        me->SetFacingToObject(target);
+    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+    {
+        if (uint32 spellId = SelectOffensiveSpell(target))
+        {
+            me->CastSpell(target, spellId, false);
+            _abilityTimer = urand(2000, 4000);
+            return;
+        }
+    }
+    me->Attack(target, true);
 }
 
 bool PlayerBotAI::UpdateFollow(uint32 diff)
@@ -1541,15 +2381,42 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
 
     if (me->GetDistance(leader) > kFollowRange)
     {
+        // PORT-007: re-arm the reached latch while out of range so the
+        // "reached" line marks every out-of-range -> in-range transition
+        // (a completed regroup), not just the first approach.
+        _followReached = false;
         // The same path-find-to-position pattern idle wander and the quest
         // giver pursuit use (a player chase is a no-op without a victim).
-        me->GetMotionMaster()->MovePoint(0, leader->GetPositionX(), leader->GetPositionY(),
-                                         leader->GetPositionZ(), MOVE_PATHFINDING);
+        // PORT-008 (KAP-558): throttle follow path re-issuance. The path is
+        // re-issued only when the motion master is empty (the walk finished
+        // but the owner is still out of range), the owner moved more than
+        // 2.0 yd (2D) from the last issued target, or the issued target is
+        // stale (kFollowPathRefreshMs).
+        {
+            float const lx = leader->GetPositionX();
+            float const ly = leader->GetPositionY();
+            float const lz = leader->GetPositionZ();
+            float const dpx = lx - _followPathX;
+            float const dpy = ly - _followPathY;
+            bool const moved = (dpx * dpx + dpy * dpy) > (2.0f * 2.0f);
+            if (me->GetMotionMaster()->empty() || moved ||
+                _followPathAgeMs >= kFollowPathRefreshMs)
+            {
+                _followPathX = lx;
+                _followPathY = ly;
+                _followPathZ = lz;
+                _followPathAgeMs = 0;
+                me->GetMotionMaster()->MovePoint(0, lx, ly, lz, MOVE_PATHFINDING);
+            }
+            else
+                _followPathAgeMs += diff;
+        }
         return true;
     }
 
     if (!me->GetMotionMaster()->empty())
         me->GetMotionMaster()->Clear(false);
+    _followPathAgeMs = 0; // PORT-008: fresh path window after a completed approach
     if (!_followReached)
     {
         _followReached = true;

@@ -127,15 +127,16 @@ class BotPartyTests(unittest.TestCase):
                                   "party recruit accepted bot:Partycomp" in text,
                                   deadline=120)
             cls.recruit_snapshot = _group_snapshot(cls.base, cls.env)
+            # The 55000 recall races the 70000 dismiss on its login
+            # completion; every valid ordering ends with the 80000
+            # cancelling the pending recall (the bot is never in a
+            # party at that point) and at least one async recall
+            # completion rejected.
             cls.logs = p.wait_for(cls.base, cls.env, lambda text:
-                                  "party recall queued bot:Partycomp" in text and
-                                  text.count("party recruit accepted bot:Partycomp") >= 2,
+                                  "party dismiss cancelled pending recall bot:Partycomp" in text and
+                                  "party recall completion rejected bot:Partycomp" in text,
                                   deadline=120)
             cls.recall_snapshot = _group_snapshot(cls.base, cls.env)
-            # Wait for the 80000 dismiss (seq:7): second accepted dismiss.
-            cls.logs = p.wait_for(cls.base, cls.env, lambda text:
-                                  text.count("party dismiss accepted bot:Partycomp") >= 2,
-                                  deadline=120)
             time.sleep(10)
             cls.logs = p.command(["docker", "compose"] + cls.base +
                                  ["logs", "--no-color", "world"], env=cls.env, timeout=60)
@@ -188,13 +189,18 @@ class BotPartyTests(unittest.TestCase):
         self.assertIn("%d\t%d\t%d" % (COMP_GUID, COMP_ACC, OWNER_ACC), self.ownership)
 
     def test_pending_recall_is_invalidated_by_dismiss(self):
-        # The 55000 async recall is invalidated: login completion is rejected
-        # (bot not yet in-world), the 70000 dismiss is rejected (bot not in
-        # party), and the 80000 recall+dismiss cycle leaves the bot out.
+        # The 55000 async recall races the 70000 dismiss on its login
+        # completion (accepted, rejected missing-in-world, or rejected
+        # stale are all valid orderings), and the 80000 recall+dismiss is a
+        # same-timestamp race that always cancels the pending recall. In
+        # every ordering: the invalidated completion is rejected, no
+        # recruit is accepted after the final dismiss, and the bot is out
+        # of the final group.
         self.assertIn("party recall completion rejected bot:Partycomp", self.logs)
-        self.assertIn("party dismiss rejected membership bot:Partycomp", self.logs)
-        self.assertIn("party recruit accepted bot:Partycomp guid:%d leader:%d seq:6" % (COMP_GUID, OWNER_GUID), self.logs)
-        self.assertIn("party dismiss accepted bot:Partycomp guid:%d leader:%d seq:7" % (COMP_GUID, OWNER_GUID), self.logs)
+        idx = max(self.logs.rfind("party dismiss cancelled pending recall bot:Partycomp"),
+                  self.logs.rfind("party dismiss accepted bot:Partycomp guid:%d" % COMP_GUID))
+        self.assertGreater(idx, -1)
+        self.assertNotIn("party recruit accepted bot:Partycomp", self.logs[idx:])
         self.assertNotIn("%d\t%d" % (OWNER_GUID, COMP_GUID), self.final_snapshot)
 
     def test_world_and_personal_server_stayed_healthy(self):

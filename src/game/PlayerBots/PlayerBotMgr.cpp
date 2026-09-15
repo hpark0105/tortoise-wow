@@ -11,6 +11,8 @@
 #include "Opcodes.h"
 #include "Config/Config.h"
 #include "Chat.h"
+#include "GridNotifiersImpl.h"
+#include "CellImpl.h"
 #include "Group.h"
 #include "Player.h"
 #include "Group.h"
@@ -90,6 +92,11 @@ PlayerBotMgr::PlayerBotMgr()
     m_staleProbeGuid = 0;
     m_staleProbeStage = 0;
     m_staleProbeOldGen = 0;
+    m_logoutProbeGuid = 0;
+    m_logoutProbeLogoutMs = 0;
+    m_logoutProbeReloginMs = 0;
+    m_logoutProbeLoginMs = 0;
+    m_logoutProbeStage = 0;
     m_followScriptStartMs = 0;
     m_followScriptIdx = 0;
     m_partyInviteScriptStartMs = 0;
@@ -115,6 +122,10 @@ void PlayerBotMgr::LoadConfig()
     // MVP-006: one declared quest the companion progresses through the
     // normal quest APIs (accept, objective credit, turn-in).
     confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
+    // PORT-007 (KAP-558): lab-only idle-wander clamp. Default 0 keeps
+    // the legacy frand(8,20) radius; fixtures set a small value so
+    // seeded bots stay geometrically stable before scripted holds land.
+    confWanderRadius = sConfig.GetFloatDefault("PlayerBot.WanderRadius", 0.0f);
     if (confQuestId)
         sLog.outString("Playerbot: declared quest %u enabled (MVP-006)", confQuestId);
     // TW-014 (KAP-557) lab-only deterministic follow/stop script (default
@@ -251,6 +262,32 @@ void PlayerBotMgr::LoadConfig()
     m_staleProbeGuid = (staleTokenValid && staleProbeGuid != 0) ? staleProbeGuid : 0;
     if (m_staleProbeGuid)
         sLog.outString("Playerbot: stale-probe armed for %u (MVP-002 lab probe)", m_staleProbeGuid);
+    // PORT-008 (KAP-558) lab-only probe (default off): deterministic owner
+    // logout/relogin at fixed offsets after the owner's own login. Format:
+    // <guid>,<logoutMs>,<reloginMs>. Never set outside the Docker lab.
+    m_logoutProbeGuid = 0;
+    m_logoutProbeLogoutMs = 0;
+    m_logoutProbeReloginMs = 0;
+    m_logoutProbeLoginMs = 0;
+    m_logoutProbeStage = 0;
+    {
+        std::string logoutToken = sConfig.GetStringDefault("PlayerBot.TestLogoutScript", "");
+        size_t c1 = logoutToken.find(',');
+        size_t c2 = (c1 == std::string::npos) ? std::string::npos : logoutToken.find(',', c1 + 1);
+        if (c1 != std::string::npos && c2 != std::string::npos)
+        {
+            m_logoutProbeGuid = (uint32)atoll(logoutToken.substr(0, c1).c_str());
+            m_logoutProbeLogoutMs = (uint32)atoll(logoutToken.substr(c1 + 1, c2 - c1 - 1).c_str());
+            m_logoutProbeReloginMs = (uint32)atoll(logoutToken.substr(c2 + 1).c_str());
+        }
+        else if (!logoutToken.empty())
+            sLog.outError("Playerbot: test-logout-script malformed; skipped: %s", logoutToken.c_str());
+        if (!(m_logoutProbeGuid && m_logoutProbeReloginMs > m_logoutProbeLogoutMs))
+            m_logoutProbeGuid = 0;
+        if (m_logoutProbeGuid)
+            sLog.outString("Playerbot: test-logout armed guid:%u out:%u re:%u (PORT-008 lab probe)",
+                           m_logoutProbeGuid, m_logoutProbeLogoutMs, m_logoutProbeReloginMs);
+    }
     if (!forceLogoutDelay)
         m_tempBots.clear();
 }
@@ -374,7 +411,10 @@ void PlayerBotMgr::Load()
     // TW-012: clamp both ends to real roster capacity while preserving exact
     // boundaries. The old >= / +1 normalization changed a one-bot 1..1
     // request into 0..1 and could produce a target above capacity.
-    uint32 const capacity = (uint32)m_bots.size();
+      uint32 capacity = 0;
+    for (auto const& entry : m_bots)
+        if (!entry.second->customBot && !entry.second->isChatBot && !entry.second->ownerAccountId)
+            ++capacity;
     confMinBots = std::min(confMinBots, capacity);
     confMaxBots = std::min(confMaxBots, capacity);
     if (confMaxBots < confMinBots)
@@ -487,14 +527,7 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
     e->ai->SetPlayer(player);
     e->ai->OnPlayerLogin();
 
-    // A recalled bot may have been saved in a dead state (health=0, corpse
-    // pending). Restore it to full health before any party recruit can run.
-    if (player->IsDead())
-    {
-        player->ResurrectPlayer(1.0f, false);
-        sLog.outString("[PlayerBot][Login] resurrected dead bot:%s guid:%u",
-                       e->name.c_str(), e->playerGUID);
-    }
+    // Preserve saved death state; recovery must use normal game paths.
 
     // CMP-010: a recall may have queued this login. Revalidate every mutable
     // condition after the bot is actually in-world; a newer dismiss/recruit
@@ -506,7 +539,7 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
         e->pendingPartyLeaderGuid = 0;
         e->pendingPartySeq = 0;
         Player* leader = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, leaderGuid));
-        if (!CompletePartyRecruit(leader, e, sequence))
+        if (!CompletePartyRecruit(leader, e, sequence, player))
             sLog.outError("party recall completion rejected bot:%s guid:%u leader:%u seq:%u",
                           e->name.c_str(), e->playerGUID, leaderGuid, sequence);
     }
@@ -548,6 +581,9 @@ void PlayerBotMgr::Update(uint32 diff)
     // MVP-002 (KAP-552): deterministic stale-completion probe (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateStaleLoginProbe();
+    // PORT-008 (KAP-558): deterministic owner logout/relogin probe
+    // (lab-only, config-gated; cheap state check when disabled).
+    UpdateTestLogoutScript();
     // TW-014 (KAP-557): deterministic follow/stop script (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateFollowScript();
@@ -671,14 +707,80 @@ void PlayerBotMgr::UpdateStaleLoginProbe()
     }
 }
 
+// PORT-008 (KAP-558): lab-only owner logout/relogin probe (default off).
+// At logoutMs after the probed bot's first observed ONLINE state its
+// session is deleted (DeleteBot - the normal logout path), and at
+// reloginMs it is queued back with AddBot. Offsets are relative to that
+// login, so fixtures can reason in the same clock as the follow script.
+// The probe is a pure driver; all companion behavior under owner loss is
+// the AI's existing gate (hold safe) and the manager's order handling.
+// ---------------------------------------------------------------------------
+void PlayerBotMgr::UpdateTestLogoutScript()
+{
+    if (!m_logoutProbeGuid || m_logoutProbeStage >= 2)
+        return;
+
+    std::map<uint32, PlayerBotEntry*>::iterator iter = m_bots.find(m_logoutProbeGuid);
+    if (iter == m_bots.end())
+    {
+        sLog.outError("Playerbot: test-logout %u has no entry; probe aborted (PORT-008)", m_logoutProbeGuid);
+        m_logoutProbeStage = 2;
+        return;
+    }
+    PlayerBotEntry* e = iter->second;
+
+    switch (m_logoutProbeStage)
+    {
+        case 0:
+            if (e->state != PB_STATE_ONLINE)
+                return; // wait for the owner's login to finish
+            if (m_logoutProbeLoginMs == 0)
+            {
+                m_logoutProbeLoginMs = m_elapsedTime;
+                if (confDebug)
+                    sLog.outString("Playerbot: test-logout %u baseline at %u (PORT-008)",
+                                   m_logoutProbeGuid, m_elapsedTime);
+                return;
+            }
+            if (m_elapsedTime < m_logoutProbeLoginMs + m_logoutProbeLogoutMs)
+                return;
+            sLog.outString("Playerbot: test-logout %u at %u (PORT-008)",
+                           m_logoutProbeGuid, m_elapsedTime);
+            DeleteBot(m_logoutProbeGuid);
+            m_logoutProbeStage = 1;
+            break;
+        case 1:
+            if (sWorld.FindSession(e->accountId))
+                return; // wait for the old session to be dropped by WorldSession::Update
+            if (m_elapsedTime < m_logoutProbeLoginMs + m_logoutProbeReloginMs)
+                return;
+            if (!AddBot(m_logoutProbeGuid, false))
+            {
+                sLog.outError("Playerbot: test-logout %u re-login rejected; probe aborted (PORT-008)", m_logoutProbeGuid);
+                m_logoutProbeStage = 2;
+                return;
+            }
+            sLog.outString("Playerbot: test-relogin %u at %u (PORT-008)",
+                           m_logoutProbeGuid, m_elapsedTime);
+            m_logoutProbeStage = 2;
+            break;
+        default:
+            break;
+    }
+}
 /*
 Toutes les X minutes, ajoute ou enleve un bot.
 */
+// ---------------------------------------------------------------------------
 bool PlayerBotMgr::AddOrRemoveBot()
 {
     uint32 const target = confMinBots == confMaxBots
         ? confMinBots : urand(confMinBots, confMaxBots);
-    uint32 const active = m_stats.onlineCount + m_stats.loadingCount;
+    uint32 active = 0;
+    for (auto const& entry : m_bots)
+        if (!entry.second->customBot && !entry.second->isChatBot && !entry.second->ownerAccountId &&
+            (entry.second->state == PB_STATE_ONLINE || entry.second->state == PB_STATE_LOADING))
+            ++active;
     /*
     10 --- --- --- --- --- --- --- --- --- --- 20 bots
                 NumActuel
@@ -829,7 +931,7 @@ bool PlayerBotMgr::AddRandomBot()
 {
     uint32 availableChance = 0;
     for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
-        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot)
+        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot && it->second->ownerAccountId == 0)  // PORT-002
             availableChance += it->second->chance;
     if (!availableChance)
         return false;
@@ -842,8 +944,8 @@ bool PlayerBotMgr::AddRandomBot()
         if (it->second->state != PB_STATE_OFFLINE)
             continue;
 
-        if (it->second->customBot)
-            continue;
+        if (it->second->customBot || it->second->ownerAccountId != 0)
+            continue;  // PORT-002: owned companions managed by recruit/recall only
 
         uint32 chance = it->second->chance;
 
@@ -893,15 +995,21 @@ bool PlayerBotMgr::DeleteBot(uint32 playerGUID)
 
 bool PlayerBotMgr::DeleteRandomBot()
 {
-    if (m_stats.onlineCount < 1)
+    // PORT-002: count only ambient (non-owned, non-custom, non-chat) bots
+    // that are online. Owned companions are managed exclusively by recruit/recall.
+    uint32 eligibleCount = 0;
+    for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
+        if (!it->second->customBot && !it->second->isChatBot && it->second->ownerAccountId == 0 && it->second->state == PB_STATE_ONLINE)
+            eligibleCount++;
+    if (eligibleCount < 1)
         return false;
 
-    uint32 idDelete = urand(1, m_stats.onlineCount);
+    uint32 idDelete = urand(1, eligibleCount);
     uint32 onlinePassed = 0;
     std::map<uint32, PlayerBotEntry*>::iterator iter;
     for (iter = m_bots.begin(); iter != m_bots.end(); iter++)
     {
-        if (!iter->second->customBot && !iter->second->isChatBot && iter->second->state == PB_STATE_ONLINE)
+        if (!iter->second->customBot && !iter->second->isChatBot && iter->second->ownerAccountId == 0 && iter->second->state == PB_STATE_ONLINE)
         {
             onlinePassed++;
             if (onlinePassed == idDelete)
@@ -1413,6 +1521,233 @@ bool PlayerBotMgr::BotStop(Player* issuer, const std::string& botName)
     return true;
 }
 
+bool PlayerBotMgr::BotHold(Player* issuer, const std::string& botName)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("hold rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("hold rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("hold rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("hold rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->ai->Hold(++e->followSeq);
+    sLog.outString("hold accepted bot:%s guid:%u issuer:%u",
+                   botName.c_str(), e->playerGUID, issuer->GetGUIDLow());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-005 (KAP-558): owner-selected assist (.botassist <botname> <target>).
+// The companion must be in the issuer's party; the target is looked up by
+// name around the companion (grid visit, nearest live match wins; a dead
+// match is kept as fallback so the caller can report target-dead when no
+// live match exists). Every outcome, accepted or
+// rejected, is logged. The AI re-validates the target and the order
+// generation at execution time.
+// ---------------------------------------------------------------------------
+namespace
+{
+// Search radius for the .botassist name lookup, centered on the companion.
+float const kBotAssistSearchRange = 30.0f;
+
+class BotAssistNameCheck
+{
+public:
+    BotAssistNameCheck(Unit const* source, const std::string& name)
+        : me(source), name(name), m_alive(nullptr), m_aliveDist(0.0f),
+          m_dead(nullptr), m_deadDist(0.0f) {}
+
+    bool operator()(Unit* u)
+    {
+        if (me == u || u->GetName() != name)
+            return false;
+        if (!u->IsWithinDistInMap(me, kBotAssistSearchRange, false, SizeFactor::None))
+            return false;
+        float const dist = me->GetDistance(u);
+        // The companion farms its own corpses, so a dead-first selection
+        // would make assist unusable right after a kill: track the nearest
+        // live and nearest dead match separately.
+        if (u->IsAlive())
+        {
+            if (!m_alive || dist < m_aliveDist)
+            {
+                m_alive = u;
+                m_aliveDist = dist;
+            }
+        }
+        else if (!m_dead || dist < m_deadDist)
+        {
+            m_dead = u;
+            m_deadDist = dist;
+        }
+        return true;
+    }
+
+    // Nearest live match wins; dead fallback kept for the target-dead report.
+    Unit* Best() const { return m_alive ? m_alive : m_dead; }
+
+private:
+    Unit const* me;
+    std::string const& name;
+    Unit* m_alive;
+    float m_aliveDist;
+    Unit* m_dead;
+    float m_deadDist;
+};
+}
+
+bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const std::string& targetName)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty() || targetName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("assist rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("assist rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("assist rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("assist rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    Player* bot = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID)));
+    if (!bot || bot->GetSession() != e->session || !bot->GetMap())
+    {
+        sLog.outError("assist rejected not-in-world bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!issuer->GetGroup() || bot->GetGroup() != issuer->GetGroup())
+    {
+        sLog.outError("assist rejected not-in-party bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    Unit* target = nullptr;
+    {
+        CellPair const p(MaNGOS::ComputeCellPair(bot->GetPositionX(), bot->GetPositionY()));
+        Cell cell(p);
+        cell.SetNoCreate();
+        BotAssistNameCheck check(bot, targetName);
+        MaNGOS::UnitLastSearcher<BotAssistNameCheck> searcher(target, check);
+        TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, WorldTypeMapContainer> world_searcher(searcher);
+        TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, GridTypeMapContainer> grid_searcher(searcher);
+        cell.Visit(p, world_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+        cell.Visit(p, grid_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+        target = check.Best();
+    }
+    if (!target)
+    {
+        sLog.outError("assist rejected target-not-found bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (target->IsPlayer())
+    {
+        sLog.outError("assist rejected target-is-player bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!target->IsAlive())
+    {
+        sLog.outError("assist rejected target-dead bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (bot->IsFriendlyTo(target))
+    {
+        sLog.outError("assist rejected target-friendly bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!bot->CanAttack(target))
+    {
+        sLog.outError("assist rejected target-invalid bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (!bot->IsWithinLOSInMap(target))
+    {
+        sLog.outError("assist rejected target-not-in-sight bot:%s target:%s issuer:%u",
+                      botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->ai->AssistTarget(target->GetObjectGuid().GetRawValue(), ++e->followSeq);
+    sLog.outString("assist accepted bot:%s target:%s guid:%u seq:%u",
+                   e->name.c_str(), targetName.c_str(), target->GetGUIDLow(), e->followSeq);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-006 (KAP-558): owner-toggled reactive defend (.botdefend <bot> on|off).
+// While enabled, a following companion engages a legal creature that is
+// actually attacking the owner or the companion (AI side, every tick).
+// The flag is session-scoped: a world restart clears it. Every outcome is
+// logged; the authorization ladder mirrors BotStop/BotHold.
+// ---------------------------------------------------------------------------
+bool PlayerBotMgr::BotDefend(Player* issuer, const std::string& botName, bool enable)
+{
+    if (!issuer || !issuer->GetSession() || botName.empty())
+        return false;
+    PlayerBotEntry* e = FindBotByName(botName);
+    if (!e)
+    {
+        sLog.outError("defend rejected unknown bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!e->ownerAccountId)
+    {
+        sLog.outError("defend rejected unowned bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->ownerAccountId != issuerAcc)
+    {
+        sLog.outError("defend rejected not-owner bot:%s issuer:%u acc:%u owner:%u",
+                      botName.c_str(), issuer->GetGUIDLow(), issuerAcc, e->ownerAccountId);
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE || !e->ai)
+    {
+        sLog.outError("defend rejected offline bot:%s issuer:%u", botName.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    e->defendEnabled = enable;
+    sLog.outString("defend %s bot:%s guid:%u issuer:%u acc:%u",
+                   enable ? "enabled" : "disabled", botName.c_str(), e->playerGUID,
+                   issuer->GetGUIDLow(), issuerAcc);
+    return true;
+}
+
 bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const char* action) const
 {
     if (!issuer || !issuer->GetSession() || !e)
@@ -1432,7 +1767,7 @@ bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const c
     return true;
 }
 
-bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint32 sequence)
+bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint32 sequence, Player* knownBot)
 {
     if (!ValidatePartyOwner(issuer, e, "recruit"))
         return false;
@@ -1447,8 +1782,7 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
         sLog.outError("party recruit rejected offline bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
         return false;
     }
-    ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
-    Player* bot = sObjectAccessor.FindPlayer(botGuid);
+    Player* bot = knownBot ? knownBot : sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID)));
     if (!bot || bot->GetSession() != e->session)
     {
         sLog.outError("party recruit rejected missing in-world bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
