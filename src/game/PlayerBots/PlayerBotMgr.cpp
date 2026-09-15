@@ -1557,10 +1557,10 @@ bool PlayerBotMgr::BotHold(Player* issuer, const std::string& botName)
 // ---------------------------------------------------------------------------
 // PORT-005 (KAP-558): owner-selected assist (.botassist <botname> <target>).
 // The companion must be in the issuer's party; the target is looked up by
-// name around the companion (grid visit, nearest live match wins; a dead
-// match is kept as fallback so the caller can report target-dead when no
-// live match exists). Every outcome, accepted or
-// rejected, is logged. The AI re-validates the target and the order
+// name around the companion (grid visit; a legal live hostile wins over a
+// closer invalid live match, and a dead match is kept as fallback so the
+// caller can report target-dead when no live match exists). Every outcome,
+// accepted or rejected, is logged. The AI re-validates the target and the order
 // generation at execution time.
 // ---------------------------------------------------------------------------
 namespace
@@ -1568,11 +1568,34 @@ namespace
 // Search radius for the .botassist name lookup, centered on the companion.
 float const kBotAssistSearchRange = 30.0f;
 
+// PORT-005 (KAP-558): an explicitly named assist target is legal when the
+// bot can attack it in the ordinary sense, or when the neutral-faction
+// evidence rule from defend applies (the target is actively fighting the
+// issuer or the bot; the player melee path and Unit::Attack permit such
+// fights, so an owner order naming that target must not be rejected).
+static bool IsAssistLegalTarget(Unit const* me, Unit const* issuer, Unit const* u)
+{
+    if (u->IsPlayer() || me->IsFriendlyTo(u))
+        return false;
+    if (me->CanAttack(u))
+        return true;
+    if (!u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
+        return false;
+    Unit const* const victim = u->GetVictim();
+    if (victim == me || (issuer && victim == issuer))
+        return true;
+    if (u->GetAttackers().count(const_cast<Unit*>(me)) != 0)
+        return true;
+    return issuer != nullptr && u->GetAttackers().count(const_cast<Unit*>(issuer)) != 0;
+}
+
 class BotAssistNameCheck
 {
 public:
-    BotAssistNameCheck(Unit const* source, const std::string& name)
-        : me(source), name(name), m_alive(nullptr), m_aliveDist(0.0f),
+    BotAssistNameCheck(Unit const* source, Unit const* issuer, const std::string& name)
+        : me(source), issuer(issuer), name(name),
+          m_legal(nullptr), m_legalDist(0.0f),
+          m_invalid(nullptr), m_invalidDist(0.0f),
           m_dead(nullptr), m_deadDist(0.0f) {}
 
     bool operator()(Unit* u)
@@ -1582,15 +1605,27 @@ public:
         if (!u->IsWithinDistInMap(me, kBotAssistSearchRange, false, SizeFactor::None))
             return false;
         float const dist = me->GetDistance(u);
-        // The companion farms its own corpses, so a dead-first selection
-        // would make assist unusable right after a kill: track the nearest
-        // live and nearest dead match separately.
+        // Rank by legality, not raw distance: the companion farms its own
+        // corpses (a dead-first selection would make assist unusable right
+        // after a kill), and a closer invalid same-name match (a friendly
+        // or unattackable unit, a player) must not mask a farther legal
+        // hostile the owner explicitly named. Keep the nearest invalid live
+        // match for a precise rejection reason and the nearest dead match
+        // for target-dead.
         if (u->IsAlive())
         {
-            if (!m_alive || dist < m_aliveDist)
+            if (IsAssistLegalTarget(me, issuer, u))
             {
-                m_alive = u;
-                m_aliveDist = dist;
+                if (!m_legal || dist < m_legalDist)
+                {
+                    m_legal = u;
+                    m_legalDist = dist;
+                }
+            }
+            else if (!m_invalid || dist < m_invalidDist)
+            {
+                m_invalid = u;
+                m_invalidDist = dist;
             }
         }
         else if (!m_dead || dist < m_deadDist)
@@ -1601,14 +1636,18 @@ public:
         return true;
     }
 
-    // Nearest live match wins; dead fallback kept for the target-dead report.
-    Unit* Best() const { return m_alive ? m_alive : m_dead; }
+    // Legal live hostile first, then the nearest invalid live match, then
+    // the nearest dead match.
+    Unit* Best() const { return m_legal ? m_legal : (m_invalid ? m_invalid : m_dead); }
 
 private:
     Unit const* me;
+    Unit const* issuer;
     std::string const& name;
-    Unit* m_alive;
-    float m_aliveDist;
+    Unit* m_legal;
+    float m_legalDist;
+    Unit* m_invalid;
+    float m_invalidDist;
     Unit* m_dead;
     float m_deadDist;
 };
@@ -1657,7 +1696,7 @@ bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const s
         CellPair const p(MaNGOS::ComputeCellPair(bot->GetPositionX(), bot->GetPositionY()));
         Cell cell(p);
         cell.SetNoCreate();
-        BotAssistNameCheck check(bot, targetName);
+        BotAssistNameCheck check(bot, issuer, targetName);
         MaNGOS::UnitLastSearcher<BotAssistNameCheck> searcher(target, check);
         TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, WorldTypeMapContainer> world_searcher(searcher);
         TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotAssistNameCheck>, GridTypeMapContainer> grid_searcher(searcher);
@@ -1689,7 +1728,7 @@ bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const s
                       botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
         return false;
     }
-    if (!bot->CanAttack(target))
+    if (!IsAssistLegalTarget(bot, issuer, target))
     {
         sLog.outError("assist rejected target-invalid bot:%s target:%s issuer:%u",
                       botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
