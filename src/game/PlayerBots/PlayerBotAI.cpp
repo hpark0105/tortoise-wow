@@ -1044,6 +1044,15 @@ uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
         SpellEntry const* info = sSpellMgr.GetSpellEntry(spellId);
         if (!info)
             return false;
+        // Hardening (KAP-558): on-next-swing spells occupy the melee
+        // spell slot; after their trigger swing, every later auto-attack
+        // is consumed by the swing-spell path and no white damage lands
+        // for the rest of the engagement (evidence: assist lab runs
+        // 2026-09-15, threat frozen while the swing timer kept cycling).
+        // The companion keeps pure white damage instead of queueing them.
+        if (info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_1) ||
+            info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_2))
+            return false;
         Powers powerType = static_cast<Powers>(info->powerType);
         if (me->GetPower(powerType) < info->manaCost)
             return false;

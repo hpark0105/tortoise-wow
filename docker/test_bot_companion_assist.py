@@ -32,9 +32,13 @@ The cluster:
     2500021 - closer to the companion than 2500022, but unattackable,
     so it must never be selected when a legal same-name hostile is in
     range.
-  * 2500024 "Kobold Warrior" (entry 48 renamed, pinned 50/50): the
+  * 2500024 "Kobold Warrior" (entry 48 renamed, pinned 20/20, level 1-2): the
     dead-only target, 8 yd east of 2500022; killed by the t=+62 s
     assist so the t=+74 s assist by the same name hits target-dead.
+    Its level is pinned to 1-2 (the base entry 48 is a level 21-22
+    Skeletal Warrior) so the companion's white-only damage - no
+    on-next-swing spells are cast after the rotation hardening - drops
+    it inside the +62..+70 s window deterministically.
 
 Why the passive-hostile decoy. The world update loop runs the bot's
 legacy AI (auto-aggro within 30 yd) before UpdateFollowScript can
@@ -197,7 +201,8 @@ UPDATE tw_world.creature_template
  SET health_min = 2000, health_max = 2000, regeneration = 0,
      name = 'Kobold Vermin', ai_name = 'NullAI' WHERE entry = 7;
 UPDATE tw_world.creature_template
- SET health_min = 50, health_max = 50, regeneration = 0,
+ SET health_min = 20, health_max = 20, regeneration = 0,
+     level_min = 1, level_max = 2,
      name = 'Kobold Warrior', ai_name = 'NullAI' WHERE entry = 48;
 UPDATE tw_world.creature_template
  SET name = 'Kobold Vermin', faction = 3 WHERE entry = 65;
