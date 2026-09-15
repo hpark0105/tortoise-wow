@@ -112,6 +112,9 @@ class PlayerBotAI: public PlayerAI
         Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
         uint32 SelectOffensiveSpell(Unit* target) const;
+        // Hardening (KAP-558): cast-or-attack step; arms _abilityTimer only
+        // on a successful cast (see TryOffensiveCastOrAttack).
+        bool TryOffensiveCastOrAttack(Unit* target);
         void AutoEquipForLevel();
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;

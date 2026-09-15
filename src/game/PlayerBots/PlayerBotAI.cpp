@@ -351,15 +351,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 me->SetFacingToObject(victim);
 
             if (_abilityTimer == 0)
-            {
-                if (uint32 spellId = SelectOffensiveSpell(victim))
-                {
-                    me->CastSpell(victim, spellId, false);
-                    _abilityTimer = urand(2000, 4000);
-                }
-                else
-                    me->Attack(victim, true);
-            }
+                TryOffensiveCastOrAttack(victim);
             else
                 me->Attack(victim, true);
         }
@@ -379,15 +371,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                                    me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
                                    held->GetHealth(), held->GetMaxHealth());
                 if (_abilityTimer == 0)
-                {
-                    if (uint32 spellId = SelectOffensiveSpell(held))
-                    {
-                        me->CastSpell(held, spellId, false);
-                        _abilityTimer = urand(2000, 4000);
-                    }
-                    else
-                        me->Attack(held, true);
-                }
+                    TryOffensiveCastOrAttack(held);
                 else
                     me->Attack(held, true);
             }
@@ -972,6 +956,23 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
 
         me->LearnSpell(ability->spellId, false);
     }
+}
+
+// Hardening (KAP-558): one offensive evaluation step shared by the legacy
+// continue-combat path and the companion assist/defend executors. Only a
+// successful cast arms _abilityTimer; a failed cast (mana, cooldown, bad
+// target) or no usable spell falls back to melee in the same evaluation,
+// so a failed cast never leaves the companion idling unengaged.
+bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
+{
+    uint32 spellId = SelectOffensiveSpell(target);
+    if (spellId && me->CastSpell(target, spellId, false) == SPELL_CAST_OK)
+    {
+        _abilityTimer = urand(2000, 4000);
+        return true;
+    }
+    me->Attack(target, true);
+    return false;
 }
 
 uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
@@ -2233,15 +2234,9 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         else
             me->SetFacingToObject(target);
         if (!_abilityTimer && me->IsWithinLOSInMap(target))
-        {
-            if (uint32 spellId = SelectOffensiveSpell(target))
-            {
-                me->CastSpell(target, spellId, false);
-                _abilityTimer = urand(2000, 4000);
-                return;
-            }
-        }
-        me->Attack(target, true);
+            TryOffensiveCastOrAttack(target);
+        else
+            me->Attack(target, true);
         return;
     }
     if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
@@ -2305,15 +2300,9 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     else
         me->SetFacingToObject(target);
     if (!_abilityTimer && me->IsWithinLOSInMap(target))
-    {
-        if (uint32 spellId = SelectOffensiveSpell(target))
-        {
-            me->CastSpell(target, spellId, false);
-            _abilityTimer = urand(2000, 4000);
-            return;
-        }
-    }
-    me->Attack(target, true);
+        TryOffensiveCastOrAttack(target);
+    else
+        me->Attack(target, true);
 }
 
 // PORT-007 (KAP-558): one bounded execution tick of the companion Loot
@@ -2399,15 +2388,9 @@ void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
     else
         me->SetFacingToObject(target);
     if (!_abilityTimer && me->IsWithinLOSInMap(target))
-    {
-        if (uint32 spellId = SelectOffensiveSpell(target))
-        {
-            me->CastSpell(target, spellId, false);
-            _abilityTimer = urand(2000, 4000);
-            return;
-        }
-    }
-    me->Attack(target, true);
+        TryOffensiveCastOrAttack(target);
+    else
+        me->Attack(target, true);
 }
 
 bool PlayerBotAI::UpdateFollow(uint32 diff)
