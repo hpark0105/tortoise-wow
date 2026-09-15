@@ -12,6 +12,20 @@ class Creature;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 
+// Hardening item 3 (KAP-558): a combat engagement routed through the
+// shared executor (ExecuteCombat). The source intent selects the legality
+// rules and the drop-out cleanup; the request carries values only (target
+// GUID, generation, distance limit) - the executor re-resolves the target
+// from the world each tick and never stores engine pointers.
+enum class CombatSource { Assist, ContinueCombat, Defend };
+struct CombatRequest
+{
+    uint64_t targetGuid;
+    CombatSource source;
+    uint32_t generation;
+    float maxDistance;
+};
+
 class PlayerBotAI: public PlayerAI
 {
     public:
@@ -91,6 +105,11 @@ class PlayerBotAI: public PlayerAI
         void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
         bool PursuitLeashTick(Unit* target, uint32 diff); // PORT-008: one tick of the pursuit reach budget
+        // Hardening item 3 (KAP-558): shared combat executor for the
+        // Assist, ContinueCombat and Defend intents (see CombatRequest);
+        // the per-source debug lines are the fixture contract.
+        bool ExecuteCombat(CombatRequest const& req, uint32 diff);
+        void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
         bool IsFollowOwnerAvailable() const;

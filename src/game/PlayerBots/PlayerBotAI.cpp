@@ -2129,6 +2129,196 @@ bool PlayerBotAI::PursuitLeashTick(Unit* target, uint32 diff)
     }
     return false;
 }
+// ---------------------------------------------------------------------------
+// PORT-009 diagnostic: the target never retaliated against a
+// player bot; log the exact creature-side and player-side
+// checks that selectNextVictim/IsTargetable use, each combat
+// tick, until the missing condition is identified.
+// ---------------------------------------------------------------------------
+void PlayerBotAI::LogAssistProbe(Creature* target)
+{
+    float const assistThreat = target->GetThreatManager().getThreat(me, true);
+    sLog.outString(
+        "[PlayerBot][Assist] probe GUID:%u t:%u v:%u evade:%u combat:%u "
+        "react:%u atk:%u tlist:%u threat:%.1f valid:%u outarea:%u "
+        "canatk:%u pacified:%u selfcombat:%u selfgm:%u selfimmnpc:%u "
+        "selftgt:%u selfdet:%u rawflags:%x bytes1:%x cin:%u feign:%u "
+        "taxi:%u inworld:%u mounted:%u canatkself:%u canauto:%u",
+        me->GetGUIDLow(),
+        target->GetGUIDLow(),
+        target->GetVictim() ? (uint32)target->GetVictim()->GetGUIDLow() : 0,
+        (uint32)target->IsInEvadeMode(),
+        (uint32)target->IsInCombat(),
+        (uint32)target->GetReactState(),
+        (uint32)target->GetAttackers().size(),
+        (uint32)!target->GetThreatManager().isThreatListEmpty(),
+        assistThreat,
+        (uint32)target->IsValidAttackTarget(me),
+        (uint32)target->IsOutOfThreatArea(me),
+        (uint32)target->CanInitiateAttack(),
+        (uint32)target->IsTempPacified(),
+        (uint32)me->IsInCombat(),
+        (uint32)me->IsGameMaster(),
+        (uint32)me->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC),
+        (uint32)me->IsTargetable(true, false, false, true),
+        (uint32)me->CanBeDetected(),
+        me->GetUInt32Value(UNIT_FIELD_FLAGS),
+        me->GetUInt32Value(UNIT_FIELD_BYTES_1),
+        me->watching_cinematic_entry,
+        (uint32)me->HasUnitState(UNIT_STAT_FEIGN_DEATH),
+        (uint32)me->IsTaxiFlying(),
+        (uint32)me->IsInWorld(),
+        (uint32)me->IsMounted(),
+        (uint32)me->CanAttack(target),
+        (uint32)(me->CanAutoAttackTarget(target) == ATTACK_RESULT_OK));
+}
+
+// ---------------------------------------------------------------------------
+// Hardening item 3 (KAP-558): the single combat executor shared by the
+// Assist, ContinueCombat and Defend intents. A CombatRequest carries the
+// target GUID, the source intent and the engagement distance limit. The
+// executor re-resolves and re-validates the target against the world every
+// tick - legality differs by source (defend accepts neutral attackers the
+// CanAttack gate rejects; a continued fight must still be the current
+// victim or held target) - then applies the pursuit reach budget, the
+// 2 s combat pacing and the offensive cast-or-attack step. A failed
+// engagement is dropped with the source-specific cleanup (assist clears
+// the assist state and motion, a held fight stops combat, defend clears
+// the defend lock) so the prior order resumes. The per-source debug lines
+// are the fixture contract and are preserved verbatim.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap() || req.generation != _followSeq)
+        return false;
+    Creature* target = me->GetMap()->GetCreature(ObjectGuid(req.targetGuid));
+    bool legal = false;
+    switch (req.source)
+    {
+        case CombatSource::Defend:
+        {
+            Unit const* owner = nullptr;
+            if (Player* p = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid)))
+                owner = p;
+            legal = target && target->IsAlive() && target->IsInWorld() &&
+                    DefendTargetLegal(me, owner, target) &&
+                    me->IsWithinLOSInMap(target) &&
+                    me->GetDistance(target) <= req.maxDistance;
+            break;
+        }
+        case CombatSource::Assist:
+            legal = target && target->IsAlive() && target->IsInWorld() &&
+                    me->CanAttack(target) && !me->IsFriendlyTo(target) &&
+                    me->IsWithinLOSInMap(target) &&
+                    me->GetDistance(target) <= req.maxDistance;
+            break;
+        case CombatSource::ContinueCombat:
+            legal = target && target->IsAlive() && target->IsInWorld() &&
+                    me->CanAttack(target) && !me->IsFriendlyTo(target) &&
+                    me->GetDistance(target) <= req.maxDistance &&
+                    (me->GetVictim() == target || GetAliveHeldTarget() == target);
+            break;
+    }
+    if (!legal)
+    {
+        switch (req.source)
+        {
+            case CombatSource::Assist:
+            {
+                // The named target is no longer a legal engagement. Drop it
+                // and resume the prior order; never substitute an unrelated
+                // enemy.
+                _assistTargetGuid = 0;
+                _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+                if (me->GetVictim())
+                    me->CombatStop();
+                me->GetMotionMaster()->Clear(false);
+                ClearTarget();
+                if (sPlayerBotMgr.IsDebugEnabled())
+                {
+                    if (target && target->IsAlive())
+                        sLog.outString("[PlayerBot][Assist] target out of reach GUID:%u target:%u dist:%.2f",
+                                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+                    else
+                        sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
+                                       me->GetGUIDLow(), (uint32)ObjectGuid(req.targetGuid).GetCounter());
+                }
+                break;
+            }
+            case CombatSource::ContinueCombat:
+                _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+                if (me->GetVictim())
+                    me->CombatStop();
+                ClearTarget();
+                break;
+            case CombatSource::Defend:
+                ClearDefendTarget("target invalid");
+                break;
+        }
+        return false;
+    }
+    // PORT-008 (KAP-558): pursuit reach budget; runs every tick outside the
+    // 2 s combat check pacing. On expiry the engagement is abandoned exactly
+    // like an invalid target and the prior order resumes.
+    if (PursuitLeashTick(target, diff))
+    {
+        switch (req.source)
+        {
+            case CombatSource::Assist:
+                _assistTargetGuid = 0;
+                if (me->GetVictim())
+                    me->CombatStop();
+                me->GetMotionMaster()->Clear(false);
+                ClearTarget();
+                break;
+            case CombatSource::ContinueCombat:
+                if (me->GetVictim())
+                    me->CombatStop();
+                ClearTarget();
+                break;
+            case CombatSource::Defend:
+                if (me->GetVictim() == target)
+                    me->CombatStop();
+                ClearDefendTarget("leash");
+                break;
+        }
+        return false;
+    }
+    if (_abilityTimer > diff)
+        _abilityTimer -= diff;
+    else
+        _abilityTimer = 0;
+    if (_combatCheckTimer > diff)
+    {
+        _combatCheckTimer -= diff;
+        return true;
+    }
+    _combatCheckTimer = 2000;
+    RememberLootTarget(target);
+    if (sPlayerBotMgr.IsDebugEnabled())
+    {
+        if (req.source == CombatSource::Assist)
+            sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        else if (req.source == CombatSource::Defend)
+            sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        else
+            sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        if (req.source == CombatSource::Assist)
+            LogAssistProbe(target);
+    }
+    if (!me->CanReachWithMeleeAutoAttack(target))
+        me->GetMotionMaster()->MoveChase(target);
+    else
+        me->SetFacingToObject(target);
+    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+        TryOffensiveCastOrAttack(target);
+    else
+        me->Attack(target, true);
+    return true;
+}
 void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
 {
     if (!Companion::IsCurrent(intent, _followSeq) || !me || !me->IsAlive() || !me->GetMap())
@@ -2138,105 +2328,11 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     // unavailable (dead, loading, grouped elsewhere).
     if (intent.action == Companion::Action::Assist)
     {
-        Creature* target = me->GetMap()->GetCreature(ObjectGuid(intent.target));
-        if (!target || !target->IsAlive() || !target->IsInWorld() ||
-            !me->CanAttack(target) || me->IsFriendlyTo(target) ||
-            !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
-        {
-            // The named target is no longer a legal engagement. Drop it and
-            // resume the prior order; never substitute an unrelated enemy.
-            _assistTargetGuid = 0;
-            _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
-            if (me->GetVictim())
-                me->CombatStop();
-            me->GetMotionMaster()->Clear(false);
-            ClearTarget();
-            if (sPlayerBotMgr.IsDebugEnabled())
-            {
-                if (target && target->IsAlive())
-                    sLog.outString("[PlayerBot][Assist] target out of reach GUID:%u target:%u dist:%.2f",
-                                   me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-                else
-                    sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
-                                   me->GetGUIDLow(), (uint32)ObjectGuid(intent.target).GetCounter());
-            }
-            return;
-        }
-        // PORT-008 (KAP-558): pursuit reach budget; runs every tick outside
-        // the 2 s combat check pacing. On expiry the assist is abandoned
-        // exactly like an invalid target and the prior order resumes.
-        if (PursuitLeashTick(target, diff))
-        {
-            _assistTargetGuid = 0;
-            if (me->GetVictim())
-                me->CombatStop();
-            me->GetMotionMaster()->Clear(false);
-            ClearTarget();
-            return;
-        }
-        if (_abilityTimer > diff)
-            _abilityTimer -= diff;
-        else
-            _abilityTimer = 0;
-        if (_combatCheckTimer > diff)
-        {
-            _combatCheckTimer -= diff;
-            return;
-        }
-        _combatCheckTimer = 2000;
-        RememberLootTarget(target);
-        if (sPlayerBotMgr.IsDebugEnabled())
-            sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
-                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-        if (sPlayerBotMgr.IsDebugEnabled())
-        {
-            // PORT-009 diagnostic: the target never retaliated against a
-            // player bot; log the exact creature-side and player-side
-            // checks that selectNextVictim/IsTargetable use, each combat
-            // tick, until the missing condition is identified.
-            float const assistThreat = target->GetThreatManager().getThreat(me, true);
-            sLog.outString(
-                "[PlayerBot][Assist] probe GUID:%u t:%u v:%u evade:%u combat:%u "
-                "react:%u atk:%u tlist:%u threat:%.1f valid:%u outarea:%u "
-                "canatk:%u pacified:%u selfcombat:%u selfgm:%u selfimmnpc:%u "
-                "selftgt:%u selfdet:%u rawflags:%x bytes1:%x cin:%u feign:%u "
-                "taxi:%u inworld:%u mounted:%u canatkself:%u canauto:%u",
-                me->GetGUIDLow(),
-                target->GetGUIDLow(),
-                target->GetVictim() ? (uint32)target->GetVictim()->GetGUIDLow() : 0,
-                (uint32)target->IsInEvadeMode(),
-                (uint32)target->IsInCombat(),
-                (uint32)target->GetReactState(),
-                (uint32)target->GetAttackers().size(),
-                (uint32)!target->GetThreatManager().isThreatListEmpty(),
-                assistThreat,
-                (uint32)target->IsValidAttackTarget(me),
-                (uint32)target->IsOutOfThreatArea(me),
-                (uint32)target->CanInitiateAttack(),
-                (uint32)target->IsTempPacified(),
-                (uint32)me->IsInCombat(),
-                (uint32)me->IsGameMaster(),
-                (uint32)me->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC),
-                (uint32)me->IsTargetable(true, false, false, true),
-                (uint32)me->CanBeDetected(),
-                me->GetUInt32Value(UNIT_FIELD_FLAGS),
-                me->GetUInt32Value(UNIT_FIELD_BYTES_1),
-                me->watching_cinematic_entry,
-                (uint32)me->HasUnitState(UNIT_STAT_FEIGN_DEATH),
-                (uint32)me->IsTaxiFlying(),
-                (uint32)me->IsInWorld(),
-                (uint32)me->IsMounted(),
-                (uint32)me->CanAttack(target),
-                (uint32)(me->CanAutoAttackTarget(target) == ATTACK_RESULT_OK));
-        }
-        if (!me->CanReachWithMeleeAutoAttack(target))
-            me->GetMotionMaster()->MoveChase(target);
-        else
-            me->SetFacingToObject(target);
-        if (!_abilityTimer && me->IsWithinLOSInMap(target))
-            TryOffensiveCastOrAttack(target);
-        else
-            me->Attack(target, true);
+        // Hardening item 3 (KAP-558): the assist engagement runs through the
+        // shared executor; a vanished or out-of-reach target drops the assist
+        // (state, motion and combat cleared) and the prior order resumes.
+        ExecuteCombat(CombatRequest{intent.target, CombatSource::Assist,
+                                    intent.generation, 35.0f}, diff);
         return;
     }
     if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
@@ -2261,48 +2357,11 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     }
     if (intent.action != Companion::Action::ContinueCombat)
         return;
-    Creature* target = me->GetMap()->GetCreature(ObjectGuid(intent.target));
-    if (!target || !target->IsAlive() || !target->IsInWorld() ||
-        !me->CanAttack(target) || me->IsFriendlyTo(target) || me->GetDistance(target) > 35.0f ||
-        (me->GetVictim() != target && GetAliveHeldTarget() != target))
-    {
-        _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
-        if (me->GetVictim())
-            me->CombatStop();
-        ClearTarget();
-        return;
-    }
-    // PORT-008 (KAP-558): pursuit reach budget for a held target; a victim
-    // the companion cannot land a melee hit on is abandoned on expiry.
-    if (PursuitLeashTick(target, diff))
-    {
-        if (me->GetVictim())
-            me->CombatStop();
-        ClearTarget();
-        return;
-    }
-    if (_abilityTimer > diff)
-        _abilityTimer -= diff;
-    else
-        _abilityTimer = 0;
-    if (_combatCheckTimer > diff)
-    {
-        _combatCheckTimer -= diff;
-        return;
-    }
-    _combatCheckTimer = 2000;
-    RememberLootTarget(target);
-    if (sPlayerBotMgr.IsDebugEnabled())
-        sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
-                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-    if (!me->CanReachWithMeleeAutoAttack(target))
-        me->GetMotionMaster()->MoveChase(target);
-    else
-        me->SetFacingToObject(target);
-    if (!_abilityTimer && me->IsWithinLOSInMap(target))
-        TryOffensiveCastOrAttack(target);
-    else
-        me->Attack(target, true);
+    // Hardening item 3 (KAP-558): the held-target engagement runs through
+    // the shared executor; a vanished or released target drops the fight
+    // and the prior order resumes.
+    ExecuteCombat(CombatRequest{intent.target, CombatSource::ContinueCombat,
+                                intent.generation, 35.0f}, diff);
 }
 
 // PORT-007 (KAP-558): one bounded execution tick of the companion Loot
@@ -2347,50 +2406,15 @@ void PlayerBotAI::ExecuteLoot(Creature* corpse, uint32 diff)
 // defender is dead, and the follow intent resumes on the next tick.
 void PlayerBotAI::ExecuteDefend(Creature* target, uint32 diff)
 {
-    Unit const* owner = nullptr;
-    if (me && me->GetMap())
-    {
-        if (Player* p = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid)))
-            owner = p;
-    }
-    if (!me || !me->IsAlive() || !me->GetMap() || !target ||
-        !target->IsAlive() || !target->IsInWorld() ||
-        !DefendTargetLegal(me, owner, target) ||
-        !me->IsWithinLOSInMap(target) || me->GetDistance(target) > 35.0f)
-    {
-        ClearDefendTarget("target invalid");
-        return;
-    }
-    // PORT-008 (KAP-558): pursuit reach budget for the defend engagement.
-    if (PursuitLeashTick(target, diff))
-    {
-        if (me->GetVictim() == target)
-            me->CombatStop();
-        ClearDefendTarget("leash");
-        return;
-    }
-    if (_abilityTimer > diff)
-        _abilityTimer -= diff;
-    else
-        _abilityTimer = 0;
-    if (_combatCheckTimer > diff)
-    {
-        _combatCheckTimer -= diff;
-        return;
-    }
-    _combatCheckTimer = 2000;
-    RememberLootTarget(target);
-    if (sPlayerBotMgr.IsDebugEnabled())
-        sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
-                       me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-    if (!me->CanReachWithMeleeAutoAttack(target))
-        me->GetMotionMaster()->MoveChase(target);
-    else
-        me->SetFacingToObject(target);
-    if (!_abilityTimer && me->IsWithinLOSInMap(target))
-        TryOffensiveCastOrAttack(target);
-    else
-        me->Attack(target, true);
+    // Hardening item 3 (KAP-558): the engagement runs through the shared
+    // executor keyed on the canonical _defendTargetGuid; the resolved
+    // creature argument is the same object the caller just validated
+    // (fresh candidate or grace-hysteresis hold), so re-resolving from
+    // the GUID is equivalent. Grace/lock bookkeeping stays in
+    // UpdateCompanion.
+    (void)target;
+    ExecuteCombat(CombatRequest{_defendTargetGuid, CombatSource::Defend,
+                                _followSeq, 35.0f}, diff);
 }
 
 bool PlayerBotAI::UpdateFollow(uint32 diff)
