@@ -1556,115 +1556,129 @@
     },
     {
       "id": "PORT-022",
-      "title": "Define authoritative trainer and economy observations",
-      "description": "Derive one bounded Warrior training and affordability observation from current Turtle trainer, spell and persisted-money state.",
+      "title": "Add bounded conversational party chat",
+      "description": "Let a player address a current party companion through one declared chat channel and receive a bounded personality-consistent response from the approved local model adapter. Text-only, with no path to gameplay directives.",
       "acceptanceCriteria": [
-        "Every reported trainable ability, prerequisite and cost comes from authoritative current server data for the bot's class and level.",
-        "The model sees bounded training facts and SeekClassTraining only; it receives no trainer NPC ID, raw spell ID, price authority or purchase operation."
+        "Only a bot in the player's current party may receive a request; one addressed message yields at most one bounded response and leaving the group invalidates outstanding work and blocks new requests.",
+        "Conversation output is sanitized text that cannot contain or be reinterpreted as a command, target, spell, item, coordinate or gameplay directive; the world thread never waits for the response."
       ],
       "priority": 63,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-022.md. General travel and quest selection remain out of scope.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-022.md. Raw transcripts are not persisted by default and prompt-injection text is never echoed.",
       "dependsOn": ["PORT-021"],
-      "allowedScope": [
-        "src/game/PlayerBots/Companion/",
+      "allowedScope": ["src/game/PlayerBots/Companion/",
         "docker/personality-service/",
-        "docker/"
-      ],
+        "docker/"],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Verify the chosen Warrior trainer, levels, prerequisites and prices against current Turtle source/data plus schema and persisted-money tests."],
+      "validation": ["Fake- and real-adapter fixtures for a greeting, a random question, a personality-distinct reply, addressed/unaddressed messages, party leave/rejoin, rate/length/sanitization, timeout/malformed/stale responses, and concurrent combat with no world-thread delay or gameplay action."],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
     {
       "id": "PORT-023",
-      "title": "Learn abilities through one normal Warrior trainer path",
-      "description": "Replace free newly eligible learning for the supported companion scope with one normal, authoritative Warrior trainer transaction.",
+      "title": "Complete one cooperative quest with the owner",
+      "description": "Implement one owner-driven cooperative quest vertical slice for one declared Turtle quest: both characters use their own normal quest logs, accept through the authoritative quest path, perform the bounded objectives together and turn in independently. Not general autonomous quest selection.",
       "acceptanceCriteria": [
-        "At the supported trainer, class, level, prerequisite, known state, range and current price are revalidated before normal money is deducted and the ability is learned.",
-        "Normal earned money and learned-spell state persist across restart; existing learned abilities are preserved and duplicate purchase is impossible."
+        "When both characters are eligible, the owner starts the supported cooperative goal, the companion accepts normally, receives only authoritative credit, reaches completion and turns in through the normal reward path; quest state and rewards survive logout and world restart.",
+        "Hold, combat safety, death/recovery, owner loss and newer orders retain their existing priority; leaving the party stops cooperative planning without erasing the companion's persisted quest state."
       ],
       "priority": 64,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-023.md. Do not silently change ambient world-bot policy.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-023.md. The owning card records the exact quest, prerequisites, giver/finisher, objective types and group-credit rules from current Turtle data.",
       "dependsOn": ["PORT-022"],
-      "allowedScope": [
-        "src/game/PlayerBots/PlayerBotAI.cpp",
+      "allowedScope": ["src/game/PlayerBots/PlayerBotAI.cpp",
         "src/game/PlayerBots/PlayerBotAI.h",
         "src/game/PlayerBots/Companion/",
         "src/game/CMakeLists.txt",
-        "docker/"
-      ],
+        "docker/"],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Fresh Warrior level-up, insufficient funds, earned money, successful and duplicate purchase, and restart persistence fixtures."],
+      "validation": ["Disposable eligible/ineligible pair fixture, normal acceptance, supported kill or loot credit, Hold and party-loss interruption, death/recovery, turn-in/reward, restart persistence, and separate player/companion state evidence."],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
     {
       "id": "PORT-024",
-      "title": "Add a bounded planner training goal",
-      "description": "Allow the model to propose SeekClassTraining from bounded facts while deterministic code resolves travel, trainer and transaction authority.",
+      "title": "Progress companion equipment from earned loot",
+      "description": "Deterministic equipment progression from loot the companion legitimately receives: a deterministic evaluator proves an upgrade and equips it through normal inventory APIs. No free companion gear refresh.",
       "acceptanceCriteria": [
-        "A current valid preference can request training only when authoritative observations report it available and affordable above the configured reserve.",
-        "C++ resolves the supported local trainer and purchase; Hold, combat, recovery, party leave and newer orders preempt it without teleporting or model-directed spending."
+        "A persistent companion that legitimately receives a usable loot item equips it only when the deterministic upgrade comparison proves it is an upgrade, and item and money state persist after logout and world restart.",
+        "Leaving or rejoining the party cannot replace earned gear with generated gear; equipped, quest and protected items are never sold or discarded and the model never supplies item IDs or equips directly."
       ],
       "priority": 65,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-024.md. One bounded same-map/local approach only.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-024.md. One loot-distribution policy fixed before implementation, with declared classes/slots and an explicit deterministic upgrade comparison.",
       "dependsOn": ["PORT-023"],
-      "allowedScope": [
-        "src/game/PlayerBots/Companion/",
+      "allowedScope": ["src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
         "src/game/PlayerBots/PlayerBotAI.h",
-        "docker/personality-service/",
-        "docker/"
-      ],
+        "docker/"],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Train/wait proposals, reserve and insufficient-funds cases, party-leave and Hold cancellation, supported local approach, purchase persistence and offline fallback."],
+      "validation": ["Earned-loot upgrade, non-upgrade rejection, protected-item safety, party leave/rejoin with no free gear, and restart persistence fixtures."],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
     {
       "id": "PORT-025",
-      "title": "Qualify Phase 2 safety, progression and personality",
-      "description": "Hosted cumulative acceptance of deterministic roles, shared planning, party lifecycle, bounded personality, persistence, local-model integration and Warrior earn/train/use progression.",
+      "title": "Report bag pressure and sell approved junk at a vendor",
+      "description": "Bag-pressure reporting and authoritative vendor cleanup: when the companion reaches the declared free-slot threshold it reports the pressure once at a bounded rate and may sell only approved junk to an authoritative reachable vendor.",
       "acceptanceCriteria": [
-        "The declared party passes legal tank, healer and damage behavior plus the normal Warrior earn, decide, train, use and restart-persistence path.",
-        "Leaving the party stops requests and rejects old responses; reinviting the same bot starts a new session while retaining personality, skills, equipment, money and character progression.",
-        "Offline, slow, malformed and stale responses leave deterministic gameplay operational, and Hold invalidates outstanding work."
+        "Equipped, quest and upgrade items are protected; only approved junk is sold through the normal sell and money APIs and the resulting money and inventory state persists after the sale.",
+        "Vendor search is bounded by a declared radius and travel bound; no route invention, no item invention and no selling of protected items."
       ],
       "priority": 66,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-025.md. Hosted acceptance only; QA worker must not edit source.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-025.md. Protected and sellable item classes, the free-slot threshold, notification cadence and vendor radius are fixed by the owning card.",
       "dependsOn": ["PORT-024"],
-      "allowedScope": [
-        "docs/bots/companion-phase-2-acceptance.md",
-        "docs/bots/ralph/companion-port/phase-2-handoff.md",
-        "docs/bots/ralph/prd.json"
-      ],
+      "allowedScope": ["src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/"],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Full deterministic gates, Phase 1/2 regressions, fake- and real-service matrices, party lifecycle and persistence, trainer progression, read-only QA and bounded client evidence."],
+      "validation": ["Threshold and reporting-rate fixtures, protected-item safety, approved-junk sale through normal APIs, vendor reachability bounds, and post-sale money/inventory persistence."],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-026",
+      "title": "Qualify Phase 2 conversation, cooperation, progression and personality",
+      "description": "Hosted cumulative acceptance of deterministic roles, shared planning, party lifecycle, bounded personality, persistence, local-model integration, conversational chat, the cooperative quest, equipment progression and bag/vendor cleanup.",
+      "acceptanceCriteria": [
+        "The declared party passes legal tank, healer and damage behavior plus bounded personality expression and persistence across restart and party leave/rejoin.",
+        "Offline, slow, malformed and stale responses leave deterministic gameplay operational, Hold invalidates outstanding work, and the quest and equipment/bag paths persist normal authoritative state for both characters."
+      ],
+      "priority": 67,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-026.md. Hosted acceptance only; QA worker must not edit source.",
+      "dependsOn": ["PORT-025"],
+      "allowedScope": ["docs/bots/ralph/companion-port/phase-2-handoff.md",
+        "docs/bots/ralph/prd.json"],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": ["Full deterministic gates, Phase 1/2 regressions, fake- and real-service matrices, party lifecycle and persistence, quest/equipment/bag acceptance, read-only QA and bounded client evidence."],
       "executionMode": "hosted-acceptance",
       "trackingJiraKey": "KAP-558"
     }
   ],
-  "lastReviewed": "2026-09-14",
+  "lastReviewed": "2026-09-16",
   "mvpDefinition": {
     "foundationGate": "One owned bot earns XP, loot, and supported quest progress through normal game paths; the exact state survives restart and isolated restore.",
     "playableCompanion": "The foundation gate plus owner-safe targeting and deterministic owner-only follow/stop with no LLM dependency.",
