@@ -5,6 +5,7 @@
 #include "Policies/Singleton.h"
 #include "Database/DatabaseEnv.h"
 #include "Companion/PlannerTransport.h"
+#include "Companion/Personality.h"
 
 #include <vector>
 
@@ -41,10 +42,12 @@ struct PlayerBotEntry
     uint32 partySeq; // CMP-010: invalidates pending recruit/recall work
     uint32 pendingPartySeq; // sequence captured by an asynchronous recall
     uint32 pendingPartyLeaderGuid; // human leader to revalidate after login
+    uint8 personalitySchemaVersion; // PORT-020: 0 = no row yet; 1 = current; >1 = unknown (fail-closed)
+    uint8 personalityProfile; // PORT-020: 0 = none/baseline, 1 = reckless, 2 = cautious
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
     {}
 };
 
@@ -98,6 +101,7 @@ class PlayerBotMgr
 
         void OnBotLogout(PlayerBotEntry *e);
         void OnBotLogin(PlayerBotEntry *e);
+    void SyncPersonality(PlayerBotEntry *e); // PORT-020: seed the persisted personality identity
         void OnPlayerInWorld(Player* pPlayer);
         void AddTempBot(uint32 account, uint32 time);
         void RefreshTempBot(uint32 account);
@@ -113,6 +117,7 @@ class PlayerBotMgr
         // PORT-018 (KAP-558): the bounded nonblocking party-planner
         // transport (disabled when PlayerBot.PlannerServiceURL is empty).
         Companion::Planner::PlannerTransport& PlannerTransport() { return m_plannerTransport; }
+        Companion::Personality::Profile PersonalityProfile() const { return m_personalityProfile; }
         // PORT-018 (KAP-558): live bot lookup by low GUID (world thread,
         // no allocation).
         PlayerBotEntry* FindBotByGuid(uint32 guid) const;
@@ -166,6 +171,7 @@ class PlayerBotMgr
 
         std::map<uint32 /*pl guid*/, PlayerBotEntry*> m_bots;
         Companion::Planner::PlannerTransport m_plannerTransport;
+    Companion::Personality::Profile m_personalityProfile = Companion::Personality::Profile::None; // PORT-019: declared profile (config now; PORT-020 persists)
         std::map<uint32 /*account*/, uint32> m_tempBots;
         PlayerBotStats m_stats;
 

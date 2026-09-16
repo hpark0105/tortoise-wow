@@ -70,6 +70,7 @@ def main():
             "PlayerBot.FollowScript": '"%s"' % os.environ.get("PLAYERBOT_FOLLOW_SCRIPT", ""),
             "PlayerBot.PartyInviteScript": '"%s"' % os.environ.get("PLAYERBOT_PARTY_INVITE_SCRIPT", ""),
             "PlayerBot.PlannerServiceURL": '"%s"' % os.environ.get("PLAYERBOT_PLANNER_SERVICE_URL", ""),
+    "PlayerBot.PersonalityProfile": os.environ.get("PLAYERBOT_PERSONALITY_PROFILE", "none"),
             "Perf.ProcessingTelemetry": os.environ.get("PERF_PROCESSING_TELEMETRY", "0"),
             "Perf.ProcessingTelemetryFile": os.environ.get("PERF_PROCESSING_TELEMETRY_FILE", '"world_processing_telemetry.log"'),
             "PlayerSave.Interval": os.environ.get("PLAYER_SAVE_INTERVAL", "60000"),

@@ -9,6 +9,7 @@
 #include "Companion/Healer.h"
 #include "Companion/Damage.h"
 #include "Companion/PlannerTransport.h"
+#include "Companion/Personality.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -108,6 +109,12 @@ class PlayerBotAI: public PlayerAI
         uint32 _plannerReqId = 1;
         Companion::Planner::Step _plannerOffer = {};
         bool _plannerOfferValid = false;
+        // PORT-019 (KAP-558): bounded personality runtime state.
+        // Effects of validated planner Preference steps only; owner
+        // orders, hold, recovery and role policy always win over
+        // them and Reset() returns the deterministic baseline.
+        float _personalityChaseDist = kOwnerFollowChaseDist;
+        uint32 _personalityLastExprMs = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
@@ -124,6 +131,7 @@ class PlayerBotAI: public PlayerAI
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
         void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
+        void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
         // KAP-558 hardening: an owned companion without an active order
         // follows its owner instead of running the legacy auto-hunt

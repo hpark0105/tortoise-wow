@@ -33,7 +33,7 @@ MAX_PAYLOAD_BYTES = 4096
 MAX_RESPONSE_AGE_MS = 1000
 MAX_STEP_LIFETIME_MS = 5000
 STEP_TTL_MS = 1000           # step lifetime used by the golden vectors
-MAX_PREFERENCE = 255
+MAX_PREFERENCE = 0xFFFF
 
 # Closed action vocabulary (must mirror Companion::Planner::Action)
 ACTION_NONE = 0
@@ -366,7 +366,7 @@ def respond(request, scenario, now_ms=GOLDEN_NOW_MS):
 
 
 SCENARIOS = ("success", "delay", "timeout", "malformed", "oversized",
-             "unsupported", "stale")
+             "unsupported", "stale", "chase", "express")
 
 
 # ---------------------------------------------------------------------------
