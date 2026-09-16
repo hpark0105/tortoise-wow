@@ -105,7 +105,9 @@ PlayerBotMgr::PlayerBotMgr()
 
 PlayerBotMgr::~PlayerBotMgr()
 {
-
+    // PORT-018 (KAP-558): bounded shutdown; the worker join cannot outlive
+    // the per-round I/O deadline.
+    m_plannerTransport.Shutdown();
 }
 
 void PlayerBotMgr::LoadConfig()
@@ -241,6 +243,11 @@ void PlayerBotMgr::LoadConfig()
         if (!m_partyInviteScript.empty() && confDebug)
             sLog.outString("[PlayerBot][PartyInviteScript] armed events:%u (NEXT-002 lab script)", (uint32)m_partyInviteScript.size());
     }
+    // PORT-018 (KAP-558): bounded nonblocking planner transport. An empty
+    // PlayerBot.PlannerServiceURL leaves it disabled: no thread, no I/O, every
+    // call a no-op (the deterministic regression path).
+    m_plannerTransport.Init(sConfig.GetStringDefault("PlayerBot.PlannerServiceURL", ""),
+                            WorldTimer::getMSTime(), confDebug);
     // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
     // login-completion delivery; never set outside the Docker lab.
     m_staleProbeGuid = 0;
@@ -1452,6 +1459,12 @@ PlayerBotEntry* PlayerBotMgr::FindBotByName(const std::string& name) const
             return it->second;
     }
     return nullptr;
+}
+
+PlayerBotEntry* PlayerBotMgr::FindBotByGuid(uint32 guid) const
+{
+    std::map<uint32, PlayerBotEntry*>::const_iterator const it = m_bots.find(guid);
+    return (it != m_bots.end()) ? it->second : nullptr;
 }
 
 bool PlayerBotMgr::BotFollow(Player* issuer, const std::string& botName)
