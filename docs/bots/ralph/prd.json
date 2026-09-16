@@ -1454,7 +1454,7 @@
       ],
       "priority": 59,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-018.md. Implementation unit for LLM-010.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-018.md. Implemented: bounded worker-thread transport (5s round deadline, 60s backoff, queue depth 1, newest wins), party-session generations, validated record-only offers; value + live fake-service fixtures; passes pending head sign-off. Implementation unit for LLM-010.",
       "dependsOn": ["PORT-017"],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
