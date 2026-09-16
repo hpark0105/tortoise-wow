@@ -179,6 +179,7 @@ class BotPlannerTransportTests(unittest.TestCase):
         evidence.mkdir(parents=True)
         server_log = evidence / "fake-planner.log"
         server_proc = None
+        server_out = None
         base = env = None
         try:
             world = self._base_env(FULL_SCRIPT)
@@ -189,10 +190,10 @@ class BotPlannerTransportTests(unittest.TestCase):
             cfg = json.loads(compose_path.read_text(encoding="utf-8"))
             cfg["services"]["world"]["extra_hosts"] = ["hostbridge:host-gateway"]
             compose_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+            server_out = open(server_log, "w", encoding="utf-8")
             server_proc = subprocess.Popen(
                 [sys.executable, SERVER, str(port)],
-                stdout=open(server_log, "w", encoding="utf-8"),
-                stderr=subprocess.STDOUT)
+                stdout=server_out, stderr=subprocess.STDOUT)
             _wait_server(port)
             try:
                 p.command(["docker", "compose"] + base + ["up", "-d", "--no-deps", "world"], env=env)
@@ -226,14 +227,16 @@ class BotPlannerTransportTests(unittest.TestCase):
                 logs = p.wait_for(base, env, lambda text:
                     "[Planner] cooldown owner:%d ms:60000" % OWNER_GUID in text,
                     deadline=180)
-                self.assertGreaterEqual(logs.count("[Planner] timeout owner:%d" % OWNER_GUID), 3)
+                # 3 failures = 2 timeout lines + the cooldown line (the
+                # third failure transitions straight to cooldown).
+                self.assertGreaterEqual(logs.count("[Planner] timeout owner:%d" % OWNER_GUID), 2)
                 # cooldown silence: no new round reaches the service.
                 posts_at_cooldown = _server_post_count(str(server_log))
                 time.sleep(10)
                 self.assertEqual(_server_post_count(str(server_log)), posts_at_cooldown)
-                # party-session change: dismiss kills the session, recruit
-                # starts a fresh generation (invalidation also clears the
-                # cooldown, so the new session submits immediately).
+                # party-session change: the re-recruit's new group signature
+                # invalidates the tracked session (which also clears the
+                # cooldown), so the fresh generation submits immediately.
                 _http(port, "/scenario", b"success")
                 logs = p.wait_for(base, env, lambda text:
                     "party dismiss accepted bot:Plancomp" in text and
@@ -266,6 +269,8 @@ class BotPlannerTransportTests(unittest.TestCase):
                         server_proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         server_proc.kill()
+                if server_out is not None:
+                    server_out.close()
         finally:
             if base is not None:
                 try:
@@ -278,6 +283,8 @@ class BotPlannerTransportTests(unittest.TestCase):
                 p.force_down(base, env)
             if server_proc is not None and server_proc.poll() is None:
                 server_proc.kill()
+            if server_out is not None:
+                server_out.close()
         self.assertEqual(before, self._personal_state())
 
 

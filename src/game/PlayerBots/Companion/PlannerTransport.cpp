@@ -50,6 +50,8 @@ bool PlannerTransport::Init(std::string const& url, uint64_t /*nowMs*/, bool deb
     // http://host:port only: no path, no auth, no https. The service is a
     // localhost or lab-bridge process; anything else is a misconfiguration
     // and fails closed to the deterministic policies.
+    if (url.empty())
+        return false; // default: disabled, no thread, no I/O, no log line
     std::string const prefix = "http://";
     if (url.rfind(prefix, 0) != 0 || url.size() <= prefix.size())
     {
@@ -92,6 +94,7 @@ bool PlannerTransport::Init(std::string const& url, uint64_t /*nowMs*/, bool deb
     m_host = host;
     m_port = (uint16_t)port;
     m_debug = debug;
+    m_stopping = false; // a re-Init after Shutdown must start a live worker
     m_enabled.store(true);
     m_worker = new std::thread([this]() { WorkerLoop(); });
     sLog.outString("[Planner] transport started url:%s", url.c_str());
@@ -115,6 +118,14 @@ void PlannerTransport::Shutdown()
     // outlive it.
     worker->join();
     delete worker;
+    {
+        // A re-Init starts from a clean table: a round left
+        // InFlight by the dead lifetime must not refuse submits
+        // as busy afterwards.
+        std::lock_guard<std::mutex> lk(m_lock);
+        for (auto& slot : m_slots)
+            slot = Slot{};
+    }
     sLog.outString("[Planner] transport stopped");
 }
 
@@ -151,6 +162,18 @@ bool PlannerTransport::SubmitShared(uint32_t ownerLow, uint8_t const* req,
         // A full table is a caller bug at this scale: skip the round fail
         // closed.
         sLog.outError("[Planner] session table full owner:%u; round skipped", ownerLow);
+        return false;
+    }
+    if (s->round.state == RoundState::InFlight)
+    {
+        // One in-service round per session: the worker is the only
+        // sender, so a newer observation never supersedes a live
+        // round (a slow service would then starve the failure
+        // count and the backoff). The next pace tick resubmits
+        // with fresh state; cooldowns block the submit entirely.
+        if (m_debug)
+            sLog.outString("[Planner] submit busy owner:%u gen:%u",
+                           ownerLow, s->round.partySessionGeneration);
         return false;
     }
     Round::SubmitResult const r = s->round.Submit(req, reqLen, nowMs, m_nextStamp++);

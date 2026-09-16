@@ -466,6 +466,11 @@ void PlayerBotMgr::DeleteAll()
 
     m_tempBots.clear();
 
+    // PORT-018 (KAP-558): bounded transport shutdown with the world; the
+    // worker join cannot outlive one in-flight round. A disabled
+    // transport (no URL) is a no-op here.
+    m_plannerTransport.Shutdown();
+
     if (confDebug)
         sLog.outString("[PlayerBotMgr] Deleting all bots [OK]");
 }

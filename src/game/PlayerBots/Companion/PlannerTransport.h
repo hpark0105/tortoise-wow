@@ -1,11 +1,13 @@
 // PORT-018 (KAP-558): the bounded nonblocking party-planner transport.
 //
 // The world thread never performs DNS, connect, read, write or wait: it
-// submits one shared party request (queue depth 1, newest wins) and polls
-// for validated offers. A single worker thread owns all I/O under a hard
-// per-round deadline; every failure mode (offline, busy, slow, malformed,
-// oversized, stale, duplicate, reordered) fails closed to the deterministic
-// policies without delaying a world tick.
+// submits one shared party request (queue depth 1; an in-service round
+// refuses new submits until its result lands) and polls for validated
+// offers. A single worker thread owns all I/O under a hard per-round
+// deadline; every failure mode (offline, busy, slow, malformed, oversized,
+// stale, duplicate, reordered) fails closed to the deterministic policies
+// without delaying a world tick. Shutdown leaves the transport clean, so
+// a later Init starts a fresh worker and an empty session table.
 //
 // Round is a value-only state machine: the transport drives it under its
 // lock, and the value test
@@ -158,7 +160,9 @@ class PlannerTransport
 
         // World-thread API (no I/O, no blocking).
         // One shared request per party (ownerLow = the party leader's low
-        // GUID); queue depth 1, newest wins.
+        // GUID); queue depth 1 - a submit while a round is in service
+        // is refused (the worker is the only sender) and the next
+        // pace tick resubmits with fresh state.
         bool SubmitShared(uint32_t ownerLow, uint8_t const* req, uint32_t reqLen,
                           uint64_t nowMs);
         void InvalidateSession(uint32_t ownerLow);
