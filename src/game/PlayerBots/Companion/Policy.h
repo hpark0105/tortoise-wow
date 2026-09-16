@@ -1,22 +1,19 @@
+// PORT-013 (KAP-558): the deterministic companion selection policy.
+// Value-only: every candidate policy and the selection below are pure
+// functions over the versioned Observation snapshot; adding a candidate
+// policy requires no session, login, ownership or database change - only a
+// new allowlisted observation field, a candidate function and a Select
+// branch. The selected directive is revalidated against live state
+// immediately before execution in the adapter (stale generation, owner
+// availability and target state are all re-checked there).
 #ifndef TORTOISE_COMPANION_POLICY_H
 #define TORTOISE_COMPANION_POLICY_H
-#include <cstdint>
-// Value-only observations: policies never retain world pointers or access sessions/DB.
+#include "Observation.h"
+#include "Intent.h"
+
 namespace Companion
 {
-enum class Action { None, Hold, Follow, ContinueCombat, Assist, Loot, Defend };
-struct Observation
-{
-    uint32_t generation = 0;
-    uint64_t target = 0;
-    uint64_t assistTarget = 0; // PORT-005: owner-selected hostile; the executor re-resolves it
-    uint64_t lootTarget = 0; // PORT-007: dead, in-world corpse to loot; the executor re-resolves it
-    uint64_t defendTarget = 0; // hardening item 5: owner-enabled reactive defend; the executor re-resolves it
-    bool following = false;
-    bool held = false;
-    bool ownerAvailable = false;
-};
-struct Intent { Action action; uint32_t generation; uint64_t target; };
+
 inline Intent FollowPolicy(Observation const& o)
 {
     return {o.following ? Action::Follow : Action::None, o.generation, 0};
@@ -37,12 +34,16 @@ inline Intent DefendPolicy(Observation const& o)
 {
     return {o.defendTarget ? Action::Defend : Action::None, o.generation, o.defendTarget};
 }
-// Priority: Hold > Assist > ContinueCombat > Defend > Loot > Follow. An
-// assist suspends the follow goal (it resumes once the assisted target is
-// gone) and overrides an incidental engagement; an owner-enabled reactive
-// defend interrupts loot and follow but never an ongoing fight; a dead
-// corpse the companion is meant to loot is collected before it resumes the
-// follow; only a hold (or a missing owner while following) stops everything.
+// The complete deterministic priority in one selection path:
+// Hold > Assist > ContinueCombat > Defend > Loot > Follow. An assist
+// suspends the follow goal (it resumes once the assisted target is gone)
+// and overrides an incidental engagement; a live engagement is never
+// abandoned for a new defender; an owner-enabled reactive defend
+// interrupts loot and follow but never an ongoing fight; a dead corpse the
+// companion is meant to loot is collected before the follow resumes; only
+// a hold (or a missing owner while following) stops everything. Recovery
+// (corpse reclaim) preempts this whole selection at the lifecycle level:
+// while dead, no behavior policy runs.
 inline Intent Select(Observation const& o)
 {
     if (o.held || (o.following && !o.ownerAvailable))
@@ -61,6 +62,6 @@ inline Intent Select(Observation const& o)
         return loot;
     return FollowPolicy(o);
 }
-inline bool IsCurrent(Intent const& i, uint32_t generation) { return i.generation == generation; }
-}
+
+} // namespace Companion
 #endif
