@@ -4,6 +4,7 @@
 #include "PlayerAI.h"
 #include "WorldSession.h"
 #include "Companion/Policy.h"
+#include "Companion/Combat.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -12,19 +13,11 @@ class Creature;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 
-// Hardening item 3 (KAP-558): a combat engagement routed through the
-// shared executor (ExecuteCombat). The source intent selects the legality
-// rules and the drop-out cleanup; the request carries values only (target
-// GUID, generation, distance limit) - the executor re-resolves the target
-// from the world each tick and never stores engine pointers.
-enum class CombatSource { Assist, ContinueCombat, Defend };
-struct CombatRequest
-{
-    uint64_t targetGuid;
-    CombatSource source;
-    uint32_t generation;
-    float maxDistance;
-};
+// PORT-012 (KAP-558): the combat engagement request, source taxonomy,
+// target validator, pursuit leash, target slots, capability model and
+// cast-result vocabulary live in Companion/Combat.h (value-only); the
+// executor re-resolves the target from the world each tick and never
+// stores engine pointers.
 
 class PlayerBotAI: public PlayerAI
 {
@@ -61,11 +54,13 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
-        ObjectGuid _combatTargetGuid; // Hardening item 4: held live combat target (0 = none)
-        ObjectGuid _lootCorpseGuid; // Hardening item 4: dead corpse pending loot (0 = none)
+        // Hardening item 4 / PORT-012: the live combat target and the
+        // dead corpse pending loot are explicit slots with named transitions
+        // (Companion::Combat::TargetSlots); owner orders never live here.
+        Companion::Combat::TargetSlots _targets;
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
-        uint32 _pursuitLeashMs = 0; // PORT-008: remaining (ms) of the pursuit reach budget; 0 = disarmed
+        Companion::Combat::Leash _pursuitLeash; // PORT-008/012: pursuit reach budget
         bool _recoveryDead = false; // PORT-009: recovery state armed (dead with an active order)
         uint32 _recoveryReportMs = 0; // PORT-009: bounded report pace remaining (ms)
         uint32 _recoveryWalkMs = 0; // PORT-009: corpse walk re-issue window remaining (ms)
@@ -106,10 +101,11 @@ class PlayerBotAI: public PlayerAI
         void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
         bool PursuitLeashTick(Unit* target, uint32 diff); // PORT-008: one tick of the pursuit reach budget
-        // Hardening item 3 (KAP-558): shared combat executor for the
-        // Assist, ContinueCombat and Defend intents (see CombatRequest);
-        // the per-source debug lines are the fixture contract.
-        bool ExecuteCombat(CombatRequest const& req, uint32 diff);
+        // Hardening item 3 / PORT-012 (KAP-558): shared combat executor
+        // for the Assist, ContinueCombat and Defend intents (see
+        // Companion::Combat::Request); the per-source debug lines are
+        // the fixture contract.
+        bool ExecuteCombat(Companion::Combat::Request const& req, uint32 diff);
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);

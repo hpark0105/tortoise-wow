@@ -41,7 +41,6 @@ uint32 const kLootWindowMs = 20000;
 // A target within melee reach disarms the budget, so an actual fight has
 // unbounded kill time. Phase-1 named constant; per-entry config is
 // future work.
-uint32 const kPursuitLeashMs = 30000;
 // PORT-009 (KAP-558): while a dead companion cannot yet reclaim its
 // corpse (no corpse, reclaim delay not over, or out of range), the
 // recovery state is reported at most this often (ms).
@@ -104,20 +103,28 @@ uint32 const kDefendTargetGraceMs = 5000;
 // hit one of ours carry that evidence (victim pointer or
 // attacker-set membership), and stale evidence decays when the fight
 // ends.
+// PORT-012 (KAP-558): the defend legality predicate is the module's
+// snapshot predicate; this fill keeps the defend scan and the shared
+// executor snapshot on one rule set.
+static Companion::Combat::TargetSnapshot DefendSnapshot(Unit const* me, Unit const* owner, Creature const* u)
+{
+    Companion::Combat::TargetSnapshot s;
+    s.exists = true;
+    s.alive = u->IsAlive();
+    s.inWorld = u->IsInWorld();
+    s.friendly = me->IsFriendlyTo(u);
+    s.canAttack = me->CanAttack(u);
+    s.targetable = u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself());
+    Unit const* const victim = u->GetVictim();
+    s.victimIsProtected = victim == me || (owner && victim == owner);
+    s.attackingMe = u->GetAttackers().count(const_cast<Unit*>(me)) != 0;
+    s.attackingOwner = owner != nullptr && u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+    return s;
+}
+
 static bool DefendTargetLegal(Unit const* me, Unit const* owner, Creature const* u)
 {
-    if (me->IsFriendlyTo(u))
-        return false;
-    if (me->CanAttack(u))
-        return true;
-    if (!u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
-        return false;
-    Unit const* const victim = u->GetVictim();
-    if (victim == me || (owner && victim == owner))
-        return true;
-    if (u->GetAttackers().count(const_cast<Unit*>(me)) != 0)
-        return true;
-    return owner != nullptr && u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+    return Companion::Combat::DefendTargetLegal(DefendSnapshot(me, owner, u));
 }
 
 class BotDefendScan
@@ -491,11 +498,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
 
 Creature* PlayerBotAI::GetAliveHeldTarget() const
 {
-    // Hardening item 4 (KAP-558): the held target is a dedicated live-target
-    // guid now; the corpse side lives in _lootCorpseGuid.
-    if (!_combatTargetGuid || !me || !me->GetMap())
+    // Hardening item 4 / PORT-012 (KAP-558): the held target is the
+    // dedicated live slot; the corpse side lives in the corpse slot.
+    if (_targets.live == 0 || !me || !me->GetMap())
         return nullptr;
-    Creature* creature = me->GetMap()->GetCreature(_combatTargetGuid);
+    Creature* creature = me->GetMap()->GetCreature(ObjectGuid(_targets.live));
     if (creature && creature->IsAlive())
         return creature;
     return nullptr;
@@ -503,8 +510,11 @@ Creature* PlayerBotAI::GetAliveHeldTarget() const
 
 void PlayerBotAI::ClearTarget()
 {
-    _combatTargetGuid = ObjectGuid();
-    _lootCorpseGuid = ObjectGuid();
+    // Full cleanup (owner orders: hold/stop/assist replacement, legacy
+    // range drop): both slots and the loot attempt state. Combat-only
+    // and loot-only releases use the explicit slot transitions instead
+    // (PORT-012: neither may touch the other slot).
+    _targets.ClearAll();
     _lootRetryCount = 0;
     _lootWindowMs = 0;
 }
@@ -513,31 +523,26 @@ bool PlayerBotAI::TryLootDefeatedTarget()
 {
     if (!me->GetMap())
         return false;
-    // Hardening item 4 (KAP-558): the single dual-role guid is split; a
-    // held combat target that died in between becomes the pending loot
-    // corpse, and a re-embodied corpse hands the target back to the
-    // combat side (the same duality the single guid used to play).
-    if (_combatTargetGuid)
+    // Hardening item 4 / PORT-012 (KAP-558): the live and loot-corpse
+    // sides are explicit slots with named transitions: a held combat
+    // target that died in between promotes to the pending loot corpse,
+    // and a re-embodied corpse hands the target back to the combat side.
+    if (_targets.live)
     {
-        Creature* held = me->GetMap()->GetCreature(_combatTargetGuid);
-        if (!held)
-            _combatTargetGuid = ObjectGuid();
-        else if (!held->IsAlive())
-        {
-            _lootCorpseGuid = _combatTargetGuid;
-            _combatTargetGuid = ObjectGuid();
+        Creature* held = me->GetMap()->GetCreature(ObjectGuid(_targets.live));
+        if (_targets.OnLiveResolved(held != nullptr, held != nullptr && held->IsAlive())
+            == Companion::Combat::TargetSlots::Transition::LiveToCorpse)
             _lootRetryCount = 0;
-        }
     }
-    if (!_lootCorpseGuid)
+    if (!_targets.corpse)
         return false;
-    Creature* creature = me->GetMap()->GetCreature(_lootCorpseGuid);
+    Creature* creature = me->GetMap()->GetCreature(ObjectGuid(_targets.corpse));
     if (!creature)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] loot target missing GUID:%u target:%u",
-                           me->GetGUIDLow(), _lootCorpseGuid.GetCounter());
-        _lootCorpseGuid = ObjectGuid();
+                           me->GetGUIDLow(), (uint32)_targets.corpse);
+        _targets.ReleaseCorpse();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
         return false;
@@ -546,8 +551,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
     {
         // Re-embodied: it is the held combat target again; the combat loop
         // keeps pursuing it. Do not clear it here.
-        _combatTargetGuid = _lootCorpseGuid;
-        _lootCorpseGuid = ObjectGuid();
+        _targets.OnCorpseResolved(true, true);
         _lootWindowMs = 0;
         return false;
     }
@@ -593,7 +597,7 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot processed GUID:%u target:%u",
                            me->GetGUIDLow(), guid.GetCounter());
-        _lootCorpseGuid = ObjectGuid();
+        _targets.ReleaseCorpse();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
         return true;
@@ -616,7 +620,7 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot giving up GUID:%u target:%u",
                            me->GetGUIDLow(), guid.GetCounter());
-        _lootCorpseGuid = ObjectGuid();
+        _targets.ReleaseCorpse();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
     }
@@ -625,14 +629,13 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
 
 void PlayerBotAI::RememberCombatTarget(Unit* unit)
 {
-    // Hardening item 4 (KAP-558): renamed; remembers the live combat
-    // target (the corpse side is _lootCorpseGuid).
+    // Hardening item 4 / PORT-012 (KAP-558): remembers the live combat
+    // target in the live slot (the corpse side is a separate slot).
     if (!unit)
         return;
-    ObjectGuid const guid = unit->GetObjectGuid();
-    if (_combatTargetGuid == guid)
+    uint64_t const guid = unit->GetObjectGuid().GetRawValue();
+    if (_targets.AcquireLive(guid) != Companion::Combat::TargetSlots::Transition::LiveAcquired)
         return;
-    _combatTargetGuid = guid;
     _lootRetryCount = 0;
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot] loot target set GUID:%u target:%u entry:%u hp:%u/%u",
@@ -1016,37 +1019,36 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
     }
 }
 
-// PORT-011 (KAP-558): bounded cast-result categories for diagnostics.
-// The authoritative core outcome is mapped to a small rejection class so
-// downstream policy/planner boundaries consume one bounded category
-// instead of the raw 1.12 enum. An attempted cast is success only when
-// the core reports SPELL_CAST_OK; every other value is a rejection in
-// its category (or "other", with the raw value still logged).
-static const char* CastResultCategory(SpellCastResult res)
+// PORT-011/012 (KAP-558): the raw 1.12 SpellCastResult is mapped to
+// the module's bounded rejection class; this is the only place that
+// sees the engine enum (the vocabulary and its names live in
+// Companion/Combat.h). An attempted cast is success only when the core
+// reports SPELL_CAST_OK; every other value is a rejection in its
+// category (or Other, with the raw value still logged).
+static Companion::Combat::CastReject MapCastReject(uint32 res)
 {
     switch (res)
     {
-        case SPELL_CAST_OK:                  return "success";
-        case SPELL_FAILED_NO_POWER:          return "insufficient-power";
-        case SPELL_FAILED_OUT_OF_RANGE:
-        case SPELL_FAILED_LINE_OF_SIGHT:     return "range-los";
-        case SPELL_FAILED_NOT_READY:         return "cooldown";
-        case SPELL_FAILED_NOT_SHAPESHIFT:
-        case SPELL_FAILED_ONLY_SHAPESHIFT:   return "stance-form";
-        case SPELL_FAILED_NOT_INFRONT:
-        case SPELL_FAILED_NOT_BEHIND:
-        case SPELL_FAILED_UNIT_NOT_INFRONT:
-        case SPELL_FAILED_UNIT_NOT_BEHIND:   return "facing";
-        case SPELL_FAILED_BAD_TARGETS:
-        case SPELL_FAILED_TARGETS_DEAD:
-        case SPELL_FAILED_TARGET_ENEMY:
-        case SPELL_FAILED_TARGET_FRIENDLY:
-        case SPELL_FAILED_TARGET_IS_PLAYER:
-        case SPELL_FAILED_TARGET_NOT_PLAYER:
-        case SPELL_FAILED_TARGET_NOT_DEAD:
-        case SPELL_FAILED_TARGET_IN_COMBAT:
-        case SPELL_FAILED_TARGET_FREEFORALL: return "invalid-target";
-        default:                             return "other";
+        case (uint32)SPELL_FAILED_NO_POWER:          return Companion::Combat::CastReject::InsufficientPower;
+        case (uint32)SPELL_FAILED_OUT_OF_RANGE:
+        case (uint32)SPELL_FAILED_LINE_OF_SIGHT:     return Companion::Combat::CastReject::RangeLos;
+        case (uint32)SPELL_FAILED_NOT_READY:         return Companion::Combat::CastReject::Cooldown;
+        case (uint32)SPELL_FAILED_NOT_SHAPESHIFT:
+        case (uint32)SPELL_FAILED_ONLY_SHAPESHIFT:   return Companion::Combat::CastReject::StanceForm;
+        case (uint32)SPELL_FAILED_NOT_INFRONT:
+        case (uint32)SPELL_FAILED_NOT_BEHIND:
+        case (uint32)SPELL_FAILED_UNIT_NOT_INFRONT:
+        case (uint32)SPELL_FAILED_UNIT_NOT_BEHIND:   return Companion::Combat::CastReject::Facing;
+        case (uint32)SPELL_FAILED_BAD_TARGETS:
+        case (uint32)SPELL_FAILED_TARGETS_DEAD:
+        case (uint32)SPELL_FAILED_TARGET_ENEMY:
+        case (uint32)SPELL_FAILED_TARGET_FRIENDLY:
+        case (uint32)SPELL_FAILED_TARGET_IS_PLAYER:
+        case (uint32)SPELL_FAILED_TARGET_NOT_PLAYER:
+        case (uint32)SPELL_FAILED_TARGET_NOT_DEAD:
+        case (uint32)SPELL_FAILED_TARGET_IN_COMBAT:
+        case (uint32)SPELL_FAILED_TARGET_FREEFORALL: return Companion::Combat::CastReject::InvalidTarget;
+        default:                                     return Companion::Combat::CastReject::Other;
     }
 }
 
@@ -1072,7 +1074,9 @@ bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
         return false;
     }
     SpellCastResult const castRes = me->CastSpell(target, spellId, false);
-    if (castRes == SPELL_CAST_OK)
+    Companion::Combat::CastReport const report =
+        Companion::Combat::ReportCast(spellId, (uint32)castRes, MapCastReject((uint32)castRes));
+    if (report.outcome == Companion::Combat::CastOutcome::Accepted)
     {
         _abilityTimer = urand(2000, 4000);
         if (sPlayerBotMgr.IsDebugEnabled())
@@ -1083,7 +1087,7 @@ bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Offense] cast-rejected GUID:%u t:%u spell:%u res:%u category:%s fallback:ordinary-attack",
                        me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)castRes,
-                       CastResultCategory(castRes));
+                       Companion::Combat::CastRejectName(report.reject));
     me->Attack(target, true);
     return false;
 }
@@ -1100,46 +1104,6 @@ uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
         float maxRange;
         bool meleeOnly;
         bool requiresMissingAura;
-    };
-
-    auto distOk = [&](Action const& a) -> bool
-    {
-        float dist = me->GetCombatDistance(target);
-        if (a.minRange > 0.0f && dist < a.minRange)
-            return false;
-        if (a.maxRange > 0.0f && dist > a.maxRange)
-            return false;
-        if (a.meleeOnly && !me->CanReachWithMeleeAutoAttack(target))
-            return false;
-        return true;
-    };
-
-    auto canCast = [&](uint32 spellId, bool requireMissingAura) -> bool
-    {
-        if (!spellId)
-            return false;
-        if (!me->HasSpell(spellId))
-            return false;
-        if (me->HasSpellCooldown(spellId))
-            return false;
-        SpellEntry const* info = sSpellMgr.GetSpellEntry(spellId);
-        if (!info)
-            return false;
-        // Hardening (KAP-558): on-next-swing spells occupy the melee
-        // spell slot; after their trigger swing, every later auto-attack
-        // is consumed by the swing-spell path and no white damage lands
-        // for the rest of the engagement (evidence: assist lab runs
-        // 2026-09-15, threat frozen while the swing timer kept cycling).
-        // The companion keeps pure white damage instead of queueing them.
-        if (info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_1) ||
-            info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_2))
-            return false;
-        Powers powerType = static_cast<Powers>(info->powerType);
-        if (me->GetPower(powerType) < info->manaCost)
-            return false;
-        if (requireMissingAura && TargetHasAuraFromChain(target, spellId))
-            return false;
-        return true;
     };
 
     std::vector<Action> actions;
@@ -1222,17 +1186,67 @@ uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
             break;
     }
 
+    // PORT-012 (KAP-558): the known/usable split. The adapter fills
+    // each profile with current engine facts; the pure selector
+    // (Companion/Combat.h) decides what is currently executable and
+    // why a known spell is not.
+    Companion::Combat::AbilityQuery query;
+    for (int i = 0; i < Companion::Combat::AbilityQuery::kPowerSlots; ++i)
+        query.power[i] = me->GetPower(static_cast<Powers>(i));
+    query.distance = me->GetCombatDistance(target);
+    query.meleeReach = me->CanReachWithMeleeAutoAttack(target);
+
+    std::vector<Companion::Combat::AbilityProfile> profiles;
+    profiles.reserve(actions.size());
     for (auto const& act : actions)
     {
-        if (!distOk(act))
+        Companion::Combat::AbilityProfile p;
+        p.minRange = act.minRange;
+        p.maxRange = act.maxRange;
+        p.meleeOnly = act.meleeOnly;
+        uint32 const spellId = GetHighestKnownSpell(act.baseSpell);
+        if (!spellId || !me->HasSpell(spellId))
+        {
+            profiles.push_back(p); // not known: not scanned
             continue;
-        uint32 spellId = GetHighestKnownSpell(act.baseSpell);
-        if (!canCast(spellId, act.requiresMissingAura))
+        }
+        SpellEntry const* const info = sSpellMgr.GetSpellEntry(spellId);
+        if (!info)
+        {
+            profiles.push_back(p); // no entry: not scanned
             continue;
-        return spellId;
+        }
+        p.known = true;
+        p.id = spellId;
+        p.passive = info->IsPassiveSpell();
+        // obsoleteRank is structurally false here: GetHighestKnownSpell
+        // already resolves the highest known rank of the chain; the
+        // block stays in the model for fixed-rank future rotations.
+        // Hardening/PORT-012 (KAP-558): on-next-swing spells occupy the
+        // melee spell slot; after their trigger swing, every later
+        // auto-attack is consumed by the swing-spell path and no white
+        // damage lands for the rest of the engagement (evidence: assist
+        // lab runs 2026-09-15). They are explicitly unsupported (see the
+        // audit in Companion/Combat.h); the companion keeps pure white
+        // damage instead of queueing them.
+        p.onNextSwing = info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_1) ||
+                        info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_2);
+        p.powerType = static_cast<uint8_t>(info->powerType);
+        p.powerCost = info->manaCost;
+        p.onCooldown = me->HasSpellCooldown(spellId);
+        // 1.12 has no player stance state and the core does not enforce
+        // the spell Stances masks for players; the block stays in the
+        // model for future trees.
+        p.stanceOk = true;
+        p.reagentOk = true;
+        for (int i = 0; i < MAX_SPELL_REAGENTS && p.reagentOk; ++i)
+            if (info->ReagentCount[i] && me->GetItemCount(info->Reagent[i]) < info->ReagentCount[i])
+                p.reagentOk = false;
+        p.targetOk = !(act.requiresMissingAura && TargetHasAuraFromChain(target, spellId));
+        profiles.push_back(p);
     }
 
-    return 0;
+    return Companion::Combat::SelectExecutable(profiles, query).selected;
 }
 
 uint32 PlayerBotAI::GetHighestKnownSpell(uint32 spellId) const
@@ -1825,7 +1839,7 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
     _followReached = false;
     _held = false; // PORT-004: a new follow order cancels the hold
     _assistTargetGuid = 0; // PORT-005: a new follow order cancels an assist
-    _pursuitLeashMs = 0; // PORT-008: a new order starts a fresh pursuit budget
+    _pursuitLeash.Disarm(); // PORT-008: a new order starts a fresh pursuit budget
     _followPathAgeMs = 0; // PORT-008: a new order starts a fresh path window
     // PORT-003: do not stop an active engagement; the follow goal takes
     // effect once combat resolves (UpdateAI gate).
@@ -1843,7 +1857,7 @@ void PlayerBotAI::FollowStop()
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
-    _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+    _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
     // Invalidate the current goal immediately (TW-014 AC1).
     me->GetMotionMaster()->Clear(true);
     if (sPlayerBotMgr.IsDebugEnabled())
@@ -1860,7 +1874,7 @@ void PlayerBotAI::Hold(uint32 seq)
     _followLeaderGuid = 0;
     _followReached = false;
     _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
-    _pursuitLeashMs = 0; // PORT-008: a hold starts a fresh pursuit budget
+    _pursuitLeash.Disarm(); // PORT-008: a hold starts a fresh pursuit budget
     ClearTarget();
     me->InterruptNonMeleeSpells(false);
     if (me->GetVictim())
@@ -1891,7 +1905,7 @@ void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
     _followSeq = seq;
     _assistTargetGuid = targetGuid;
     _held = false; // a new authorized order cancels the hold
-    _pursuitLeashMs = 0; // PORT-008: a new assist starts a fresh pursuit budget
+    _pursuitLeash.Disarm(); // PORT-008: a new assist starts a fresh pursuit budget
     ClearTarget(); // the assist target is the only target; never keep an incidental one
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Assist] active GUID:%u target:%u seq:%u",
@@ -1937,7 +1951,7 @@ void PlayerBotAI::ClearDefendTarget(const char* reason)
     uint64_t const guid = _defendTargetGuid;
     _defendTargetGuid = 0;
     _defendTargetGrace = 0;
-    _pursuitLeashMs = 0; // PORT-008: the defend pursuit is over; fresh budget
+    _pursuitLeash.Disarm(); // PORT-008: the defend pursuit is over; fresh budget
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Defend] cleared GUID:%u target:%u reason:%s",
                        me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter(), reason);
@@ -2005,17 +2019,15 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     }
     // Hardening item 4 (KAP-558): a held combat target that died becomes
     // the pending loot corpse; the Loot intent picks it up this tick.
-    if (_combatTargetGuid && me->GetMap())
+    // PORT-012: the live-slot transition is the module's named one; a
+    // LiveToCorpse promotion resets the loot retry budget exactly as
+    // before.
+    if (_targets.live && me->GetMap())
     {
-        Creature* held = me->GetMap()->GetCreature(_combatTargetGuid);
-        if (!held)
-            _combatTargetGuid = ObjectGuid();
-        else if (!held->IsAlive())
-        {
-            _lootCorpseGuid = _combatTargetGuid;
-            _combatTargetGuid = ObjectGuid();
+        Creature* held = me->GetMap()->GetCreature(ObjectGuid(_targets.live));
+        if (_targets.OnLiveResolved(held != nullptr, held != nullptr && held->IsAlive())
+            == Companion::Combat::TargetSlots::Transition::LiveToCorpse)
             _lootRetryCount = 0;
-        }
     }
     Unit* target = me->GetVictim();
     if (!target)
@@ -2026,9 +2038,9 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // loot becomes a first-class Loot target. The value is read here so the
     // policy stays pure; the executor re-resolves it from the GUID and
     // re-validates the world before acting.
-    if (_lootCorpseGuid && me->GetMap())
+    if (_targets.corpse && me->GetMap())
     {
-        Creature* loot = me->GetMap()->GetCreature(_lootCorpseGuid);
+        Creature* loot = me->GetMap()->GetCreature(ObjectGuid(_targets.corpse));
         if (loot && !loot->IsAlive() && loot->IsInWorld())
             observation.lootTarget = loot->GetObjectGuid().GetRawValue();
     }
@@ -2257,7 +2269,7 @@ bool PlayerBotAI::UpdateRecovery(uint32 diff)
 // ---------------------------------------------------------------------------
 // PORT-008 (KAP-558): one tick of the bounded pursuit budget. While the
 // companion cannot land a melee hit on the named target it may keep
-// chasing for at most kPursuitLeashMs; on expiry the caller abandons the
+// chasing for at most Leash::kArmedMs; on expiry the caller abandons the
 // pursuit (drops the target, stops combat, clears motion) so the prior
 // order resumes. A target within melee reach disarms the budget - an
 // actual fight has unbounded kill time.
@@ -2266,24 +2278,19 @@ bool PlayerBotAI::PursuitLeashTick(Unit* target, uint32 diff)
 {
     if (!target)
     {
-        _pursuitLeashMs = 0;
+        _pursuitLeash.Disarm();
         return false;
     }
-    if (me && me->CanReachWithMeleeAutoAttack(target))
+    Companion::Combat::Leash::Step const step =
+        _pursuitLeash.Tick(me && me->CanReachWithMeleeAutoAttack(target), diff);
+    if (step == Companion::Combat::Leash::Step::Armed)
     {
-        _pursuitLeashMs = 0;
-        return false;
-    }
-    if (_pursuitLeashMs == 0)
-    {
-        _pursuitLeashMs = kPursuitLeashMs;
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] pursuit leash armed GUID:%u target:%u",
                            me->GetGUIDLow(), target->GetGUIDLow());
         return false;
     }
-    _pursuitLeashMs = (_pursuitLeashMs > diff) ? _pursuitLeashMs - diff : 0;
-    if (_pursuitLeashMs == 0)
+    if (step == Companion::Combat::Leash::Step::Expired)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] pursuit leash expired GUID:%u target:%u",
@@ -2338,65 +2345,67 @@ void PlayerBotAI::LogAssistProbe(Creature* target)
 
 // ---------------------------------------------------------------------------
 // Hardening item 3 (KAP-558): the single combat executor shared by the
-// Assist, ContinueCombat and Defend intents. A CombatRequest carries the
-// target GUID, the source intent and the engagement distance limit. The
-// executor re-resolves and re-validates the target against the world every
-// tick - legality differs by source (defend accepts neutral attackers the
-// CanAttack gate rejects; a continued fight must still be the current
-// victim or held target) - then applies the pursuit reach budget, the
-// 2 s combat pacing and the offensive cast-or-attack step. A failed
-// engagement is dropped with the source-specific cleanup (assist clears
-// the assist state and motion, a held fight stops combat, defend clears
-// the defend lock) so the prior order resumes. The per-source debug lines
-// are the fixture contract and are preserved verbatim.
+// Assist, ContinueCombat and Defend intents. A Companion::Combat::Request
+// carries the target GUID, the source intent and the engagement distance
+// limit. The adapter re-resolves the target against the world each tick and
+// fills a value-only TargetSnapshot; the module's Verify applies the shared
+// legality rules (defend accepts neutral attackers the CanAttack gate
+// rejects; a continued fight must still be the current victim or held
+// target and has no LOS rule). A failed engagement is dropped with the
+// source-specific cleanup (assist clears the assist state and motion, a
+// held fight stops combat, defend clears the defend lock) so the prior
+// order resumes. The per-source debug lines are the fixture contract and
+// are preserved verbatim.
 // ---------------------------------------------------------------------------
-bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
+bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 diff)
 {
     if (!me || !me->IsAlive() || !me->GetMap() || req.generation != _followSeq)
         return false;
-    Creature* target = me->GetMap()->GetCreature(ObjectGuid(req.targetGuid));
-    bool legal = false;
-    switch (req.source)
+    Creature* target = me->GetMap()->GetCreature(ObjectGuid(req.target));
+    Companion::Combat::TargetSnapshot snap;
+    if (target)
     {
-        case CombatSource::Defend:
+        if (req.source == Companion::Combat::Source::Defend)
         {
-            Unit const* owner = nullptr;
-            if (Player* p = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid)))
-                owner = p;
-            legal = target && target->IsAlive() && target->IsInWorld() &&
-                    DefendTargetLegal(me, owner, target) &&
-                    me->IsWithinLOSInMap(target) &&
-                    me->GetDistance(target) <= req.maxDistance;
-            break;
+            // One snapshot rule set for the defend scan and the executor.
+            Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+            snap = DefendSnapshot(me, owner, target);
         }
-        case CombatSource::Assist:
-            legal = target && target->IsAlive() && target->IsInWorld() &&
-                    me->CanAttack(target) && !me->IsFriendlyTo(target) &&
-                    me->IsWithinLOSInMap(target) &&
-                    me->GetDistance(target) <= req.maxDistance;
-            break;
-        case CombatSource::ContinueCombat:
-            legal = target && target->IsAlive() && target->IsInWorld() &&
-                    me->CanAttack(target) && !me->IsFriendlyTo(target) &&
-                    me->GetDistance(target) <= req.maxDistance &&
-                    (me->GetVictim() == target || GetAliveHeldTarget() == target);
-            break;
+        else
+        {
+            snap.exists = true;
+            snap.alive = target->IsAlive();
+            snap.inWorld = target->IsInWorld();
+            if (snap.alive && snap.inWorld)
+            {
+                snap.canAttack = me->CanAttack(target);
+                snap.friendly = me->IsFriendlyTo(target);
+                snap.isVictim = me->GetVictim() == target;
+                snap.isHeld = GetAliveHeldTarget() == target;
+            }
+        }
+        if (snap.alive && snap.inWorld)
+        {
+            snap.inLos = me->IsWithinLOSInMap(target);
+            snap.distance = me->GetDistance(target);
+        }
     }
-    if (!legal)
+    Companion::Combat::Verdict const verdict = Companion::Combat::Verify(req, snap);
+    if (!verdict.legal)
     {
         switch (req.source)
         {
-            case CombatSource::Assist:
+            case Companion::Combat::Source::Assist:
             {
                 // The named target is no longer a legal engagement. Drop it
                 // and resume the prior order; never substitute an unrelated
                 // enemy.
                 _assistTargetGuid = 0;
-                _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+                _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
                 if (me->GetVictim())
                     me->CombatStop();
                 me->GetMotionMaster()->Clear(false);
-                ClearTarget();
+                _targets.ReleaseLive();
                 if (sPlayerBotMgr.IsDebugEnabled())
                 {
                     if (target && target->IsAlive())
@@ -2404,17 +2413,17 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
                                        me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
                     else
                         sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
-                                       me->GetGUIDLow(), (uint32)ObjectGuid(req.targetGuid).GetCounter());
+                                       me->GetGUIDLow(), (uint32)ObjectGuid(req.target).GetCounter());
                 }
                 break;
             }
-            case CombatSource::ContinueCombat:
-                _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+            case Companion::Combat::Source::ContinueCombat:
+                _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
                 if (me->GetVictim())
                     me->CombatStop();
-                ClearTarget();
+                _targets.ReleaseLive();
                 break;
-            case CombatSource::Defend:
+            case Companion::Combat::Source::Defend:
                 ClearDefendTarget("target invalid");
                 break;
         }
@@ -2427,19 +2436,19 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
     {
         switch (req.source)
         {
-            case CombatSource::Assist:
+            case Companion::Combat::Source::Assist:
                 _assistTargetGuid = 0;
                 if (me->GetVictim())
                     me->CombatStop();
                 me->GetMotionMaster()->Clear(false);
-                ClearTarget();
+                _targets.ReleaseLive();
                 break;
-            case CombatSource::ContinueCombat:
+            case Companion::Combat::Source::ContinueCombat:
                 if (me->GetVictim())
                     me->CombatStop();
-                ClearTarget();
+                _targets.ReleaseLive();
                 break;
-            case CombatSource::Defend:
+            case Companion::Combat::Source::Defend:
                 if (me->GetVictim() == target)
                     me->CombatStop();
                 ClearDefendTarget("leash");
@@ -2460,21 +2469,21 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
     RememberCombatTarget(target);
     if (sPlayerBotMgr.IsDebugEnabled())
     {
-        if (req.source == CombatSource::Assist)
+        if (req.source == Companion::Combat::Source::Assist)
             sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-        else if (req.source == CombatSource::Defend)
+        else if (req.source == Companion::Combat::Source::Defend)
             sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
         else
             sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-        if (req.source == CombatSource::Assist)
+        if (req.source == Companion::Combat::Source::Assist)
             LogAssistProbe(target);
         // Hardening diag (KAP-558): the four swing-gate conditions from
         // UpdateMeleeAttackingState, sampled each offense step, so a
         // stopped swing is identified by its failing predicate.
-        if (req.source == CombatSource::Assist)
+        if (req.source == Companion::Combat::Source::Assist)
             sLog.outString(
                 "[PlayerBot][Assist] swing GUID:%u t:%u victim:%u cast:%u "
                 "ready:%u atktimer:%u facing:%u auto:%u los:%u abltimer:%u",
@@ -2510,8 +2519,8 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         // Hardening item 3 (KAP-558): the assist engagement runs through the
         // shared executor; a vanished or out-of-reach target drops the assist
         // (state, motion and combat cleared) and the prior order resumes.
-        ExecuteCombat(CombatRequest{intent.target, CombatSource::Assist,
-                                    intent.generation, 35.0f}, diff);
+        ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Assist,
+                                                                                          intent.generation, 35.0f}, diff);
         return;
     }
     if (intent.action == Companion::Action::Defend)
@@ -2521,8 +2530,8 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         // intent is active, and a failed engagement drops the defend lock
         // (reason logged) so the prior order resumes.
         _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
-        ExecuteCombat(CombatRequest{intent.target, CombatSource::Defend,
-                                    intent.generation, 35.0f}, diff);
+        ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Defend,
+                                                                                          intent.generation, 35.0f}, diff);
         return;
     }
     if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
@@ -2550,8 +2559,8 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     // Hardening item 3 (KAP-558): the held-target engagement runs through
     // the shared executor; a vanished or released target drops the fight
     // and the prior order resumes.
-    ExecuteCombat(CombatRequest{intent.target, CombatSource::ContinueCombat,
-                                intent.generation, 35.0f}, diff);
+    ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::ContinueCombat,
+                                                                                                  intent.generation, 35.0f}, diff);
 }
 
 // PORT-007 (KAP-558): one bounded execution tick of the companion Loot
