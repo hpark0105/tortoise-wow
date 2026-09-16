@@ -14,32 +14,52 @@ COMP_ACC = 1000610101
 PERSONAL_CONTAINERS = ("tortoise-local-db-1", "tortoise-local-realmd-1",
                        "tortoise-local-world-1")
 
-# At 3s the owner issues .botfollow to the companion.
-# The companion should already be in combat with the seeded creature.
-# The creature is a Kobold Laborer (entry 80, level 3-4, armor 52) whose
-# lab-only template is pinned to 300 HP (see _seed_sql): combat outlives
-# the 3 s follow goal and ends well inside the 240 s window. (The earlier
-# zero-damage stall was root-caused to the bot never turning to face its
-# target: melee auto-attacks are dropped outside the 120 deg facing arc,
-# and PlayerBotAI now sets facing in every melee branch.)
+# Timeline (the lab-only PlayerBot.FollowScript replays owner chat events;
+# the clock starts the instant the owner is online):
+#   t=+8s    owner: .botrecruit Prioritycomp      (party formed; the
+#            assist order requires issuer and bot in the same party; the
+#            owner is an owned companion of its own account, so it has no
+#            ambient auto-hunt and never joins the fight on its own)
+#   t=+12s   owner: .botassist Prioritycomp
+#            Kobold Laborer                        (the companion engages
+#            the creature: the pre-follow combat)
+#   t=+18s   owner: .botfollow Prioritycomp       (follow arrives
+#            mid-combat: the assist order is cancelled, but the live fight
+#            must continue as ContinueCombat - the PORT-003 property)
+#
+# After the kill the companion loots the corpse, then follows the owner to
+# "reached". The setup no longer relies on autonomous target acquisition:
+# the KAP-558 hardening (0cbedd1) removed the owned companion's auto-hunt
+# default (owned companions idle near their owner and fight only via
+# self-defense or explicit orders), so engagement is driven by the
+# explicit owner assist order. The creature is a Kobold Laborer (entry 80,
+# level 3-4, armor 52) pinned to 300 HP (see _seed_sql): the kill takes
+# ~10-20 s from the t=+12 s assist, so combat outlives the 18 s follow
+# goal and ends well inside the 240 s window.
 # (creature.health_percent is clamped to 100 at world load; HP must come
 # from the template itself.)
-# The owner sits 60 yd away: outside the companion's 30 yd target range,
-# so only the companion fights (single attacker, predictable duration).
 # After the fix: companion keeps fighting, then follows after combat ends.
 # Before the fix: companion stops fighting immediately and follows.
-PRIORITY_SCRIPT = "3000:%d:botfollow Prioritycomp" % OWNER_GUID
+PRIORITY_SCRIPT = ";".join((
+    "8000:%d:botrecruit Prioritycomp" % OWNER_GUID,
+    "12000:%d:botassist Prioritycomp Kobold Laborer" % OWNER_GUID,
+    "18000:%d:botfollow Prioritycomp" % OWNER_GUID,
+))
 
 
 def _seed_sql():
-    # Owner is 60 yd from the combat: outside the companion's 30 yd target
-    # range (so only the companion engages) but close enough that the
-    # post-combat follow walk is short.
-    # Companion starts near the creature (within aggro range).
+    # Owner sits 20 yd from the companion: inside the 25 yd
+    # kOwnerFollowChaseDist, so the companion holds position near its
+    # spawn instead of walking to the owner before the assist lands. The
+    # owner is owned by its own account (not ambient), so it has no
+    # auto-hunt and never engages the creature on its own - only the
+    # companion fights, via the explicit assist order.
+    # Companion starts 1 yd from the creature (the assist target).
     # Creature 80 = Kobold Laborer (level 3-4, ~78-86 HP, armor 52),
     # attackable by the test bots. The lab-only override below pins BOTH
-    # health_min and health_max to 300 so the kill takes ~10-20 s: past
-    # the 3 s follow goal and well inside the 240 s follow wait window.
+    # health_min and health_max to 300 so the kill takes ~10-20 s from the
+    # t=+12 s assist: past the 18 s follow goal and well inside the 240 s
+    # follow wait window.
     # Both columns must be pinned: SelectLevel rolls the level (3 or 4)
     # and interpolates spawn HP between health_min and health_max, so an
     # override of only health_max left a 50/50 coin flip (level-3 spawns
@@ -56,14 +76,14 @@ INSERT INTO tw_char.characters
  (guid,account,name,race,class,gender,level,money,position_x,position_y,position_z,map,
   orientation,zone,health,power1,power2,power3,power4,power5,xp,xp_gain)
 VALUES
- (610100,1000610100,'Priowner',1,1,0,10,100000,-8949.95,-195.493,83.5312,0,
+ (610100,1000610100,'Priowner',1,1,0,10,100000,-8949.95,-154.493,83.5312,0,
   0,12,100,0,0,0,0,0,0,1),
  (610101,1000610101,'Prioritycomp',1,1,0,10,100000,-8949.95,-134.493,83.5312,0,
   0,12,100,0,0,0,0,0,0,1);
 INSERT INTO tw_char.playerbot (char_guid,chance,ai)
  VALUES (610100,100,'Default'),(610101,100,'Default');
 INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)
- VALUES (610100,1000610100,1,2,NULL),(610101,1000610101,1,2,1000610100);
+ VALUES (610100,1000610100,1,2,1000610100),(610101,1000610101,1,2,1000610100);
 UPDATE tw_world.creature_template SET health_min = 300, health_max = 300, regeneration = 0 WHERE entry = 80;
 INSERT INTO tw_world.creature
  (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,
@@ -118,7 +138,7 @@ class BotCompanionPriorityTests(unittest.TestCase):
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, _seed_sql())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"],
                       env=cls.env)
-            # Wait for the follow goal to be issued (3s script event).
+            # Wait for the follow goal to be issued (18 s script event).
             cls.logs = p.wait_for(cls.base, cls.env, lambda text:
                                   "[PlayerBot][Follow] active" in text,
                                   deadline=180)
@@ -150,12 +170,13 @@ class BotCompanionPriorityTests(unittest.TestCase):
                 p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
 
     def test_01_companion_engaged_combat(self):
-        """The companion fought the creature before the follow goal arrived.
+        """The companion engaged the creature before the follow goal arrived.
 
-        The creature is within aggro range at spawn; the companion picks it
-        up immediately. Pre-follow engagement logs "engage" via the legacy
-        path; post-follow combat logs "fighting" via ExecuteCompanion.
-        Either proves the companion engaged the creature.
+        Engagement is driven by the owner's t=+12 s .botassist order (the
+        KAP-558 hardening removed the owned companion's auto-hunt default):
+        the assist executor logs "[Assist] fighting" lines, and the
+        post-follow continuation logs "fighting" through the shared
+        executor. Either proves the companion engaged the creature.
         """
         self.assertTrue(
             "engage GUID:610101" in self.logs or
