@@ -1371,7 +1371,7 @@
       ],
       "priority": 56,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-015.md. Implementation unit for CMP-013.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-015.md. Implementation unit for CMP-013. Implemented: value-only triage policy (Companion/Healer.h) with owner > self > most-injured priority, 70% per-mille threshold, 96+32 mana floor, withDelayed one-flight gate and hold-position for the movement-interruptible cast (the re-accept storm fix). Value 1/1 and disposable runtime lab 12/12 on tortoise-local:dev 21a0e9d2 (2026-09-16). passes=false pending user approval.",
       "dependsOn": ["PORT-013"],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",

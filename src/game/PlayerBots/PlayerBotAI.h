@@ -6,6 +6,7 @@
 #include "Companion/Policy.h"
 #include "Companion/Combat.h"
 #include "Companion/Tank.h"
+#include "Companion/Healer.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -145,6 +146,14 @@ class PlayerBotAI: public PlayerAI
         bool IsDeclaredTank() const;
         Companion::Tank::Observation FillTankObservation(Unit* target) const;
         void TankTauntStep(Unit* target);
+        // PORT-015 (KAP-558): declared healer triage policy (see
+        // Companion/Healer.h): the pinned matrix gate, the per-tick
+        // triage observation filled from the live world, and the one
+        // cast step with the PORT-012 cast outcome diagnostics.
+        bool IsDeclaredHealer() const;
+        Companion::Healer::Observation FillHealerObservation() const;
+        void HealerTriageStep(Companion::Healer::Observation const& obs,
+                              Companion::Healer::Decision const& decision);
         void AutoEquipForLevel();
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;

@@ -1158,6 +1158,162 @@ void PlayerBotAI::TankTauntStep(Unit* target)
     me->Attack(target, true);
 }
 
+// ---------------------------------------------------------------------------
+// PORT-015 (KAP-558): one legal healer triage policy for the single
+// declared build (the declared matrix is Companion/Healer.h). The
+// policy runs on the companion tick while the behavior gate is not a
+// hold: the card's "Hold" and "owner loss" failure cases suppress
+// healing exactly like they suppress every other behavior. Every slot
+// fact is re-resolved from the live world each tick, the decision is
+// revalidated against live state immediately before the cast, and
+// every attempt is reported through the PORT-012 cast outcome
+// vocabulary. A rejected or blocked heal creates no false success and
+// no delay: the next legal triage/follow outcome is the same
+// evaluation.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::IsDeclaredHealer() const
+{
+    if (!me)
+        return false;
+    return me->GetClass() == Companion::Healer::kDeclaredHealerClass &&
+           me->GetLevel() >= Companion::Healer::kDeclaredHealerMinLevel &&
+           me->HasSpell(Companion::Healer::kDeclaredHealerHeal);
+}
+
+Companion::Healer::Observation PlayerBotAI::FillHealerObservation() const
+{
+    Companion::Healer::Observation o;
+    if (!me || !me->GetMap())
+        return o;
+    o.mana = me->GetPower(POWER_MANA);
+    o.maxMana = me->GetMaxPower(POWER_MANA);
+    if (SpellEntry const* se = sSpellMgr.GetSpellEntry(Companion::Healer::kDeclaredHealerHeal))
+        o.healRangeYd = (uint32)Spells::GetSpellMaxRange(sSpellRangeStore.LookupEntry(se->rangeIndex));
+    // withDelayed=true: an in-flight timed heal sits in
+    // SPELL_STATE_DELAYED and this core's default form treats that as
+    // not-cast; the delayed form is the authoritative busy fact.
+    o.canCast = me->HasSpell(Companion::Healer::kDeclaredHealerHeal) &&
+                !me->HasSpellCooldown(Companion::Healer::kDeclaredHealerHeal) &&
+                !me->IsNonMeleeSpellCasted(true);
+    // Slot 0 is self: trivially alive (UpdateAI gated the dead and
+    // recovery paths), in range, and the declared priority fallback.
+    // The remaining slots are the live party members re-resolved from
+    // the group slots by GUID; no engine pointer is retained.
+    o.slots[0].guid = me->GetGUIDLow();
+    o.slots[0].hp = me->GetHealth();
+    o.slots[0].maxHp = me->GetMaxHealth();
+    o.slots[0].alive = me->IsAlive();
+    o.slots[0].inLos = true;
+    o.slots[0].distance = 0.0f;
+    o.slots[0].isSelf = true;
+    uint32 n = 1;
+    if (Group* group = me->GetGroup())
+    {
+        for (auto const& slot : group->GetMemberSlots())
+        {
+            if (n >= Companion::Healer::kMaxSlots)
+                break;
+            Player* member = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, slot.guid.GetCounter()));
+            if (!member || member == me)
+                continue;
+            o.slots[n].guid = member->GetGUIDLow();
+            o.slots[n].hp = member->GetHealth();
+            o.slots[n].maxHp = member->GetMaxHealth();
+            o.slots[n].alive = member->IsAlive() && member->IsInWorld();
+            // A member on another map (or out of line of sight) is
+            // never castable through triage: the follow goal, not a
+            // teleport, is what regains range.
+            if (member->GetMapId() != me->GetMapId())
+            {
+                o.slots[n].inLos = false;
+                o.slots[n].distance = 10000.0f;
+            }
+            else
+            {
+                o.slots[n].inLos = me->IsWithinLOSInMap(member);
+                o.slots[n].distance = me->GetDistance(member);
+            }
+            o.slots[n].isOwner = (slot.guid.GetCounter() == _followLeaderGuid);
+            ++n;
+        }
+    }
+    return o;
+}
+
+void PlayerBotAI::HealerTriageStep(Companion::Healer::Observation const& obs,
+                                   Companion::Healer::Decision const& decision)
+{
+    uint32 const spellId = Companion::Healer::kDeclaredHealerHeal;
+    Unit* target = (decision.action == Companion::Healer::Action::SelfHeal)
+                   ? me
+                   : (me->GetMap() ? me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, decision.target)) : nullptr);
+    // Revalidate the whole decision against live state immediately
+    // before the cast: a stale slot, a map flap, a range/LOS change,
+    // or a cooldown/mana flap is a bounded skip and the next tick
+    // re-triages (no false success, no delayed retry of the same
+    // decision).
+    if (!target || !target->IsAlive() || !target->IsInWorld() ||
+        target->GetMapId() != me->GetMapId() ||
+        !me->IsWithinLOSInMap(target) ||
+        me->GetDistance(target) >= Companion::Healer::kDeclaredHealRangeYd)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped target-stale GUID:%u t:%u",
+                           me->GetGUIDLow(), decision.target);
+        return;
+    }
+    uint32 const mana = me->GetPower(POWER_MANA);
+    // The withDelayed=true form is the authoritative busy fact: an
+    // in-flight timed heal sits in SPELL_STATE_DELAYED, and the default
+    // form treats that as not-cast - an unguarded re-cast would replace
+    // the in-flight cast (the re-accept storm the fixture pins against).
+    if (me->IsNonMeleeSpellCasted(true))
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped reason:busy GUID:%u t:%u",
+                           me->GetGUIDLow(), decision.target);
+        return;
+    }
+    if (me->HasSpellCooldown(spellId))
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped reason:cooldown GUID:%u t:%u",
+                           me->GetGUIDLow(), decision.target);
+        return;
+    }
+    if (mana < obs.spellCost + obs.manaReserve)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped reason:mana-floor GUID:%u t:%u "
+                           "mana:%u cost:%u reserve:%u",
+                           me->GetGUIDLow(), decision.target, mana,
+                           obs.spellCost, obs.manaReserve);
+        return;
+    }
+    uint32 const manaBefore = me->GetPower(POWER_MANA);
+    SpellCastResult const res = me->CastSpell(target, spellId, false);
+    Companion::Combat::CastReport const report =
+        Companion::Combat::ReportCast(spellId, (uint32)res, MapCastReject((uint32)res));
+    if (report.outcome == Companion::Combat::CastOutcome::Accepted)
+    {
+        // The declared heal is cast-interruptible by movement
+        // (interruptFlags includes SPELL_INTERRUPT_FLAG_MOVEMENT): stop the
+        // walk in progress immediately so the spell's movement check sees a
+        // stationary caster for the whole cast window; the follow goal
+        // (gated on the in-flight cast) resumes the approach after it ends.
+        me->GetMotionMaster()->Clear(false);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal cast-accepted GUID:%u t:%u spell:%u mana-before:%u mana:%u/%u",
+                           me->GetGUIDLow(), target->GetGUIDLow(), spellId, manaBefore,
+                           me->GetPower(POWER_MANA), me->GetMaxPower(POWER_MANA));
+        return;
+    }
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Healer] heal cast-rejected GUID:%u t:%u spell:%u res:%u category:%s",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)res,
+                       Companion::Combat::CastRejectName(report.reject));
+}
+
 uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
 {
     if (!target)
@@ -2205,6 +2361,21 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
                           : intent.action == Companion::Action::Assist ? "assist"
                           : "no goal");
     }
+    // PORT-015 (KAP-558): declared healer triage runs on this tick's
+    // budget, before behavior execution: a hold or an owner loss
+    // (the card's failure cases) suppresses healing exactly like it
+        // suppresses every other behavior, and an accepted heal does not
+        // cancel the selected behavior - the behavior path (follow and
+        // the rest) continues on the same tick after the cast step.
+    if (IsDeclaredHealer() &&
+        !(_held || !IsFollowOwnerAvailable() ||
+          intent.action == Companion::Action::Hold))
+    {
+        Companion::Healer::Observation const healerObs = FillHealerObservation();
+        Companion::Healer::Decision const healerDecision = Companion::Healer::Select(healerObs);
+        if (healerDecision.action != Companion::Healer::Action::None)
+            HealerTriageStep(healerObs, healerDecision);
+    }
     ExecuteCompanion(intent, diff);
     return true;
 }
@@ -2705,6 +2876,16 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
 
     if (me->GetDistance(leader) > kFollowRange)
     {
+        // PORT-015 (KAP-558): the declared heal is cast-interruptible by
+        // movement; while a timed cast is in flight the follower holds
+        // position (and cancels a walk in progress) so the cast completes.
+        // The approach re-issues on the first tick after the cast ends.
+        if (me->IsNonMeleeSpellCasted(true))
+        {
+            if (!me->GetMotionMaster()->empty())
+                me->GetMotionMaster()->Clear(false);
+            return true;
+        }
         // PORT-007: re-arm the reached latch while out of range so the
         // "reached" line marks every out-of-range -> in-range transition
         // (a completed regroup), not just the first approach.
