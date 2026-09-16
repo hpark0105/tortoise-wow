@@ -1016,26 +1016,74 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
     }
 }
 
+// PORT-011 (KAP-558): bounded cast-result categories for diagnostics.
+// The authoritative core outcome is mapped to a small rejection class so
+// downstream policy/planner boundaries consume one bounded category
+// instead of the raw 1.12 enum. An attempted cast is success only when
+// the core reports SPELL_CAST_OK; every other value is a rejection in
+// its category (or "other", with the raw value still logged).
+static const char* CastResultCategory(SpellCastResult res)
+{
+    switch (res)
+    {
+        case SPELL_CAST_OK:                  return "success";
+        case SPELL_FAILED_NO_POWER:          return "insufficient-power";
+        case SPELL_FAILED_OUT_OF_RANGE:
+        case SPELL_FAILED_LINE_OF_SIGHT:     return "range-los";
+        case SPELL_FAILED_NOT_READY:         return "cooldown";
+        case SPELL_FAILED_NOT_SHAPESHIFT:
+        case SPELL_FAILED_ONLY_SHAPESHIFT:   return "stance-form";
+        case SPELL_FAILED_NOT_INFRONT:
+        case SPELL_FAILED_NOT_BEHIND:
+        case SPELL_FAILED_UNIT_NOT_INFRONT:
+        case SPELL_FAILED_UNIT_NOT_BEHIND:   return "facing";
+        case SPELL_FAILED_BAD_TARGETS:
+        case SPELL_FAILED_TARGETS_DEAD:
+        case SPELL_FAILED_TARGET_ENEMY:
+        case SPELL_FAILED_TARGET_FRIENDLY:
+        case SPELL_FAILED_TARGET_IS_PLAYER:
+        case SPELL_FAILED_TARGET_NOT_PLAYER:
+        case SPELL_FAILED_TARGET_NOT_DEAD:
+        case SPELL_FAILED_TARGET_IN_COMBAT:
+        case SPELL_FAILED_TARGET_FREEFORALL: return "invalid-target";
+        default:                             return "other";
+    }
+}
+
 // Hardening (KAP-558): one offensive evaluation step shared by the legacy
 // continue-combat path and the companion assist/defend executors. Only a
 // successful cast arms _abilityTimer; a failed cast (mana, cooldown, bad
 // target) or no usable spell falls back to melee in the same evaluation,
 // so a failed cast never leaves the companion idling unengaged.
+// PORT-011 (KAP-558): diagnostics record three distinct bounded outcomes -
+// no-eligible-ability, cast-accepted, cast-rejected (with category) - plus
+// the ordinary-attack fallback. NoEligibleAbility is never a rejected
+// cast: spell:0 plus an unknown-failure value never crosses the boundary as
+// one. Behavior is unchanged by this card.
 bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
 {
-    uint32 spellId = SelectOffensiveSpell(target);
-    SpellCastResult castRes = SPELL_FAILED_UNKNOWN;
-    if (spellId)
-        castRes = me->CastSpell(target, spellId, false);
-    // Hardening diag (KAP-558): which branch engaged (spell vs melee).
-    if (sPlayerBotMgr.IsDebugEnabled())
-        sLog.outString("[PlayerBot][Offense] cast GUID:%u t:%u spell:%u res:%u",
-                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)castRes);
-    if (spellId && castRes == SPELL_CAST_OK)
+    uint32 const spellId = SelectOffensiveSpell(target);
+    if (!spellId)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Offense] no-eligible-ability GUID:%u t:%u fallback:ordinary-attack",
+                           me->GetGUIDLow(), target->GetGUIDLow());
+        me->Attack(target, true);
+        return false;
+    }
+    SpellCastResult const castRes = me->CastSpell(target, spellId, false);
+    if (castRes == SPELL_CAST_OK)
     {
         _abilityTimer = urand(2000, 4000);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Offense] cast-accepted GUID:%u t:%u spell:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow(), spellId);
         return true;
     }
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Offense] cast-rejected GUID:%u t:%u spell:%u res:%u category:%s fallback:ordinary-attack",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)castRes,
+                       CastResultCategory(castRes));
     me->Attack(target, true);
     return false;
 }
