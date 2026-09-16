@@ -248,6 +248,15 @@ void PlayerBotMgr::LoadConfig()
     // call a no-op (the deterministic regression path).
     m_plannerTransport.Init(sConfig.GetStringDefault("PlayerBot.PlannerServiceURL", ""),
                             WorldTimer::getMSTime(), confDebug);
+    // PORT-019 (KAP-558): declared personality profile for owned
+    // companions. The profile is operator-declared (config now,
+    // per-character persistence in PORT-020); the model never
+    // chooses it and only proposes within its allowlist.
+    m_personalityProfile = Companion::Personality::ProfileFromName(
+        sConfig.GetStringDefault("PlayerBot.PersonalityProfile", "none").c_str());
+    if (confDebug)
+        sLog.outString("[PlayerBotMgr] personality profile:%s",
+                       Companion::Personality::ProfileName(m_personalityProfile));
     // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
     // login-completion delivery; never set outside the Docker lab.
     m_staleProbeGuid = 0;
@@ -330,10 +339,12 @@ void PlayerBotMgr::Load()
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
     // Roster rows without a valid bot_ownership binding are quarantined: logged and skipped.
     result = CharacterDatabase.PQuery(
-        "SELECT p.char_guid, p.chance, p.ai, b.account_id, c.account, b.owner_account_id "
+        "SELECT p.char_guid, p.chance, p.ai, b.account_id, c.account, b.owner_account_id, "
+        "per.schema_version, per.profile_id "
         "FROM playerbot p "
         "LEFT JOIN bot_ownership b ON b.char_guid = p.char_guid "
-        "LEFT JOIN characters c ON c.guid = p.char_guid");
+        "LEFT JOIN characters c ON c.guid = p.char_guid "
+        "LEFT JOIN bot_personality per ON per.char_guid = p.char_guid");
     if (!result)
         sLog.outString("Loading playerbots...");
     else
@@ -349,6 +360,24 @@ void PlayerBotMgr::Load()
             uint32 charOwner = hasCharacter ? fields[4].GetUInt32() : 0;
             // TW-014: optional human-owner binding (NULL = unowned).
             uint32 ownerAccount = !fields[5].IsNULL() ? fields[5].GetUInt32() : 0;
+            // PORT-020 (KAP-558): versioned personality identity.
+            // A missing row stays (0,0) and is seeded from the
+            // declared config profile at first login; a rejected
+            // row (unknown schema or profile id) fails closed to
+            // the baseline and is never overwritten.
+            uint8 perSchema = 0;
+            uint8 perProfile = 0;
+            if (!fields[6].IsNULL())
+            {
+                perSchema = (uint8)fields[6].GetUInt32();
+                perProfile = (uint8)fields[7].GetUInt32();
+                if (!Companion::Personality::AcceptPersisted(perSchema, perProfile, perProfile))
+                {
+                    sLog.outError("Playerbot: personality row for %u rejected (schema=%u profile=%u); deterministic baseline",
+                                   guid, perSchema, perProfile);
+                    perProfile = 0;
+                }
+            }
 
             if (!hasCharacter)
             {
@@ -369,6 +398,8 @@ void PlayerBotMgr::Load()
             entry->ai->OnBotEntryLoad(entry);
             entry->persistent = true;
             entry->ownerAccountId = ownerAccount;
+            entry->personalitySchemaVersion = perSchema;
+            entry->personalityProfile = perProfile;
             m_bots[entry->playerGUID] = entry;
             totalChance += chance;
         } while (result->NextRow());
@@ -481,6 +512,37 @@ void PlayerBotMgr::OnBotLogin(PlayerBotEntry *e)
     e->loadingSinceMs = 0;
     if (confDebug)
         sLog.outString("[PlayerBot][Login]  '%s' GUID:%u Acc:%u", e->name.c_str(), e->playerGUID, e->accountId);
+    // PORT-020 (KAP-558): stable personality identity. A missing
+    // row is seeded from the declared config profile; an existing
+    // row (any schema) always wins, so re-inviting the same bot
+    // restores the same personality. A failed write never fails the
+    // login: the deterministic baseline remains.
+    SyncPersonality(e);
+}
+
+void PlayerBotMgr::SyncPersonality(PlayerBotEntry *e)
+{
+    // Only owned companions carry a personality identity; the
+    // row is written at most once (no-row -> config seed) and a
+    // persisted or rejected row is never rewritten here.
+    if (!e || !e->ownerAccountId || e->personalitySchemaVersion != 0)
+        return;
+    uint8 const profile = (uint8)m_personalityProfile;
+    if (profile == 0)
+        return; // declared baseline: no identity row, missing = baseline
+    if (!CharacterDatabase.PExecute(
+        "INSERT INTO bot_personality (char_guid, schema_version, profile_id, assigned_at) "
+        "VALUES (%u, %u, %u, %u) "
+        "ON DUPLICATE KEY UPDATE char_guid = char_guid",
+        (uint32)e->playerGUID, (uint32)Companion::Personality::kPersonalitySchemaVersion,
+        profile, (uint32)WorldTimer::getMSTime()))
+        return; // failed write never fails the login: baseline stays
+    e->personalitySchemaVersion = (uint8)Companion::Personality::kPersonalitySchemaVersion;
+    e->personalityProfile = profile;
+    if (confDebug)
+        sLog.outString("[Personality] assigned GUID:%u profile:%s (config seed)",
+                       e->playerGUID,
+                       Companion::Personality::ProfileName(m_personalityProfile));
 }
 
 void PlayerBotMgr::OnBotLogout(PlayerBotEntry *e)

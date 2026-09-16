@@ -33,7 +33,7 @@ inline constexpr uint32_t kMaxPartyBots = 4;
 inline constexpr uint32_t kMaxPayloadBytes = 4096;
 inline constexpr uint64_t kMaxResponseAgeMs = 1000;
 inline constexpr uint64_t kMaxStepLifetimeMs = 5000;
-inline constexpr uint32_t kMaxPreference = 255;
+inline constexpr uint32_t kMaxPreference = 0xFFFF; // packed (id<<8)|value payload (PORT-019)
 
 // The closed action vocabulary: a response can only express these.
 // No field in the protocol can express a command, coordinate, log
@@ -100,7 +100,7 @@ struct Step
     uint8_t reserved[3] = {0, 0, 0};
     uint64_t expiresAtMs = 0;     // step deadline on the engine clock
     uint32_t targetGuid = 0;      // resolvable object GUID, or 0
-    uint32_t preference = 0;      // 0..kMaxPreference; expression only
+    uint32_t preference = 0;      // 0..kMaxPreference; packed (id<<8)|value (PORT-019)
 };
 
 static_assert(std::is_trivially_copyable<Envelope>::value &&

@@ -14,6 +14,8 @@ Scenarios (switched at runtime via POST /scenario):
   oversized   response padded beyond the 4096 byte ceiling
   unsupported protocol_version + 1
   stale       capture 2000 ms in the past (1000 ms age budget)
+  chase       PORT-019 Preference step: FollowChase index 1 (medium)
+  express     PORT-019 Preference step: Expression slot 0
 
 Every request and scenario change is logged to stdout; the fixture owns
 this process and reads its log as evidence.
@@ -85,6 +87,19 @@ def build_live_response(request, scenario):
             env2["owner_guid"], env2["observation_version"],
             env2["capture_time_ms"], env2["step_count"], env2["total_size"])
         return bytes(payload), 0, 200
+    if scenario in ("chase", "express"):
+        # PORT-019: one Preference step per bot. The packed field
+        # is (id << 8) | value; the world maps it per profile.
+        packed = (1 << 8) | 1 if scenario == "chase" else (2 << 8) | 0
+        payload = fp.build_response(
+            request, [
+                {"bot_guid": g, "login_generation": 1,
+                 "order_generation": body["generation"],
+                 "action": fp.ACTION_PREFERENCE, "target_guid": 0,
+                 "preference": packed}
+                for (g, _c) in bots],
+            capture_offset_ms=2000)
+        return payload, 0, 200
     payload = fp.build_response(
         request, [
             {"bot_guid": g, "login_generation": 1,
