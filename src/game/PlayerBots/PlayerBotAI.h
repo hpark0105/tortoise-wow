@@ -5,6 +5,7 @@
 #include "WorldSession.h"
 #include "Companion/Policy.h"
 #include "Companion/Combat.h"
+#include "Companion/Tank.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -137,6 +138,13 @@ class PlayerBotAI: public PlayerAI
         // Hardening (KAP-558): cast-or-attack step; arms _abilityTimer only
         // on a successful cast (see TryOffensiveCastOrAttack).
         bool TryOffensiveCastOrAttack(Unit* target);
+        // PORT-014 (KAP-558): declared tank threat policy (see
+        // Companion/Tank.h): the pinned matrix gate, the per-evaluation
+        // observation fill and the taunt step (a rejected taunt falls
+        // back to the ordinary attack in the same evaluation).
+        bool IsDeclaredTank() const;
+        Companion::Tank::Observation FillTankObservation(Unit* target) const;
+        void TankTauntStep(Unit* target);
         void AutoEquipForLevel();
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;

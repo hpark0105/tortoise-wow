@@ -1740,6 +1740,68 @@ bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const s
                       botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
         return false;
     }
+    // PORT-014 (KAP-558): bounded pull for the declared tank matrix only
+    // (see Companion/Tank.h). The engaged count is derived from the world
+    // at command time, with no bookkeeping: the live hostile victim, the
+    // live hostile attackers of the bot, and nearby live hostiles that
+    // still tie the bot in - as their victim or through stored threat in
+    // their threat list (a threat entry survives a victim switch until the
+    // fight ends, which is exactly the "the tank still owns this target"
+    // evidence). At or above the cap a new assist is refused: the tank
+    // does not pull an unrelated creature while it already holds two.
+    if (bot->GetClass() == Companion::Tank::kDeclaredTankClass &&
+        bot->GetLevel() >= Companion::Tank::kDeclaredTankMinLevel &&
+        bot->HasSpell(Companion::Tank::kDeclaredTankTaunt))
+    {
+        class BotPullCapCheck
+        {
+        public:
+            explicit BotPullCapCheck(Player* bot) : bot(bot) { }
+            void AddDirect(Unit const* u)
+            {
+                if (u && u->IsAlive() && u->IsCreature() && !bot->IsFriendlyTo(u))
+                    counted.insert(u->GetGUIDLow());
+            }
+            bool operator()(Unit* u)
+            {
+                if (!u || !u->IsCreature() || !u->IsAlive() || bot->IsFriendlyTo(u))
+                    return true;
+                Creature* c = u->ToCreature();
+                bool tied = c->GetVictim() == bot;
+                if (!tied && c->CanHaveThreatList())
+                    tied = c->GetThreatManager().getThreat(bot, false) > 0.0f;
+                if (tied)
+                    counted.insert(u->GetGUIDLow());
+                return true;
+            }
+            uint32 Count() const { return (uint32)counted.size(); }
+        private:
+            Player* bot;
+            std::set<uint32> counted;
+        };
+        BotPullCapCheck cap(bot);
+        cap.AddDirect(bot->GetVictim());
+        for (Unit const* u : bot->GetAttackers())
+            cap.AddDirect(u);
+        {
+            CellPair const p(MaNGOS::ComputeCellPair(bot->GetPositionX(), bot->GetPositionY()));
+            Cell cell(p);
+            cell.SetNoCreate();
+            Unit* capIgnored = nullptr; // the searcher result is unused; the check counts
+            MaNGOS::UnitLastSearcher<BotPullCapCheck> searcher(capIgnored, cap);
+            TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotPullCapCheck>, WorldTypeMapContainer> world_searcher(searcher);
+            TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotPullCapCheck>, GridTypeMapContainer> grid_searcher(searcher);
+            cell.Visit(p, world_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+            cell.Visit(p, grid_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+        }
+        if (cap.Count() >= Companion::Tank::kDeclaredTankPullCap)
+        {
+            sLog.outError("assist rejected pull-cap bot:%s target:%s engaged:%u cap:%u issuer:%u",
+                          botName.c_str(), targetName.c_str(), cap.Count(),
+                          Companion::Tank::kDeclaredTankPullCap, issuer->GetGUIDLow());
+            return false;
+        }
+    }
     e->ai->AssistTarget(target->GetObjectGuid().GetRawValue(), ++e->followSeq);
     sLog.outString("assist accepted bot:%s target:%s guid:%u seq:%u",
                    e->name.c_str(), targetName.c_str(), target->GetGUIDLow(), e->followSeq);

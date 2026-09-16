@@ -1092,6 +1092,72 @@ bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// PORT-014 (KAP-558): one legal tank threat policy for the single declared
+// build (the declared matrix is Companion/Tank.h). The policy runs only on
+// the assist source (owner-selected pulls: the tank never autonomously
+// acquires targets) and only for the declared build; every other companion
+// keeps the ordinary offense path untouched. The taunt is the single
+// declared ability; it is reported with the PORT-012 cast vocabulary and a
+// rejected cast falls back to the ordinary attack in the same evaluation -
+// never a delayed one.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::IsDeclaredTank() const
+{
+    if (!me)
+        return false;
+    return me->GetClass() == Companion::Tank::kDeclaredTankClass &&
+           me->GetLevel() >= Companion::Tank::kDeclaredTankMinLevel &&
+           me->HasSpell(Companion::Tank::kDeclaredTankTaunt);
+}
+
+Companion::Tank::Observation PlayerBotAI::FillTankObservation(Unit* target) const
+{
+    Companion::Tank::Observation o;
+    if (!me || !target)
+        return o;
+    o.tankGuid = me->GetGUIDLow();
+    o.ownerGuid = _followLeaderGuid;
+    o.targetGuid = target->GetGUIDLow();
+    if (Creature* c = target->ToCreature())
+    {
+        o.targetHasThreatList = c->CanHaveThreatList();
+        if (o.targetHasThreatList)
+        {
+            o.tankThreat = (uint32)c->GetThreatManager().getThreat(me, false);
+            if (Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, o.ownerGuid)))
+                o.ownerThreat = (uint32)c->GetThreatManager().getThreat(owner, false);
+            if (Unit* victim = c->GetVictim())
+                o.victimGuid = victim->GetGUIDLow();
+        }
+    }
+    o.tauntUsable = me->HasSpell(Companion::Tank::kDeclaredTankTaunt) &&
+                    !me->HasSpellCooldown(Companion::Tank::kDeclaredTankTaunt) &&
+                    me->IsWithinLOSInMap(target) &&
+                    me->CanReachWithMeleeAutoAttack(target);
+    return o;
+}
+
+void PlayerBotAI::TankTauntStep(Unit* target)
+{
+    uint32 const spellId = Companion::Tank::kDeclaredTankTaunt;
+    SpellCastResult const res = me->CastSpell(target, spellId, false);
+    Companion::Combat::CastReport const report =
+        Companion::Combat::ReportCast(spellId, (uint32)res, MapCastReject((uint32)res));
+    if (report.outcome == Companion::Combat::CastOutcome::Accepted)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Tank] taunt cast-accepted GUID:%u t:%u spell:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow(), spellId);
+        return;
+    }
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Tank] taunt cast-rejected GUID:%u t:%u spell:%u res:%u category:%s fallback:ordinary-attack",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)res,
+                       Companion::Combat::CastRejectName(report.reject));
+    me->Attack(target, true);
+}
+
 uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
 {
     if (!target)
@@ -2501,7 +2567,24 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
         me->GetMotionMaster()->MoveChase(target);
     else
         me->SetFacingToObject(target);
-    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+    // PORT-014 (KAP-558): the declared tank matrix owns the assist offense
+    // step: measured normal threat, a taunt when the protected party member
+    // holds it, and the ordinary attack otherwise. The [Tank] threat line
+    // is the fixture contract, sampled on the 2 s combat pacing above.
+    if (req.source == Companion::Combat::Source::Assist && IsDeclaredTank())
+    {
+        Companion::Tank::Observation const obs = FillTankObservation(target);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Tank] threat GUID:%u me:%u owner:%u t:%u victim:%u",
+                           me->GetGUIDLow(), obs.tankThreat, obs.ownerThreat,
+                           target->GetGUIDLow(), obs.victimGuid);
+        Companion::Tank::Decision const decision = Companion::Tank::SelectAction(obs);
+        if (decision.action == Companion::Tank::Action::Taunt)
+            TankTauntStep(target);
+        else
+            me->Attack(target, true); // normal threat: the ordinary white swing
+    }
+    else if (!_abilityTimer && me->IsWithinLOSInMap(target))
         TryOffensiveCastOrAttack(target);
     else
         me->Attack(target, true);
