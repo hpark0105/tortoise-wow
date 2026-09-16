@@ -16,6 +16,8 @@ Scenarios:
   oversized   payload padded beyond the 4096 byte ceiling
   unsupported protocol_version + 1 (unknown version)
   stale       capture time 2000 ms in the past (age budget 1000 ms)
+  chase       PORT-019 Preference step: FollowChase index 1 (medium)
+  express     PORT-019 Preference step: Expression slot 0
 """
 import struct
 
@@ -362,6 +364,20 @@ def respond(request, scenario, now_ms=GOLDEN_NOW_MS):
                               req["owner_guid"], req["observation_version"],
                               req["capture_time_ms"], 1, total)
         return bytes(env + body), {"delay_ms": 120}
+    if scenario in ("chase", "express"):
+        # PORT-019: one Preference step per real bot. The packed
+        # field is (id << 8) | value; the world maps it per profile.
+        body = decode_request_body(request[ENVELOPE:])
+        packed = (1 << 8) | 1 if scenario == "chase" else (2 << 8) | 0
+        payload = build_response(
+            request, [
+                {"bot_guid": b["bot_guid"], "login_generation": 1,
+                 "order_generation": body["generation"],
+                 "action": ACTION_PREFERENCE, "target_guid": 0,
+                 "preference": packed}
+                for b in body["bots"][:body["bot_count"]]],
+            capture_offset_ms=2000)
+        return payload, {"delay_ms": 120}
     raise ValueError("unknown scenario: %s" % scenario)
 
 

@@ -33,6 +33,8 @@ EXPECTED = {
     "oversized": "oversized",
     "unsupported": "unknown-version",
     "stale": "stale",
+    "chase": "ok",
+    "express": "ok",
 }
 
 
