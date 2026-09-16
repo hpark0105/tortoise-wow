@@ -734,6 +734,7 @@ class ChatHandler
         bool HandleBotRecruitCommand(char* args);
         bool HandleBotDismissCommand(char* args);
         bool HandleBotRecallCommand(char* args);
+        bool HandleBotPartyMsgCommand(char* args); // PORT-022
         bool HandleBotPartyCommand(char* args, uint8 action);
 
         bool HandleBankCommand(char* args);

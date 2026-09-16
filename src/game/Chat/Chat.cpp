@@ -846,6 +846,7 @@ ChatCommand * ChatHandler::getCommandTable()
         { "botrecruit",     SEC_PLAYER,          false, &ChatHandler::HandleBotRecruitCommand,          "", nullptr },
         { "botdismiss",     SEC_PLAYER,          false, &ChatHandler::HandleBotDismissCommand,          "", nullptr },
         { "botrecall",      SEC_PLAYER,          false, &ChatHandler::HandleBotRecallCommand,           "", nullptr },
+        { "botpartymsg",    SEC_PLAYER,          false, &ChatHandler::HandleBotPartyMsgCommand,         "", nullptr },
         { "cast",           SEC_DEVELOPER,       false, nullptr,                                        "", castCommandTable     },
         { "castcustom",     SEC_DEVELOPER,       false, &ChatHandler::HandleCastCustomCommand,          "", nullptr },
         { "character",      SEC_DEVELOPER,       true,  nullptr,                                        "", characterCommandTable},

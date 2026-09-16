@@ -5,6 +5,7 @@
 #include "Policies/Singleton.h"
 #include "Database/DatabaseEnv.h"
 #include "Companion/PlannerTransport.h"
+#include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
 
 #include <vector>
@@ -118,6 +119,9 @@ class PlayerBotMgr
         // transport (disabled when PlayerBot.PlannerServiceURL is empty).
         Companion::Planner::PlannerTransport& PlannerTransport() { return m_plannerTransport; }
         Companion::Personality::Profile PersonalityProfile() const { return m_personalityProfile; }
+        // PORT-022 (KAP-558): bounded nonblocking companion-conversation
+        // transport (disabled when PlayerBot.ConversationServiceURL is empty).
+        Companion::Conversation::ConversationTransport& ConversationTransport() { return m_conversationTransport; }
         // PORT-018 (KAP-558): live bot lookup by low GUID (world thread,
         // no allocation).
         PlayerBotEntry* FindBotByGuid(uint32 guid) const;
@@ -139,6 +143,10 @@ class PlayerBotMgr
         // generation at execution time.
         bool BotAssist(Player* issuer, const std::string& botName, const std::string& targetName);
         bool BotDefend(Player* issuer, const std::string& botName, bool enable); // PORT-006
+        // PORT-022 (KAP-558): bounded conversational party chat. The player
+        // addresses a current party companion by name; at most one bounded,
+        // text-only, personality-consistent reply. No gameplay path.
+        bool BotPartyMessage(Player* issuer, const std::string& rawText);
 
         // NEXT-002 (post-MVP): deterministic party-invite handling for
         // socketless companion sessions. A bot session never answers the
@@ -171,6 +179,7 @@ class PlayerBotMgr
 
         std::map<uint32 /*pl guid*/, PlayerBotEntry*> m_bots;
         Companion::Planner::PlannerTransport m_plannerTransport;
+    Companion::Conversation::ConversationTransport m_conversationTransport; // PORT-022
     Companion::Personality::Profile m_personalityProfile = Companion::Personality::Profile::None; // PORT-019: declared profile (config now; PORT-020 persists)
         std::map<uint32 /*account*/, uint32> m_tempBots;
         PlayerBotStats m_stats;

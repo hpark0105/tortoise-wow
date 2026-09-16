@@ -1611,7 +1611,7 @@
       ],
       "priority": 63,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-022.md. Raw transcripts are not persisted by default and prompt-injection text is never echoed.",
+      "notes": "Implemented (PORT-022): ConversationTransport (value ConvRound), BotPartyMessage intake, ConversationRoundStep consumer, party-chat + .botpartymsg wiring, /converse on the real+fake adapters (converse.py). Value tests green (ConvRound + adapter); runtime fixture docker/test_bot_companion_converse.py covers all failure classes. Raw transcripts are not persisted by default and prompt-injection text is never echoed. passes=false pending acceptance; Jira move pending operator approval.",
       "dependsOn": [
         "PORT-021"
       ],

@@ -244,3 +244,29 @@ candidate (the reserved bytes).
   Hold fallback for every bot, so the world never waits for the model
   and always receives a response that passes the same checks as the
   fake service.
+
+## Conversation channel (PORT-022)
+
+A separate, deliberately simple channel alongside the binary planner
+protocol: bounded, text-only companion conversation. It is not part of
+protocol v1 and shares no bytes with it; the same adapter process serves
+both `/plan` (binary) and `/converse` (text) on one port and guards the
+model with the same single-flight lock.
+
+- Request: `POST /converse?profile=<none|reckless|cautious>`; the body is
+  the world-sanitized message text (printable ASCII, <= 200 bytes, no
+  leading dot, no control characters).
+- Response: `200` with the sanitized reply (printable ASCII, <= 120 bytes,
+  no leading dot) or a non-200 / empty body for no reply. The transport
+  treats any other outcome as fail-closed.
+- Model boundary: the strict schema is `{"reply": "<text>"}`, enforced
+  inside the adapter (`converse.py`). The model sees only the static
+  per-profile persona and the player's text; it never sees GUIDs,
+  coordinates, item ids or live world state, and unprovided game facts are
+  stated as unknown, never invented.
+- Transport (C++): one worker thread, one in-flight round per companion,
+  a hard 4000 ms per-round deadline, and a 10000 ms reply-freshness
+  budget. A reply is consumed only while the party signature (group id +
+  leader low) captured at submit still matches; leaving the group or a
+  leader change invalidates outstanding work. The world thread never
+  performs I/O or waits: it submits and polls only.
