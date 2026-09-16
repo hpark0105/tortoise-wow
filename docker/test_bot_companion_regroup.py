@@ -7,11 +7,12 @@ owner), which sits 70 yd south. One Kobold Vermin
 (2500010, entry 6, pinned 150 HP / regen 0) sits 33 yd south of the owner
 (37 yd from the companion's spawn) and drops item 117 (100% chance). The owner pins itself first (so it never
 auto-aggresses the vermin), holds the companion, recruits it into the party,
-and orders it to follow. The companion walks to the owner (its auto-aggression
-is suppressed while the follow goal is active); the assist lands while it is
-still mid-walk, roughly 6-12 yd from the vermin (the assist lookup is 30 yd
-and the owner must stay beyond its 30 yd aggro radius, so the vermin sits
-where only the moving companion can reach it). The companion is the sole party damager, so it has loot
+and orders it to follow. The companion follows the owner by default from
+spawn (Phase 1.1: the default owner-follow catch-up starts at login and a
+hold does not stop it; the explicit .botfollow re-issues the same goal); the
+assist lands while it is still mid-walk, about 25 yd from the vermin (the
+assist lookup is 30 yd, and the vermin's 12 yd detection range keeps the
+pinned owner at 33 yd clear, so the vermin only ever fights the companion). The companion is the sole party damager, so it has loot
 rights. The idle-wander radius is clamped to 0.5 yd (PlayerBot.WanderRadius)
 so the owner cannot drift into the vermin's aggro radius before its hold. When the vermin dies the dead corpse becomes a first-class Loot intent
 (PORT-007): the companion taps it, auto-stores item 117, and the follow goal
@@ -97,8 +98,8 @@ class RegroupMixin:
             "2000:%d:bothold Rgowner" % o,
             "4000:%d:bothold Rgcomp" % o,
             "8000:%d:botrecruit Rgcomp" % o,
-            "12000:%d:botfollow Rgcomp" % o,
-            "20000:%d:botassist Rgcomp Kobold Vermin" % o,
+            "8500:%d:botfollow Rgcomp" % o,
+            "9000:%d:botassist Rgcomp Kobold Vermin" % o,
             "90000:%d:bothold Rgcomp" % o,
             "100000:%d:botstop Rgcomp" % o,
         ])
@@ -117,6 +118,14 @@ class RegroupMixin:
             if len(parts) == 3:
                 state[parts[0].lstrip("/")] = (parts[1], parts[2])
         return state
+
+    def assert_no_real_crashes(self):
+        # The worldspawn loader emits a benign "[CRASH] Spawning already
+        # spawned Gobj" warning for duplicate gameobject spawns at boot;
+        # any other [CRASH] line is a real crash and fails the lab.
+        crashes = [l for l in self.logs.splitlines()
+                   if "[CRASH]" in l and "already spawned Gobj" not in l]
+        self.assertFalse(crashes, "world crashed: %r" % crashes[:3])
 
     @classmethod
     def _inventory_count(cls, guid, item):
@@ -192,7 +201,7 @@ class RegroupMixin:
         for g, n in ((self.o, "Rgowner"), (self.c, self.comp_name)):
             self.assertIn("test-login %d first=1 second=0" % g, self.logs)
             self.assertIn("[PlayerBot][Login]  '%s' GUID:%d" % (n, g), self.logs)
-        self.assertNotIn("[CRASH]", self.logs)
+        self.assert_no_real_crashes()
 
     def test_party_formed(self):
         self.assertIn("party recruit accepted bot:%s guid:%d leader:%d"
