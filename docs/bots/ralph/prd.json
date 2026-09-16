@@ -1427,7 +1427,7 @@
       ],
       "priority": 58,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-017.md. Protocol prerequisite to LLM-010.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-017.md. Implemented and contract-verified (value tests, deterministic fake, cross-language CLI anchor); passes pending head sign-off. Protocol prerequisite to LLM-010.",
       "dependsOn": ["PORT-014", "PORT-015", "PORT-016"],
       "allowedScope": [
         "docs/bots/",
