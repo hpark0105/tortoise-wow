@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fake_planner as fp
 import model_client as mc
 import real_planner as rp
+import converse as cv
 
 def _chat_template_kwargs():
     """Provider-specific template options. The default disables Qwen3
@@ -93,6 +94,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b""
+        if self.path.startswith("/converse"):
+            self._handle_converse(raw)
+            return
         if self.path != "/plan":
             self._send(404, b"")
             return
@@ -157,6 +161,60 @@ class Handler(BaseHTTPRequestHandler):
                      "preference": 0}
                     for b in body["bots"][:body["bot_count"]]])
         self._send(200, payload)
+
+    def _handle_converse(self, raw):
+        # PORT-022 (KAP-558): one bounded, personality-consistent, text-only
+        # reply. The profile is a safe enum string from the URL; the body is
+        # the world-sanitized message text. Strict model schema
+        # {"reply": "..."}; every failure is no reply (HTTP 500, empty).
+        profile = "none"
+        if "?profile=" in self.path:
+            prof = self.path.split("?profile=", 1)[1].split("&", 1)[0].strip()
+            if prof in ("none", "reckless", "cautious"):
+                profile = prof
+        try:
+            text = raw.decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        text = cv.sanitize_reply(text, cv.MAX_TEXT)
+        t0 = time.monotonic()
+        reason = None
+        reply = None
+        meta = None
+        if not MODEL_LOCK.acquire(blocking=False):
+            reason = "busy"
+        else:
+            try:
+                key = mc.read_api_key(CFG["key_file"] or None)
+                if MODEL_ID["id"] is None:
+                    MODEL_ID["id"] = mc.fetch_model_id(CFG["model_url"], key)
+                text2, meta = mc.chat(
+                    CFG["model_url"], key, MODEL_ID["id"],
+                    cv.build_converse_messages(profile, text),
+                    CFG["timeout_ms"] / 1000.0, max_tokens=CFG["max_tokens"],
+                    extra={"chat_template_kwargs": CFG["chat_template_kwargs"]}
+                    if CFG["chat_template_kwargs"] else None)
+                reply = cv.parse_converse_text(text2)
+                if not reply:
+                    reason = "bad-schema"
+            except mc.ModelError as e:
+                reason = e.reason
+                if reason == "no-key-file" or reason == "no-model":
+                    MODEL_ID["id"] = None  # re-probe next round
+            finally:
+                MODEL_LOCK.release()
+        round_ms = int((time.monotonic() - t0) * 1000)
+        if reply:
+            print("[real-planner] converse profile:%s model ok ms:%d "
+                  "tokens:%d/%d len:%d" % (profile, meta["latency_ms"],
+                                           meta["prompt_tokens"],
+                                           meta["completion_tokens"],
+                                           len(reply)), flush=True)
+            self._send(200, reply.encode("utf-8"))
+        else:
+            print("[real-planner] converse profile:%s fallback reason:%s "
+                  "ms:%d" % (profile, reason, round_ms), flush=True)
+            self._send(500, b"")
 
 
 def main():

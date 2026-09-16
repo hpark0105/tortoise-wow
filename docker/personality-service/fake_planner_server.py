@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fake_planner as fp
+import converse as cv
 
 SCENARIO_LOCK = threading.Lock()
 SCENARIO = {"name": "success"}
@@ -45,6 +46,67 @@ def set_scenario(name):
 def get_scenario():
     with SCENARIO_LOCK:
         return SCENARIO["name"]
+
+
+CONVERSE_SCENARIO_LOCK = threading.Lock()
+CONVERSE_SCENARIO = {"name": "success"}
+CONVERSE_SCENARIOS = ("success", "delay", "slow", "malformed", "empty")
+
+
+def set_converse_scenario(name):
+    if name not in CONVERSE_SCENARIOS:
+        return False
+    with CONVERSE_SCENARIO_LOCK:
+        CONVERSE_SCENARIO["name"] = name
+    print("[fake-planner] converse scenario -> %s" % name, flush=True)
+    return True
+
+
+def get_converse_scenario():
+    with CONVERSE_SCENARIO_LOCK:
+        return CONVERSE_SCENARIO["name"]
+
+
+def _converse_word(profile):
+    return {"reckless": "Boldly", "cautious": "Carefully",
+            "none": "Okay"}.get(profile, "Okay")
+
+
+def build_converse_reply(profile, text, scenario):
+    """(payload, delay_ms, status) for one addressed message.
+
+    success  deterministic, profile-distinct reply that also proves the
+             player text reached the service (first 16 chars echoed)
+    delay    valid reply after a 400 ms transport delay (inside the 4000 ms
+             round deadline: still delivered)
+    slow     valid reply after a 5000 ms delay (past the round deadline:
+             the world times out and gets no reply)
+    malformed HTTP 500 (the adapter rejected a prose model answer)
+    empty    HTTP 200 with an empty body (no reply)
+    """
+    # Lab fixture drives the failure class from a keyword in the message
+    # text (CNVSLOW / CNVMALFORM / CNVEMPTY / CNVDELAY); otherwise the
+    # explicitly configured scenario (default success) applies.
+    t = (text or "").upper()
+    if "CNVSLOW" in t:
+        scenario = "slow"
+    elif "CNVMALFORM" in t:
+        scenario = "malformed"
+    elif "CNVEMPTY" in t:
+        scenario = "empty"
+    elif "CNVDELAY" in t:
+        scenario = "delay"
+    base = cv.sanitize_reply(text, cv.MAX_TEXT)
+    reply = cv.sanitize_reply("%s, %s." % (_converse_word(profile), base[:16]))
+    if scenario == "delay":
+        return reply.encode("utf-8"), 400, 200
+    if scenario == "slow":
+        return reply.encode("utf-8"), 5000, 200
+    if scenario == "malformed":
+        return b"", 0, 500
+    if scenario == "empty":
+        return b"", 0, 200
+    return reply.encode("utf-8"), 0, 200  # success
 
 
 def build_live_response(request, scenario):
@@ -140,6 +202,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/scenario":
             self._send(200, get_scenario().encode("ascii"))
+        elif self.path == "/conversescenario":
+            self._send(200, get_converse_scenario().encode("ascii"))
         else:
             self._send(404, b"")
 
@@ -152,6 +216,37 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, b"ok")
             else:
                 self._send(400, b"unknown scenario")
+            return
+        if self.path == "/conversescenario":
+            name = raw.decode("ascii", "replace").strip()
+            if set_converse_scenario(name):
+                self._send(200, b"ok")
+            else:
+                self._send(400, b"unknown scenario")
+            return
+        if self.path.startswith("/converse"):
+            profile = "none"
+            if "?profile=" in self.path:
+                prof = self.path.split("?profile=", 1)[1].split("&", 1)[0].strip()
+                if prof in ("none", "reckless", "cautious"):
+                    profile = prof
+            try:
+                text = raw.decode("utf-8", "replace")
+            except Exception:
+                text = ""
+            print("[fake-planner] POST /converse profile:%s len:%d "
+                  "scenario:%s" % (profile, len(raw), get_converse_scenario()),
+                  flush=True)
+            try:
+                payload, delay_ms, status = build_converse_reply(
+                    profile, text, get_converse_scenario())
+            except Exception as exc:  # fail closed, keep the server alive
+                print("[fake-planner] converse build failed: %s" % exc, flush=True)
+                self._send(500, b"")
+                return
+            if delay_ms:
+                time.sleep(delay_ms / 1000.0)
+            self._send(status, payload)
             return
         if self.path != "/plan":
             self._send(404, b"")

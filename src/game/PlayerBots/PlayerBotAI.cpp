@@ -2520,12 +2520,69 @@ void PlayerBotAI::ApplyPlannerPreference(uint32_t nowMs)
     }
 }
 
+void PlayerBotAI::ConversationRoundStep()
+{
+    // PORT-022 (KAP-558): one bounded conversation reply per companion.
+    // The world thread never waits: the transport already did the I/O on
+    // its worker; here we only consume a reply whose party signature still
+    // matches and whose age is within budget, then Say it. A dead
+    // companion is silent and an empty reply says nothing.
+    if (!IsOwnedCompanion() || !me)
+        return;
+    Companion::Conversation::ConversationTransport& transport =
+        sPlayerBotMgr.ConversationTransport();
+    Group* group = me->GetGroup();
+    if (!group)
+    {
+        // No party: any outstanding reply is dead (leave/exit/rejoin).
+        transport.Invalidate(me->GetGUIDLow());
+        return;
+    }
+    uint32 const groupSig = group->GetId();
+    uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
+    std::string reply;
+    if (!transport.Poll(me->GetGUIDLow(), groupSig, leaderLow,
+                        WorldTimer::getMSTime(), reply))
+        return;
+    // Final sanitize (defense in depth over the adapter's): bounded text,
+    // no leading dot, no control characters. Never reinterpreted as a command.
+    std::string safe;
+    for (unsigned char ch : reply)
+        if (ch >= 0x20 && ch <= 0x7e)
+            safe.push_back((char)ch);
+    size_t const b = safe.find_first_not_of(" ");
+    size_t const e = safe.find_last_not_of(" ");
+    if (b == std::string::npos)
+        safe.clear();
+    else
+        safe = safe.substr(b, e - b + 1);
+    while (!safe.empty() && safe[0] == '.')
+        safe.erase(0, 1);
+    if (safe.empty() || !me->IsAlive())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Conversation] reply suppressed GUID:%u (empty or dead)",
+                           me->GetGUIDLow());
+        return;
+    }
+    me->Say(safe.c_str(), LANG_UNIVERSAL);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Conversation] reply GUID:%u profile:%s len:%u",
+                       me->GetGUIDLow(),
+                       Companion::Personality::ProfileName(
+                           botEntry
+                               ? (Companion::Personality::Profile)botEntry->personalityProfile
+                               : Companion::Personality::Profile::None),
+                       (uint32)safe.size());
+}
+
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
     // PORT-018 (KAP-558): planner rounds key on party membership, not
     // order state, so the round step runs before the no-order early
     // return.
     PlannerRoundStep(diff);
+    ConversationRoundStep(); // PORT-022: consume one bounded reply, if any
     if (!_following && !_held && !_assistTargetGuid)
         return false;
     Companion::Observation observation;

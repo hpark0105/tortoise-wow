@@ -195,6 +195,7 @@ set (game_SRCS
     PacketBroadcast/PlayerBroadcaster.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/Companion/PlannerTransport.cpp
+    PlayerBots/Companion/ConversationTransport.cpp
     PlayerBots/PlayerBotMgr.cpp
     Protocol/Opcodes.cpp
     Protocol/WorldSocket.cpp

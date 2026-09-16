@@ -9,6 +9,7 @@
 #include "Companion/Healer.h"
 #include "Companion/Damage.h"
 #include "Companion/PlannerTransport.h"
+#include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
 
 struct PlayerBotEntry;
@@ -131,6 +132,7 @@ class PlayerBotAI: public PlayerAI
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
         void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
+        void ConversationRoundStep(); // PORT-022: consume one bounded reply (world thread never waits)
         void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
         // KAP-558 hardening: an owned companion without an active order

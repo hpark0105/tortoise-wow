@@ -108,6 +108,8 @@ PlayerBotMgr::~PlayerBotMgr()
     // PORT-018 (KAP-558): bounded shutdown; the worker join cannot outlive
     // the per-round I/O deadline.
     m_plannerTransport.Shutdown();
+    // PORT-022 (KAP-558): same bounded shutdown for conversation.
+    m_conversationTransport.Shutdown();
 }
 
 void PlayerBotMgr::LoadConfig()
@@ -248,6 +250,11 @@ void PlayerBotMgr::LoadConfig()
     // call a no-op (the deterministic regression path).
     m_plannerTransport.Init(sConfig.GetStringDefault("PlayerBot.PlannerServiceURL", ""),
                             WorldTimer::getMSTime(), confDebug);
+    // PORT-022 (KAP-558): bounded nonblocking companion-conversation
+    // transport. An empty PlayerBot.ConversationServiceURL leaves it
+    // disabled: no thread, no I/O, no reply (the deterministic path).
+    m_conversationTransport.Init(sConfig.GetStringDefault("PlayerBot.ConversationServiceURL", ""),
+                                 WorldTimer::getMSTime(), confDebug);
     // PORT-019 (KAP-558): declared personality profile for owned
     // companions. The profile is operator-declared (config now,
     // per-character persistence in PORT-020); the model never
@@ -1927,6 +1934,87 @@ bool PlayerBotMgr::BotDefend(Player* issuer, const std::string& botName, bool en
                    enable ? "enabled" : "disabled", botName.c_str(), e->playerGUID,
                    issuer->GetGUIDLow(), issuerAcc);
     return true;
+}
+
+// PORT-022 (KAP-558): bounded conversational party chat.
+namespace
+{
+// Single-line, bounded, printable-ASCII-only: strips control characters
+// (including newlines), trims, and caps the length. Matches the adapter's
+// outbound sanitizer so a request is never reinterpreted as a command and
+// never exceeds the transport byte budget.
+std::string SanitizeConverseText(std::string const& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char ch : in)
+        if (ch >= 0x20 && ch <= 0x7e)
+            out.push_back((char)ch);
+    size_t b = out.find_first_not_of(" ");
+    size_t e = out.find_last_not_of(" ");
+    if (b == std::string::npos)
+        return std::string();
+    out = out.substr(b, e - b + 1);
+    if (out.size() > Companion::Conversation::kMaxTextBytes)
+        out = out.substr(0, Companion::Conversation::kMaxTextBytes);
+    return out;
+}
+} // namespace
+
+bool PlayerBotMgr::BotPartyMessage(Player* issuer, const std::string& rawText)
+{
+    if (!issuer || !issuer->GetSession() || rawText.empty())
+        return false;
+    std::string const text = SanitizeConverseText(rawText);
+    if (text.empty())
+    {
+        sLog.outError("conversation rejected empty issuer:%u", issuer->GetGUIDLow());
+        return false;
+    }
+    // Addressing: the first token must exactly (case-insensitive) name a bot.
+    size_t const sp = text.find_first_of(" ");
+    std::string const first = (sp == std::string::npos) ? text : text.substr(0, sp);
+    PlayerBotEntry* e = FindBotByName(first);
+    if (!e)
+    {
+        if (confDebug)
+            sLog.outString("conversation unaddressed issuer:%u first:%s",
+                           issuer->GetGUIDLow(), first.c_str());
+        return false; // not clearly addressed to a companion
+    }
+    if (!ValidatePartyOwner(issuer, e, "converse"))
+        return false;
+    Group* group = issuer->GetGroup();
+    if (!group || group->isBGGroup() ||
+        !group->IsMember(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID))))
+    {
+        sLog.outError("conversation rejected not-in-party bot:%s issuer:%u",
+                      e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE)
+    {
+        sLog.outError("conversation rejected offline bot:%s issuer:%u",
+                      e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
+    uint32 const groupSig = group->GetId();
+    uint32 const profileCode = (uint32)e->personalityProfile;
+    // The companion hears the full addressed message; the dispatcher has
+    // already confirmed it is clearly addressed to this companion.
+    if (m_conversationTransport.Submit(uint32(e->playerGUID), groupSig, leaderLow,
+                                       profileCode, text, WorldTimer::getMSTime()))
+    {
+        if (confDebug)
+            sLog.outString("[Conversation] addressed bot:%s issuer:%u group:%u leader:%u profile:%u len:%u",
+                           e->name.c_str(), issuer->GetGUIDLow(), groupSig, leaderLow,
+                           profileCode, (uint32)text.size());
+        return true;
+    }
+    sLog.outError("conversation submit refused bot:%s issuer:%u (busy or table full)",
+                  e->name.c_str(), issuer->GetGUIDLow());
+    return false;
 }
 
 bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const char* action) const

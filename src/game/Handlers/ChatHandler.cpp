@@ -49,6 +49,7 @@
 #include "HonorMgr.h"
 #include "Shop/ShopMgr.h"
 #include "GMTicketMgr.h"
+#include "PlayerBotMgr.h"
 
 
 #include "rapidjson/document.h"
@@ -652,6 +653,11 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket & recv_data)
                 sWorld.LogChat(this, "Group", msg, nullptr, group->GetId());
 
             group->BroadcastPacket(&data, false, group->GetMemberGroup(GetPlayer()->GetObjectGuid()));
+            // PORT-022 (KAP-558): bounded companion conversation. The
+            // dispatcher is a no-op unless the first token names an owned
+            // companion in this party; every other message is untouched.
+            if (group && _player)
+                sPlayerBotMgr.BotPartyMessage(_player, msg);
             break;
         }
         case CHAT_MSG_GUILD: // Master side
