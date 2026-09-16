@@ -91,7 +91,7 @@ static void TestConstantsAndLayout()
     CHECK(CP::kMaxPayloadBytes == 4096);
     CHECK(CP::kMaxResponseAgeMs == 1000);
     CHECK(CP::kMaxStepLifetimeMs == 5000);
-    CHECK(CP::kMaxPreference == 255);
+    CHECK(CP::kMaxPreference == 0xFFFF);
     CHECK(CP::kActionCount == 8);
     CHECK(sizeof(CP::Envelope) == 40);
     CHECK(sizeof(CP::BotSlot) == 8);
@@ -366,10 +366,10 @@ static void TestStepRejects()
     }
 
     s = ValidStep(nowMs);
-    s.preference = 255;
+    s.preference = 0xFFFF;
     CHECK_REJECT(CP::ValidateStep(s, env, nowMs), CP::Reject::Ok);
     s = ValidStep(nowMs);
-    s.preference = 256;
+    s.preference = 0x10000;
     CHECK_REJECT(CP::ValidateStep(s, env, nowMs), CP::Reject::OutOfRange);
 
     s = ValidStep(nowMs);
