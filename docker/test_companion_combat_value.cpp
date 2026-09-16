@@ -322,9 +322,50 @@ static void TestCastReport()
     CHECK(std::string(CC::BlockName(CC::Block::OnNextSwing)) == "on-next-swing");
 }
 
+static void TestVerifyDamage()
+{
+    // PORT-016: the damage source shares the baseline legality and
+    // adds the pull-discipline gates (crowd-control preservation and
+    // the established tank target) before the shared LOS/range tail.
+    CC::Request r = Req(CC::Source::Damage);
+
+    CC::TargetSnapshot s = BaseSnap();
+    s.establishedTarget = true;
+    s.targetUnderCC = false;
+    CHECK(CC::Verify(r, s).legal);
+    CHECK(CC::Verify(r, s).reject == CC::Reject::None);
+
+    s = BaseSnap(); s.establishedTarget = true; s.targetUnderCC = false;
+    s.canAttack = false;
+    CHECK(!CC::Verify(r, s).legal);
+    CHECK(CC::Verify(r, s).reject == CC::Reject::CannotAttack);
+
+    s = BaseSnap(); s.establishedTarget = true; s.targetUnderCC = false;
+    s.friendly = true;
+    CHECK(CC::Verify(r, s).reject == CC::Reject::Friendly);
+
+    s = BaseSnap(); s.establishedTarget = true; s.targetUnderCC = true;
+    CHECK(CC::Verify(r, s).reject == CC::Reject::TargetUnderCC);
+
+    s = BaseSnap(); s.establishedTarget = false; s.targetUnderCC = false;
+    CHECK(CC::Verify(r, s).reject == CC::Reject::NotEstablishedTarget);
+
+    s = BaseSnap(); s.establishedTarget = true; s.targetUnderCC = false;
+    s.inLos = false;
+    CHECK(CC::Verify(r, s).reject == CC::Reject::NoLos);
+
+    s = BaseSnap(); s.establishedTarget = true; s.targetUnderCC = false;
+    s.distance = 100.0f;
+    CHECK(CC::Verify(r, s).reject == CC::Reject::OutOfRange);
+
+    CHECK(std::string(CC::RejectName(CC::Reject::NotEstablishedTarget)) == "not-established-target");
+    CHECK(std::string(CC::RejectName(CC::Reject::TargetUnderCC)) == "target-under-cc");
+}
+
 int main()
 {
     TestVerifyAssist();
+    TestVerifyDamage();
     TestVerifyContinueCombat();
     TestVerifyDefend();
     TestDefendTargetLegal();

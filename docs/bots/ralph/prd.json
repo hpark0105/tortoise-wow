@@ -1400,7 +1400,7 @@
       ],
       "priority": 57,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-016.md. Implementation unit for CMP-014.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-016.md. Implementation unit for CMP-014. Implemented on feature/kap-558-port-phase2: Companion/Damage.h policy (Rogue matrix, pull gate, CC preservation set, v2) + adapter packed-GUID handoff (the executor resolves packed object GUIDs; the observation keeps the low-GUID value contract). Runtime fixture docker/test_bot_damage.py is 10/10 green; Phase 1 matrix, tank and healer fixtures are green. passes stays false pending in-game verification sign-off.",
       "dependsOn": ["PORT-014", "PORT-015"],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",

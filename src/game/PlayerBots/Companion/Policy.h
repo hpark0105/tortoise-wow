@@ -34,12 +34,21 @@ inline Intent DefendPolicy(Observation const& o)
 {
     return {o.defendTarget ? Action::Defend : Action::None, o.generation, o.defendTarget};
 }
+inline Intent DamagePolicy(Observation const& o)
+{
+    return {o.damageTarget ? Action::Damage : Action::None, o.generation, o.damageTarget};
+}
 // The complete deterministic priority in one selection path:
-// Hold > Assist > ContinueCombat > Defend > Loot > Follow. An assist
+// Hold > Assist > ContinueCombat > Defend > Damage > Loot > Follow. An
+// assist
 // suspends the follow goal (it resumes once the assisted target is gone)
 // and overrides an incidental engagement; a live engagement is never
 // abandoned for a new defender; an owner-enabled reactive defend
-// interrupts loot and follow but never an ongoing fight; a dead corpse the
+// interrupts loot and follow but never an ongoing fight; the declared
+// damage companion engages only the established tank target (the tank-pull
+// discipline lives in Companion/Damage.h; the slot is filled only when the
+// selection would otherwise be Follow or Loot, like the defend slot); a
+// dead corpse the
 // companion is meant to loot is collected before the follow resumes; only
 // a hold (or a missing owner while following) stops everything. Recovery
 // (corpse reclaim) preempts this whole selection at the lifecycle level:
@@ -57,6 +66,9 @@ inline Intent Select(Observation const& o)
     Intent defend = DefendPolicy(o);
     if (defend.action != Action::None)
         return defend;
+    Intent damage = DamagePolicy(o);
+    if (damage.action != Action::None)
+        return damage;
     Intent loot = LootPolicy(o);
     if (loot.action != Action::None)
         return loot;

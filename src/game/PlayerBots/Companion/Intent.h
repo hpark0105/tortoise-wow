@@ -15,10 +15,10 @@ inline constexpr uint32_t kDirectiveVersion = 1;
 
 // The complete behavior vocabulary. Hold, Assist, ContinueCombat, Defend,
 // Loot and Follow share the one documented priority in Policy::Select
-// (Hold > Assist > ContinueCombat > Defend > Loot > Follow); recovery
-// (corpse reclaim) preempts behavior selection at the lifecycle level and
-// is not a behavior action.
-enum class Action { None, Hold, Follow, ContinueCombat, Assist, Loot, Defend };
+// (Hold > Assist > ContinueCombat > Defend > Damage > Loot > Follow);
+// recovery (corpse reclaim) preempts behavior selection at the
+// lifecycle level and is not a behavior action.
+enum class Action { None, Hold, Follow, ContinueCombat, Assist, Loot, Defend, Damage };
 
 struct Intent
 {

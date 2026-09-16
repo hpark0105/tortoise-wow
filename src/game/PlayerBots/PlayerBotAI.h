@@ -7,6 +7,7 @@
 #include "Companion/Combat.h"
 #include "Companion/Tank.h"
 #include "Companion/Healer.h"
+#include "Companion/Damage.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -91,6 +92,7 @@ class PlayerBotAI: public PlayerAI
         uint64_t _defendTargetGuid = 0; // PORT-006: current defend candidate (0 = none)
         uint32 _defendProbeTimer = 0; // PORT-006: debug probe pacing (2000 ms)
         uint32 _defendTargetGrace = 0; // PORT-006: grace remaining (ms) for a locked defend target
+        uint32 _damageWaitTimer = 0; // PORT-016: [Damage] wait-line pacing (2000 ms)
         uint32 _followSeq = 0;
         uint32 _followLeaderGuid = 0;
         uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
@@ -154,6 +156,16 @@ class PlayerBotAI: public PlayerAI
         Companion::Healer::Observation FillHealerObservation() const;
         void HealerTriageStep(Companion::Healer::Observation const& obs,
                               Companion::Healer::Decision const& decision);
+        // PORT-016 (KAP-558): declared damage tank-pull policy (see
+        // Companion/Damage.h): the pinned matrix gate, the per-tick
+        // observation filled from the live world, the crowd-control
+        // preservation set, and the established-target
+        // revalidation for the shared executor.
+        bool IsDeclaredDamage() const;
+        Unit* FindDeclaredTank() const;
+        bool TargetUnderCC(Unit* unit) const;
+        Companion::Damage::Observation FillDamageObservation() const;
+        bool IsEstablishedTankTarget(Creature* target) const;
         void AutoEquipForLevel();
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;
