@@ -2371,13 +2371,20 @@ void PlayerBotAI::PlannerRoundStep(uint32 diff)
     Group const* group = me->GetGroup();
     uint32 const groupId = group->GetId();
     uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
-    if (!leaderLow || sPlayerBotMgr.FindBotByGuid(leaderLow))
+    // The leader must not be an owned companion: a bot-led party has no
+    // player owner to plan for. An unowned roster entry (the lab owner
+    // fixture) is still a player for planning purposes.
+    PlayerBotEntry* leaderEntry = sPlayerBotMgr.FindBotByGuid(leaderLow);
+    if (!leaderLow || (leaderEntry && leaderEntry->ownerAccountId))
         return; // bot-led: no player owner to plan for
     Companion::Planner::PlannerTransport& transport =
         sPlayerBotMgr.PlannerTransport();
     if (groupId != _plannerGroupId || leaderLow != _plannerLeaderGuid)
     {
-        if (_plannerLeaderGuid && _plannerLeaderGuid != leaderLow)
+        // Any signature change (new group or new leader) is a party-
+        // session change for the tracked key: kill its round so no
+        // outstanding result can cross the membership boundary.
+        if (_plannerLeaderGuid)
             transport.InvalidateSession(_plannerLeaderGuid);
         _plannerGroupId = groupId;
         _plannerLeaderGuid = leaderLow;
