@@ -449,7 +449,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 // XP, and never roams into solo fights.
                 Player* owner = FindOwnerByAccount();
                 if (owner && owner->GetMapId() == me->GetMapId() &&
-                    me->GetDistance(owner) > kOwnerFollowChaseDist)
+                    me->GetDistance(owner) > _personalityChaseDist)
                 {
                     _wanderTimer = urand(1500, 3000);
                     me->GetMotionMaster()->MovePoint(0, owner->GetPositionX(),
@@ -1886,6 +1886,10 @@ void PlayerBotAI::Remove()
     _plannerLeaderGuid = 0;
     _plannerLastSubmitMs = 0;
     _plannerOfferValid = false;
+    // PORT-019 (KAP-558): personality runtime effects die with the
+    // session; the declared profile is re-applied from its source.
+    _personalityChaseDist = kOwnerFollowChaseDist;
+    _personalityLastExprMs = 0;
     me->setAI(nullptr);
     me = nullptr;
 }
@@ -2412,6 +2416,27 @@ void PlayerBotAI::PlannerRoundStep(uint32 diff)
             ++botCount;
         }
     }
+    // PORT-021 (KAP-558): consume the prior ready round BEFORE
+    // submitting the next one. A submit supersedes a recorded-but-
+    // unfetched response on the same tick; with the production tick
+    // cadence (PlayerBot.UpdateMs >= the 2 s planner pace) the old
+    // order starved every fetch and no offer was ever applied.
+    // Record-only consumption (PORT-019 maps offers to behavior): every
+    // owned companion fetches its own step from the shared round.
+    Companion::Planner::Step offer;
+    _plannerOfferValid =
+        transport.FetchOffer(leaderLow, me->GetGUIDLow(), nowMs, offer);
+    if (_plannerOfferValid)
+    {
+        _plannerOffer = offer;
+        // PORT-019 (KAP-558): Preference is the only planner
+        // action with a personality effect. It maps to bounded,
+        // profile-allowlisted outcomes and fails closed to the
+        // deterministic baseline.
+        if (_plannerOffer.action ==
+            (uint8_t)Companion::Planner::Action::Preference)
+            ApplyPlannerPreference(nowMs);
+    }
     if (submitterLow == me->GetGUIDLow() && botCount > 0 &&
         (_plannerLastSubmitMs == 0 ||
          nowMs - _plannerLastSubmitMs >= Companion::Planner::kPlannerPaceMs))
@@ -2439,13 +2464,60 @@ void PlayerBotAI::PlannerRoundStep(uint32 diff)
         if (transport.SubmitShared(leaderLow, req, Companion::Planner::kRequestBytes, nowMs))
             _plannerLastSubmitMs = nowMs;
     }
-    // Record-only consumption (PORT-019 maps offers to behavior): every
-    // owned companion fetches its own step from the shared round.
-    Companion::Planner::Step offer;
-    _plannerOfferValid =
-        transport.FetchOffer(leaderLow, me->GetGUIDLow(), nowMs, offer);
-    if (_plannerOfferValid)
-        _plannerOffer = offer;
+}
+
+void PlayerBotAI::ApplyPlannerPreference(uint32_t nowMs)
+{
+    using namespace Companion::Personality;
+    // PORT-020 (KAP-558): the persisted per-companion profile
+    // (seeded from config at first login); the config value
+    // never overrides a persisted identity.
+    Profile const profile = botEntry
+        ? (Profile)botEntry->personalityProfile
+        : Profile::None;
+    if (profile == Profile::None || !me)
+        return; // baseline: no declared profile, no effect
+    PrefId id = PrefId::Invalid;
+    uint8_t value = 0;
+    if (!ParsePreference(_plannerOffer.preference, id, value))
+        return; // unknown id: deterministic baseline
+    switch (id)
+    {
+        case PrefId::FollowChase:
+        {
+            float yd = 0.0f;
+            if (!MapChaseYd(profile, value, yd))
+                return; // out-of-set value: keep the current distance
+            if (yd != _personalityChaseDist)
+            {
+                _personalityChaseDist = yd;
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[Personality] chase GUID:%u profile:%s dist:%.1f",
+                                   me->GetGUIDLow(), ProfileName(profile), yd);
+            }
+            break;
+        }
+        case PrefId::Expression:
+        {
+            // Rate excess or an out-of-set slot stays silent.
+            // Expression is cosmetic: it never moves, targets or
+            // interrupts anything, and a dead companion is silent.
+            if (!me->IsAlive() ||
+                nowMs - _personalityLastExprMs < kExprIntervalMs)
+                return;
+            char const* line = nullptr;
+            if (!MapExpressionLine(profile, value, line))
+                return;
+            _personalityLastExprMs = nowMs;
+            me->Say(line, LANG_UNIVERSAL);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[Personality] expr GUID:%u profile:%s slot:%u",
+                               me->GetGUIDLow(), ProfileName(profile), value);
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 bool PlayerBotAI::UpdateCompanion(uint32 diff)

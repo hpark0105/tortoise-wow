@@ -72,3 +72,127 @@ record the exact filename and digest, context size, latency distribution, peak
 VRAM, schema-valid response rate and fallback behavior; do not infer suitability
 from parameter count alone. Snapshot-test the versioned default primer and prove
 that changing live vendor/item observations does not require changing it.
+
+## Implementation (2026-09-16, park-head local session)
+
+### Files
+
+- `docker/personality-service/real_planner.py` - value-level adapter:
+  bounded prompt construction (primer + request value fields only),
+  strict JSON schema parser (closed no-target action vocabulary,
+  bounded preference value sets), deterministic Hold fallback, and the
+  capture policy (see planner-protocol.md).
+- `docker/personality-service/model_client.py` - stdlib
+  OpenAI-compatible client: key-file auth (park-llama key file, never
+  logged), one bounded request per round, hard timeout, no retry.
+- `docker/personality-service/real_planner_server.py` - host-side
+  service speaking the accepted wire contract (POST /plan, GET /health,
+  GET /primer). Single flight (one model call at a time); every
+  provider failure (offline, busy, timeout, HTTP error, malformed)
+  answers the Hold fallback, so the world never waits and every
+  response passes the same protocol checks as the fake service.
+- `docker/personality-service/context/primer-v1.txt` - versioned,
+  digest-pinned (sha256 in `real_planner.PRIMER_SHA256`) bounded
+  context primer: party membership, bags/vendors, equipment, quests,
+  death and recovery, follow distance, expression, held. No live NPC
+  GUIDs, item IDs, coordinates, routes or server-state claims.
+- `docker/test_companion_real_planner_value.py` - value suite: primer
+  pin and boundedness, prompt non-sensitivity (no GUIDs/ids), strict
+  parser accept/reject matrix, prose tolerance, fallback determinism,
+  wire validity at lab (1 s) and production (10 s) ticks, model-client
+  failure mapping against local stubs.
+- `docker/test_bot_companion_real_planner.py` - runtime fixture:
+  phases A offline, B timeout, C schema-valid preference applied
+  (reckless chase dist:20.0 through the real wire), D malformed,
+  E busy (single flight), F optional live-model round with measured
+  response recorded to evidence.
+- `docker/personality-service/measure_candidates.py` - operator
+  harness for the candidate comparison (below).
+- `src/game/PlayerBots/PlayerBotAI.cpp` - **scope note**: the
+  round-consumption order repair (fetch the prior ready round before
+  the new submit in `PlannerRoundStep`). Without it, any tick cadence
+  at or above the 2 s planner pace (the 10 s production default)
+  starved every fetch and the accepted transport could never consume a
+  response in the deployed world; the card's acceptance criterion is
+  unreachable without this repair. Documented in
+  planner-protocol.md (round consumption order).
+- `docs/bots/ralph/companion-port/planner-protocol.md` - real-adapter
+  capture policy, round consumption order, service-side
+  loginGeneration echo, prompt boundary and fallback contract.
+
+### Evidence status
+
+- Value suite `test_companion_real_planner_value`: green (14 tests).
+- `test_bot_planner_transport` (PORT-018 matrix) re-run green after the
+  consumption-order repair.
+- `test_bot_companion_real_planner`: runtime proof of offline/timeout/
+  schema/malformed/busy phases; phase F records the measured live
+  response when `PORT021_MODEL_URL` is set.
+- Sensitive-data inspection: prompt carries only ordinals, class
+  names, flags and generation (value test pins the absence of GUIDs
+  and request ids); `GET /primer` exposes the exact primer for
+  inspection; the model key never appears in any log line.
+
+### Thinking-mode handling (measured)
+
+Qwen3 family models default to an internal reasoning pass that is
+returned as `reasoning_content`; with a 64-token completion budget the
+reasoning consumes the whole budget and `content` stays empty
+(measured against the loaded Qwen3.8-27B-UD service: 64/64 tokens to
+reasoning, empty content). Two layered mitigations:
+
+- the user prompt ends with a `/no_think` directive (Qwen3 switch;
+  other models ignore the token and the strict parser slices the JSON);
+- the request carries `chat_template_kwargs: {"enable_thinking":
+  false}` (override `REAL_PLANNER_CHAT_TEMPLATE_KWARGS`), which the
+  Qwen3 Jinja template honors and other templates ignore.
+
+With both applied the same full-prompt round measured 547 ms
+(752 prompt tokens, 12 completion tokens, exact JSON content) on the
+27B service - inside the 5 s transport round deadline with margin.
+This is an operator deployment detail: the adapter is model-agnostic
+and no world-server change is involved.
+
+### Live measurement recorded (2026-09-16)
+
+Phase F of `test_bot_companion_real_planner` ran against the approved
+local service serving `Qwen3.8-27B-UD-Q4_K_XL.gguf`
+(`C:\Users\hpark\WebstormProjects\park-llama\models`): one bounded
+shared party request reached the service and returned a schema-valid
+response that passed the same identity/generation/age/allowlist
+checks as the fake service (evidence under
+`local/tortoise-bot-rplanner-*` / `live-model-measurement.json`).
+Measured RT on the 27B is model-selection data, not approval: the
+candidate comparison below still gates the deployed model.
+
+
+### Candidate comparison - operator step (blocked by shared-model
+concurrency)
+
+The three candidate GGUFs are present under
+`C:\Users\hpark\WebstormProjects\park-llama\models`. Selecting one
+requires starting each in turn, which conflicts with the single-model
+policy while a park-head session (this one) runs on the same
+llama-server. Operator steps: stop the park-head session and any other
+model, then from the repo root:
+
+    python docker/personality-service/measure_candidates.py --out local/model-measure.json
+
+The harness measures the same schema-bound workload for each candidate
+(fixed request through the real adapter prompt/parse path), records
+file name, sha256 digest, context size, latency distribution, peak
+VRAM, schema-valid rate, fallback behavior and whether p95 fits the
+5 s transport round deadline, then stops the server. Availability does
+not approve a model; selection happens after this evidence exists.
+The adapter is model-agnostic: once a candidate is selected, the
+deployment points `REAL_PLANNER_MODEL_URL` at the service serving it
+(no code change).
+
+### Deployment wiring (personal server)
+
+`PLAYERBOT_PLANNER_SERVICE_URL` (existing, PORT-018) points the world
+at the adapter; the adapter runs host-side (it is the only component
+that may see the model endpoint and key). No world-server env change
+was required: the transport already treats the adapter as an
+ordinary planner service.
+
