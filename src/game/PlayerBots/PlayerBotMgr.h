@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "Policies/Singleton.h"
 #include "Database/DatabaseEnv.h"
+#include "Companion/PlannerTransport.h"
 
 #include <vector>
 
@@ -109,6 +110,13 @@ class PlayerBotMgr
         uint32 GetQuestId() const { return confQuestId; }
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
+        // PORT-018 (KAP-558): the bounded nonblocking party-planner
+        // transport (disabled when PlayerBot.PlannerServiceURL is empty).
+        Companion::Planner::PlannerTransport& PlannerTransport() { return m_plannerTransport; }
+        // PORT-018 (KAP-558): live bot lookup by low GUID (world thread,
+        // no allocation).
+        PlayerBotEntry* FindBotByGuid(uint32 guid) const;
+
         // TW-007 (contract C4): only verified persistent (roster) bots may save,
         // and only through a session that uses their approved bound identity.
         bool IsSaveableBot(PlayerBotEntry* e, uint32 sessionAccountId) const;
@@ -157,6 +165,7 @@ class PlayerBotMgr
         uint32 _maxAccountId;
 
         std::map<uint32 /*pl guid*/, PlayerBotEntry*> m_bots;
+        Companion::Planner::PlannerTransport m_plannerTransport;
         std::map<uint32 /*account*/, uint32> m_tempBots;
         PlayerBotStats m_stats;
 
