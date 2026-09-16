@@ -73,7 +73,7 @@ reject any other length before parsing.
 | 13     | 3    | reserved        | zero                                                 |
 | 16     | 4    | target_guid     | resolvable object GUID, or 0; see action rules       |
 | 20     | 8    | expires_at_ms   | step deadline on the engine clock                     |
-| 28     | 4    | preference      | 0..`kMaxPreference` (255); expression only, PORT-019 |
+| 28     | 4    | preference      | 0..`kMaxPreference` (0xFFFF); packed (id<<8)\|value personality payload (PORT-019) |
 
 ## Action vocabulary (closed set)
 
@@ -114,7 +114,7 @@ the planner's only world knowledge; nothing else crosses the boundary.
 | max payload bytes      | 4096         | `ValidateEnvelope` (received length, pre-parse) |
 | max steps / response   | 8            | `ValidateEnvelope` (count check)     |
 | max party bots / req   | 4            | `ValidateRequestBody` (count check)  |
-| max preference value   | 255          | `ValidateStep` (above 255 -> `OutOfRange`) |
+| max preference value   | 0xFFFF       | `ValidateStep` (above 0xFFFF -> `OutOfRange`) |
 | max response age       | 1000 ms      | `ValidateEnvelope` (age check)       |
 | max step lifetime      | 5000 ms      | `ValidateStep` (rejects as `Expired`)|
 | max transport latency  | 500 ms P95   | transport budget (PORT-018)          |
@@ -136,7 +136,7 @@ the planner's only world knowledge; nothing else crosses the boundary.
 | non-zero reserved bytes | `BadReserved`               |
 | action byte out of range| `UnknownAction`             |
 | target rule violated    | `MissingTarget`/`ForbiddenTarget` |
-| preference above 255    | `OutOfRange`                 |
+| preference above 0xFFFF | `OutOfRange`                 |
 | step expired at arrival | `Expired`                  |
 | response age > 1000 ms  | `Stale`                     |
 | response request_id/owner not echoed | `Mismatched` |
@@ -162,3 +162,85 @@ PORT-019/020) without a transport change.
   pacing already bounds this); the service must not be polled tighter.
 - Backoff: after 3 consecutive timeouts the caller disables planner rounds
   for 60 seconds and continues on the deterministic policies.
+
+## Preference payload semantics (PORT-019)
+
+The `preference` field of a `Preference` step packs `(id << 8) |
+value`. Declared ids: `1` = FollowChase (value 0..2, close/medium/far
+index), `2` = Expression (value 0..1, catalog slot). The world maps the
+packed value per the companion's declared profile
+(`Companion/Personality.h`); unknown ids, out-of-set values, an
+undeclared profile, rate excess or model absence all fail closed to the
+deterministic baseline. PORT-019 raised the wire ceiling from 255 to
+0xFFFF to carry the packed payload; the field remains an opaque
+bounded integer at this layer and the catalog enforces the stricter
+fail-closed bounds.
+
+
+## Real-adapter capture policy and round consumption (PORT-021)
+
+The real-model adapter (`docker/personality-service/real_planner_server.py`)
+is a planner *service*: it owns prompt construction, the model call and
+the mapping of model JSON to protocol steps. The world sees only the
+protocol bytes and never the model output.
+
+### Capture policy
+
+The v1 response envelope carries the service's *claimed* capture time;
+the world validates age (<= 1000 ms from the claim) and step lifetime
+(<= 5000 ms from the claim) against its own clock. The service does not
+know the world's next tick, so the adapter claims
+
+    capture = request capture + offset
+    offset  = clamp(max(2000, measured_round_ms) + configured_tick_ms,
+                    upper bound 15000)
+
+with `configured_tick_ms` the expected world tick (`PlayerBot.UpdateMs`;
+10000 in the personal deployment, 1000 in lab fixtures). The claim
+lands at or just past the next expected fetch, inside the age budget,
+for any round that completes inside the 5000 ms transport deadline.
+The step lifetime stays the reference 1000 ms, so a plan can be
+applied at most `tick + round` after the party snapshot it answers.
+The staleness risk is bounded by construction: the only behavioral
+vocabulary is the profile-allowlisted Preference (chase distance inside
+the fixed 15-35 yd band, rate-limited static expression lines), and a
+party-session change invalidates the round before any stale result can
+land.
+
+### Round consumption order
+
+A submit supersedes a recorded-but-unfetched response on the same tick.
+`PlayerBotAI::PlannerRoundStep` therefore **fetches the prior ready
+round before submitting the next one**. Without this order, any tick
+cadence at or above the 2 s planner pace (including the 10 s
+production default) starved every fetch: the submit on each tick
+superseded the previous round's response before `FetchOffer` ran, and
+no offer was ever applied. Lab fixtures (1 s tick < 2 s pace) are the
+only cadence where the old order happened to work.
+
+### Service-side loginGeneration echo
+
+The v1 request bot slot (guid + class + 3 reserved bytes) cannot carry
+per-bot login generations, so the adapter echoes the constant 1
+(matches the fake service). The world does not compare the echoed value
+against the entry's login generation; freshness is enforced by the
+order-generation echo, the identity/session fields and the age/lifetime
+bounds. Per-bot login generation in the request is a protocol-v2
+candidate (the reserved bytes).
+
+### Prompt boundary and fallback contract
+
+- The prompt contains only the versioned static primer
+  (`context/primer-v1.txt`, digest-pinned) plus the request's value
+  fields: bot ordinals, class names, flags and order generation.
+  Never GUIDs, coordinates, item ids, names or live observations.
+- The model may express only the closed action vocabulary WITHOUT
+  targets: `none, hold, follow, defend, regroup, preference`. Assist
+  and Loot require a resolvable world target GUID, which the request
+  does not carry and the provider can therefore never name. Provider
+  prose outside the strict JSON schema is rejected.
+- Every response has >= 1 step. Provider offline, busy (single flight),
+  timeout, HTTP error or malformed output answers the deterministic
+  Hold fallback for every bot, so the world never waits for the model
+  and always receives a response that passes the same checks as the
+  fake service.

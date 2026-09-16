@@ -1259,7 +1259,9 @@
       "priority": 52,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-011.md. Phase 2 entry hardening.",
-      "dependsOn": ["PORT-010"],
+      "dependsOn": [
+        "PORT-010"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/PlayerBotMgr.cpp",
         "src/game/PlayerBots/PlayerBotAI.cpp",
@@ -1271,7 +1273,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Focused same-name targeting and failed-cast fallback labs plus affected companion regressions."],
+      "validation": [
+        "Focused same-name targeting and failed-cast fallback labs plus affected companion regressions."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1287,7 +1291,9 @@
       "priority": 53,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-012.md.",
-      "dependsOn": ["PORT-011"],
+      "dependsOn": [
+        "PORT-011"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/PlayerBotAI.cpp",
         "src/game/PlayerBots/PlayerBotAI.h",
@@ -1300,7 +1306,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Compile and complete Phase 1 companion regression matrix."],
+      "validation": [
+        "Compile and complete Phase 1 companion regression matrix."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1315,7 +1323,9 @@
       "priority": 54,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-013.md.",
-      "dependsOn": ["PORT-012"],
+      "dependsOn": [
+        "PORT-012"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
@@ -1328,7 +1338,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Pure policy/generation checks and complete Phase 1 behavior regressions."],
+      "validation": [
+        "Pure policy/generation checks and complete Phase 1 behavior regressions."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1344,7 +1356,9 @@
       "priority": 55,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-014.md. Implementation unit for CMP-012.",
-      "dependsOn": ["PORT-013"],
+      "dependsOn": [
+        "PORT-013"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
@@ -1356,7 +1370,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Declared tank-class one- and two-creature threat labs."],
+      "validation": [
+        "Declared tank-class one- and two-creature threat labs."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1372,7 +1388,9 @@
       "priority": 56,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-015.md. Implementation unit for CMP-013. Implemented: value-only triage policy (Companion/Healer.h) with owner > self > most-injured priority, 70% per-mille threshold, 96+32 mana floor, withDelayed one-flight gate and hold-position for the movement-interruptible cast (the re-accept storm fix). Value 1/1 and disposable runtime lab 12/12 on tortoise-local:dev 21a0e9d2 (2026-09-16). passes=false pending user approval.",
-      "dependsOn": ["PORT-013"],
+      "dependsOn": [
+        "PORT-013"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
@@ -1385,7 +1403,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Declared healer triage, resource, range/LOS and stale-order labs."],
+      "validation": [
+        "Declared healer triage, resource, range/LOS and stale-order labs."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1401,7 +1421,10 @@
       "priority": 57,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-016.md. Implementation unit for CMP-014. Implemented on feature/kap-558-port-phase2: Companion/Damage.h policy (Rogue matrix, pull gate, CC preservation set, v2) + adapter packed-GUID handoff (the executor resolves packed object GUIDs; the observation keeps the low-GUID value contract). Runtime fixture docker/test_bot_damage.py is 10/10 green; Phase 1 matrix, tank and healer fixtures are green. passes stays false pending in-game verification sign-off.",
-      "dependsOn": ["PORT-014", "PORT-015"],
+      "dependsOn": [
+        "PORT-014",
+        "PORT-015"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
@@ -1413,7 +1436,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Threat-delay, controlled-target, owner-override and unsupported-class labs."],
+      "validation": [
+        "Threat-delay, controlled-target, owner-override and unsupported-class labs."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1428,7 +1453,11 @@
       "priority": 58,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-017.md. Implemented and contract-verified (value tests, deterministic fake, cross-language CLI anchor); passes pending head sign-off. Protocol prerequisite to LLM-010.",
-      "dependsOn": ["PORT-014", "PORT-015", "PORT-016"],
+      "dependsOn": [
+        "PORT-014",
+        "PORT-015",
+        "PORT-016"
+      ],
       "allowedScope": [
         "docs/bots/",
         "src/game/PlayerBots/Companion/",
@@ -1439,7 +1468,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Schema round-trip, negative parser and deterministic fake-service contract tests."],
+      "validation": [
+        "Schema round-trip, negative parser and deterministic fake-service contract tests."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1455,7 +1486,9 @@
       "priority": 59,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-018.md. Implemented: bounded worker-thread transport (5s round deadline, 60s backoff, queue depth 1, newest wins), party-session generations, validated record-only offers; value + live fake-service fixtures; passes pending head sign-off. Implementation unit for LLM-010.",
-      "dependsOn": ["PORT-017"],
+      "dependsOn": [
+        "PORT-017"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotMgr.cpp",
@@ -1469,7 +1502,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Fake-service matrix, lifecycle cancellation and measured offline/delayed world-tick impact."],
+      "validation": [
+        "Fake-service matrix, lifecycle cancellation and measured offline/delayed world-tick impact."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1483,8 +1518,10 @@
       ],
       "priority": 60,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-019.md. Learning and reflection remain Phase 4.",
-      "dependsOn": ["PORT-018"],
+      "notes": "Card: docs/bots/ralph/companion-port/port-019.md. Implemented (2026-09-16): Companion/Personality.h declared profiles (Reckless/Cautious), FollowChase/Expression preferences through validated Preference steps, PlayerBot.PersonalityProfile config, allowlisted Say with 15 s rate limit; value suite plus test_bot_companion_personality A/B and model-absence baseline; wire kMaxPreference raised 255 -> 0xFFFF so the packed (id<<8)|value payload passes protocol validation (fixture-verified). Fixture re-verified green 2026-09-16 (A/B/C). passes held for head sign-off. Learning and reflection remain Phase 4.",
+      "dependsOn": [
+        "PORT-018"
+      ],
       "allowedScope": [
         "src/game/PlayerBots/Companion/",
         "docker/personality-service/",
@@ -1496,7 +1533,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Deterministic profile A/B, conflict, sanitization, rate-limit and fallback tests."],
+      "validation": [
+        "Deterministic profile A/B, conflict, sanitization, rate-limit and fallback tests."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1511,8 +1550,10 @@
       ],
       "priority": 61,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-020.md. Learning history and social memory remain Phase 4.",
-      "dependsOn": ["PORT-019"],
+      "notes": "Card: docs/bots/ralph/companion-port/port-020.md. Implemented (2026-09-16): bot_personality versioned row in the ordered character updater (schema 1, declared profile id); roster join with AcceptPersisted fail-closed plus first-login config seed that never overwrites a persisted or rejected row; PlayerBotAI reads the persisted identity so config changes never reassign a personality. Value suite extended; test_bot_companion_personality_persist proves seed/restart/tamper behavior in one isolated project (gen-3 container isolation repair 2026-09-16; re-run green). passes held for head sign-off. Learning history and social memory remain Phase 4.",
+      "dependsOn": [
+        "PORT-019"
+      ],
       "allowedScope": [
         "sql/database_updates/character/",
         "src/game/PlayerBots/Companion/",
@@ -1525,7 +1566,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Idempotent migration and disposable restart, recall, restore and invalid-version tests."],
+      "validation": [
+        "Idempotent migration and disposable restart, recall, restore and invalid-version tests."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1539,8 +1582,10 @@
       ],
       "priority": 62,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-021.md. Provider adapter only; the world server does not manage model processes or GPU allocation.",
-      "dependsOn": ["PORT-020"],
+      "notes": "Card: docs/bots/ralph/companion-port/port-021.md. Implemented (2026-09-16): real_planner value adapter + host-side real_planner_server (strict JSON schema, closed no-target action vocabulary, versioned digest-pinned primer, single-flight model call, Hold fallback for offline/busy/timeout/malformed); model_client stdlib OpenAI-compatible client with key-file auth; capture policy + round-consumption order repair documented in planner-protocol.md (fetch-before-submit so the 10 s production tick can consume rounds); value suite test_companion_real_planner_value; runtime fixture test_bot_companion_real_planner (offline/timeout/schema/malformed/busy phases + optional live round); measure_candidates.py harness for the blocked candidate comparison (shared-model concurrency with the active head session). Candidate model selection awaits operator-run measurement; passes held for head sign-off.",
+      "dependsOn": [
+        "PORT-020"
+      ],
       "allowedScope": [
         "docker/personality-service/",
         "docker/"
@@ -1550,7 +1595,9 @@
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Real-adapter contract, one measured current response, sensitive-data inspection and busy/offline/malformed/stale fallback tests."],
+      "validation": [
+        "Real-adapter contract, one measured current response, sensitive-data inspection and busy/offline/malformed/stale fallback tests."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1565,16 +1612,22 @@
       "priority": 63,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-022.md. Raw transcripts are not persisted by default and prompt-injection text is never echoed.",
-      "dependsOn": ["PORT-021"],
-      "allowedScope": ["src/game/PlayerBots/Companion/",
+      "dependsOn": [
+        "PORT-021"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
         "docker/personality-service/",
-        "docker/"],
+        "docker/"
+      ],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Fake- and real-adapter fixtures for a greeting, a random question, a personality-distinct reply, addressed/unaddressed messages, party leave/rejoin, rate/length/sanitization, timeout/malformed/stale responses, and concurrent combat with no world-thread delay or gameplay action."],
+      "validation": [
+        "Fake- and real-adapter fixtures for a greeting, a random question, a personality-distinct reply, addressed/unaddressed messages, party leave/rejoin, rate/length/sanitization, timeout/malformed/stale responses, and concurrent combat with no world-thread delay or gameplay action."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1589,18 +1642,24 @@
       "priority": 64,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-023.md. The owning card records the exact quest, prerequisites, giver/finisher, objective types and group-credit rules from current Turtle data.",
-      "dependsOn": ["PORT-022"],
-      "allowedScope": ["src/game/PlayerBots/PlayerBotAI.cpp",
+      "dependsOn": [
+        "PORT-022"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
         "src/game/PlayerBots/PlayerBotAI.h",
         "src/game/PlayerBots/Companion/",
         "src/game/CMakeLists.txt",
-        "docker/"],
+        "docker/"
+      ],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Disposable eligible/ineligible pair fixture, normal acceptance, supported kill or loot credit, Hold and party-loss interruption, death/recovery, turn-in/reward, restart persistence, and separate player/companion state evidence."],
+      "validation": [
+        "Disposable eligible/ineligible pair fixture, normal acceptance, supported kill or loot credit, Hold and party-loss interruption, death/recovery, turn-in/reward, restart persistence, and separate player/companion state evidence."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1615,17 +1674,23 @@
       "priority": 65,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-024.md. One loot-distribution policy fixed before implementation, with declared classes/slots and an explicit deterministic upgrade comparison.",
-      "dependsOn": ["PORT-023"],
-      "allowedScope": ["src/game/PlayerBots/Companion/",
+      "dependsOn": [
+        "PORT-023"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
         "src/game/PlayerBots/PlayerBotAI.h",
-        "docker/"],
+        "docker/"
+      ],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Earned-loot upgrade, non-upgrade rejection, protected-item safety, party leave/rejoin with no free gear, and restart persistence fixtures."],
+      "validation": [
+        "Earned-loot upgrade, non-upgrade rejection, protected-item safety, party leave/rejoin with no free gear, and restart persistence fixtures."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1640,17 +1705,23 @@
       "priority": 66,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-025.md. Protected and sellable item classes, the free-slot threshold, notification cadence and vendor radius are fixed by the owning card.",
-      "dependsOn": ["PORT-024"],
-      "allowedScope": ["src/game/PlayerBots/Companion/",
+      "dependsOn": [
+        "PORT-024"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
         "src/game/PlayerBots/PlayerBotAI.cpp",
         "src/game/PlayerBots/PlayerBotAI.h",
-        "docker/"],
+        "docker/"
+      ],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Threshold and reporting-rate fixtures, protected-item safety, approved-junk sale through normal APIs, vendor reachability bounds, and post-sale money/inventory persistence."],
+      "validation": [
+        "Threshold and reporting-rate fixtures, protected-item safety, approved-junk sale through normal APIs, vendor reachability bounds, and post-sale money/inventory persistence."
+      ],
       "executionMode": "bounded-local-worker",
       "trackingJiraKey": "KAP-558"
     },
@@ -1665,15 +1736,21 @@
       "priority": 67,
       "passes": false,
       "notes": "Card: docs/bots/ralph/companion-port/port-026.md. Hosted acceptance only; QA worker must not edit source.",
-      "dependsOn": ["PORT-025"],
-      "allowedScope": ["docs/bots/ralph/companion-port/phase-2-handoff.md",
-        "docs/bots/ralph/prd.json"],
+      "dependsOn": [
+        "PORT-025"
+      ],
+      "allowedScope": [
+        "docs/bots/ralph/companion-port/phase-2-handoff.md",
+        "docs/bots/ralph/prd.json"
+      ],
       "jiraKey": null,
       "issueType": "Story",
       "headReviewRequired": true,
       "jiraStatus": "Not created",
       "milestone": "phase-2-personality",
-      "validation": ["Full deterministic gates, Phase 1/2 regressions, fake- and real-service matrices, party lifecycle and persistence, quest/equipment/bag acceptance, read-only QA and bounded client evidence."],
+      "validation": [
+        "Full deterministic gates, Phase 1/2 regressions, fake- and real-service matrices, party lifecycle and persistence, quest/equipment/bag acceptance, read-only QA and bounded client evidence."
+      ],
       "executionMode": "hosted-acceptance",
       "trackingJiraKey": "KAP-558"
     }
