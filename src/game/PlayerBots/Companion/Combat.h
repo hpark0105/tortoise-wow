@@ -37,7 +37,7 @@ namespace Combat
 // ---------------------------------------------------------------------------
 // Engagement source and per-tick request
 // ---------------------------------------------------------------------------
-enum class Source { Assist, ContinueCombat, Defend };
+enum class Source { Assist, ContinueCombat, Defend, Damage };
 
 // Values only: the target GUID, the source intent, the order generation and
 // the engagement distance limit. The executor re-resolves the target from
@@ -63,6 +63,8 @@ enum class Reject
     CannotAttack,
     NotDefendTarget,  // defend: no live attack evidence on a targetable unit
     NotCurrentTarget, // continue-combat: neither the current victim nor the held target
+    NotEstablishedTarget, // damage: not the declared tank's established target
+    TargetUnderCC,    // damage: the target holds a controlling aura
     NoLos,
     OutOfRange,
 };
@@ -79,6 +81,8 @@ inline const char* RejectName(Reject r)
         case Reject::CannotAttack:     return "cannot-attack";
         case Reject::NotDefendTarget:  return "not-defend-target";
         case Reject::NotCurrentTarget: return "not-current-target";
+        case Reject::NotEstablishedTarget: return "not-established-target";
+        case Reject::TargetUnderCC:    return "target-under-cc";
         case Reject::NoLos:            return "no-los";
         case Reject::OutOfRange:       return "out-of-range";
     }
@@ -105,6 +109,12 @@ struct TargetSnapshot
     bool victimIsProtected = false; // its victim is me or the owner
     bool attackingMe = false;       // me is in its attacker set
     bool attackingOwner = false;    // the owner is in its attacker set
+    // Damage evidence (PORT-016): the target is still the declared
+    // tank's established target (the tank is its victim, or the tank's
+    // threat reaches the switch margin against the victim's), and it
+    // does not hold a controlling aura (crowd-control preservation).
+    bool establishedTarget = false;
+    bool targetUnderCC = false;
 };
 
 // A unit is a legal defend target when it is not friendly and either
@@ -149,6 +159,16 @@ inline Verdict Verify(Request const& req, TargetSnapshot const& s)
         case Source::Defend:
             if (!DefendTargetLegal(s))
                 return {false, Reject::NotDefendTarget};
+            break;
+        case Source::Damage:
+            if (!s.canAttack)
+                return {false, Reject::CannotAttack};
+            if (s.friendly)
+                return {false, Reject::Friendly};
+            if (s.targetUnderCC)
+                return {false, Reject::TargetUnderCC};
+            if (!s.establishedTarget)
+                return {false, Reject::NotEstablishedTarget};
             break;
     }
     if (req.source == Source::ContinueCombat)

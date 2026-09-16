@@ -49,6 +49,9 @@ static void SetCandidate(CC::Observation& o, CC::Action a)
         case CC::Action::Loot:
             o.lootTarget = 44;
             break;
+        case CC::Action::Damage:
+            o.damageTarget = 55;
+            break;
         default:
             break;
     }
@@ -63,6 +66,7 @@ static void TestSingleCandidates()
         {CC::Action::Assist, 22},
         {CC::Action::Defend, 33},
         {CC::Action::Loot, 44},
+        {CC::Action::Damage, 55},
     };
     for (auto const& s : singles)
     {
@@ -89,27 +93,34 @@ static void TestSingleCandidates()
 
 static void TestPriorityEdges()
 {
-    // The complete documented priority, all 15 pairwise edges:
-    // Hold > Assist > ContinueCombat > Defend > Loot > Follow.
+    // The complete documented priority, all 21 pairwise edges:
+    // Hold > Assist > ContinueCombat > Defend > Damage > Loot > Follow.
     struct { CC::Action higher; CC::Action lower; } const edges[] = {
         {CC::Action::Hold, CC::Action::Assist},
         {CC::Action::Hold, CC::Action::ContinueCombat},
         {CC::Action::Hold, CC::Action::Defend},
         {CC::Action::Hold, CC::Action::Loot},
+        {CC::Action::Hold, CC::Action::Damage},
         {CC::Action::Hold, CC::Action::Follow},
         {CC::Action::Assist, CC::Action::ContinueCombat},
         {CC::Action::Assist, CC::Action::Defend},
         {CC::Action::Assist, CC::Action::Loot},
+        {CC::Action::Assist, CC::Action::Damage},
         {CC::Action::Assist, CC::Action::Follow},
         {CC::Action::ContinueCombat, CC::Action::Defend},
         {CC::Action::ContinueCombat, CC::Action::Loot},
+        {CC::Action::ContinueCombat, CC::Action::Damage},
         {CC::Action::ContinueCombat, CC::Action::Follow},
         {CC::Action::Defend, CC::Action::Loot},
+        {CC::Action::Defend, CC::Action::Damage},
         {CC::Action::Defend, CC::Action::Follow},
+        {CC::Action::Damage, CC::Action::Loot},
+        {CC::Action::Damage, CC::Action::Follow},
         {CC::Action::Loot, CC::Action::Follow},
     };
-    // indexed by enum order: None, Hold, Follow, ContinueCombat, Assist, Loot, Defend
-    uint64_t const targetFor[7] = {0, 0, 0, 11, 22, 44, 33};
+    // indexed by enum order: None, Hold, Follow, ContinueCombat, Assist,
+    // Loot, Defend, Damage
+    uint64_t const targetFor[8] = {0, 0, 0, 11, 22, 44, 33, 55};
     for (auto const& e : edges)
     {
         CC::Observation o;
@@ -142,7 +153,7 @@ static void TestVersioning()
 {
     CC::Observation o;
     CHECK(o.version == CC::kObservationVersion);
-    CHECK(CC::kObservationVersion == 1);
+    CHECK(CC::kObservationVersion == 2); // PORT-016: damageTarget added
     CC::Intent i{CC::Action::Follow, 1, 0};
     CHECK(i.version == CC::kDirectiveVersion);
     CHECK(CC::kDirectiveVersion == 1);

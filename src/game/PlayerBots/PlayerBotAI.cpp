@@ -1314,6 +1314,133 @@ void PlayerBotAI::HealerTriageStep(Companion::Healer::Observation const& obs,
                        Companion::Combat::CastRejectName(report.reject));
 }
 
+// ---------------------------------------------------------------------------
+// PORT-016 (KAP-558): one deterministic damage policy for the single
+// declared melee build (the declared matrix is Companion/Damage.h).
+// The damage companion engages only the declared tank's established
+// target, and only after the pull-ownership (tank threat) gate; while
+// the target holds a controlling aura it neither engages nor keeps
+// it (crowd-control preservation). The engagement runs through the
+// shared combat executor (Source::Damage), the offense step is the
+// common cast-or-attack path (the per-class table is the declared
+// damage matrix), and every cast is reported through the PORT-012
+// cast outcome vocabulary. Failure cases (missing tank, insufficient
+// threat, CC, owner loss, unreachable, unsupported class) are
+// bounded wait/follow; the policy never selects the nearest hostile.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::IsDeclaredDamage() const
+{
+    if (!me)
+        return false;
+    return me->GetClass() == Companion::Damage::kDeclaredDamageClass &&
+           me->GetLevel() >= Companion::Damage::kDeclaredDamageMinLevel;
+}
+
+Unit* PlayerBotAI::FindDeclaredTank() const
+{
+    if (!me || !me->GetMap() || !me->GetGroup())
+        return nullptr;
+    Group* group = me->GetGroup();
+    for (auto const& slot : group->GetMemberSlots())
+    {
+        Player* member = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, slot.guid.GetCounter()));
+        if (!member || member == me || !member->IsAlive() || !member->IsInWorld())
+            continue;
+        if (member->GetClass() == Companion::Tank::kDeclaredTankClass &&
+            member->GetLevel() >= Companion::Tank::kDeclaredTankMinLevel &&
+            member->HasSpell(Companion::Tank::kDeclaredTankTaunt))
+            return member;
+    }
+    return nullptr;
+}
+
+bool PlayerBotAI::TargetUnderCC(Unit* unit) const
+{
+    // PORT-016 declared preservation set (the pinned core AuraType
+    // values listed in Companion/Damage.h): any controlling aura from
+    // any source marks the target controlled; the damage source
+    // waits/follows instead of dealing damage (the conservative
+    // ambiguity resolution).
+    if (!unit)
+        return true;
+    return unit->HasAuraType(SPELL_AURA_MOD_STUN) ||
+           unit->HasAuraType(SPELL_AURA_MOD_ROOT) ||
+           unit->HasAuraType(SPELL_AURA_MOD_CHARM) ||
+           unit->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
+           unit->HasAuraType(SPELL_AURA_MOD_FEAR) ||
+           unit->HasAuraType(SPELL_AURA_MOD_PACIFY) ||
+           unit->HasAuraType(SPELL_AURA_TRANSFORM) ||
+           unit->HasAuraType(SPELL_AURA_FEIGN_DEATH);
+}
+
+Companion::Damage::Observation PlayerBotAI::FillDamageObservation() const
+{
+    Companion::Damage::Observation o;
+    if (!me || !me->GetMap())
+        return o;
+    o.damageGuid = me->GetGUIDLow();
+    o.held = _held;
+    o.ownerAvailable = IsFollowOwnerAvailable();
+    if (!o.ownerAvailable)
+        return o;
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner)
+        return o;
+    Unit* tank = FindDeclaredTank();
+    if (!tank)
+        return o; // missing tank: bounded wait/follow
+    o.tankGuid = tank->GetGUIDLow();
+    Creature* target = tank->GetVictim() ? tank->GetVictim()->ToCreature() : nullptr;
+    if (!target || !target->IsAlive() || !target->IsInWorld())
+        return o; // the tank holds no established target yet
+    o.targetGuid = target->GetGUIDLow();
+    o.targetRaw = target->GetObjectGuid().GetRawValue();
+    o.distance = me->GetDistance(target);
+    o.canAttack = me->CanAttack(target);
+    o.inLos = me->IsWithinLOSInMap(target);
+    o.targetUnderCC = TargetUnderCC(target);
+    o.targetHasThreatList = target->CanHaveThreatList();
+    if (o.targetHasThreatList)
+    {
+        o.tankThreat = (uint32)target->GetThreatManager().getThreat(tank, false);
+        o.tankIsVictim = (target->GetVictim() == tank);
+        if (!o.tankIsVictim)
+        {
+            Unit* victim = target->GetVictim();
+            if (victim)
+                o.victimThreat = (uint32)target->GetThreatManager().getThreat(victim, false);
+        }
+    }
+    return o;
+}
+
+bool PlayerBotAI::IsEstablishedTankTarget(Creature* target) const
+{
+    if (!me || !target)
+        return false;
+    Unit* tank = FindDeclaredTank();
+    if (!tank)
+        return false;
+    // Reuse the pure decision on a fresh value snapshot: the margin
+    // math lives in Companion/Damage.h (no float, no duplication).
+    Companion::Damage::Observation o;
+    o.tankGuid = tank->GetGUIDLow();
+    o.targetGuid = target->GetGUIDLow();
+    o.targetRaw = target->GetObjectGuid().GetRawValue();
+    o.targetHasThreatList = target->CanHaveThreatList();
+    if (!o.targetHasThreatList)
+        return false;
+    o.tankIsVictim = (target->GetVictim() == tank);
+    o.tankThreat = (uint32)target->GetThreatManager().getThreat(tank, false);
+    if (!o.tankIsVictim)
+    {
+        Unit* victim = target->GetVictim();
+        if (victim)
+            o.victimThreat = (uint32)target->GetThreatManager().getThreat(victim, false);
+    }
+    return Companion::Damage::PullEstablished(o);
+}
+
 uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
 {
     if (!target)
@@ -2361,6 +2488,53 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
                           : intent.action == Companion::Action::Assist ? "assist"
                           : "no goal");
     }
+    // PORT-016 (KAP-558): declared damage tank-pull assist. Fires only
+    // when the selection would otherwise be Follow or Loot (no hold,
+    // assist, live combat or defend), like the defend fill: the only
+    // candidate target is the declared tank's established victim and
+    // the tank-pull discipline (Companion/Damage.h) decides when the
+    // damage companion engages (threat gate, crowd-control
+    // preservation, reach). The Damage intent runs through the shared
+    // combat executor; once acquired, the fight persists as
+    // ContinueCombat through the live slot.
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot) &&
+        IsDeclaredDamage())
+    {
+        Companion::Damage::Observation const dmgObs = FillDamageObservation();
+        if (Companion::Damage::Select(dmgObs).action == Companion::Damage::Action::Damage)
+        {
+            observation.damageTarget = dmgObs.targetGuid;
+            intent = Companion::Select(observation);
+            // The policy carries the low GUID (value contract, log
+            // fixture); the shared executor looks up packed object
+            // GUIDs (the assist contract), so the adapter hands it the
+            // packed form here, exactly like the assist branch.
+            if (dmgObs.targetRaw)
+                intent.target = dmgObs.targetRaw;
+        }
+        else
+        {
+            // [Damage] wait line (2 s cadence, debug only): why the
+            // damage companion is not engaging. established:1 with
+            // cc:1 is the crowd-control hold; established:0 is the
+            // pull gate (no tank, no established target, or
+            // insufficient tank threat).
+            _damageWaitTimer += diff;
+            if (_damageWaitTimer >= 2000)
+            {
+                _damageWaitTimer = 0;
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString(
+                        "[Damage] wait GUID:%u tank:%u target:%u established:%u cc:%u "
+                        "canAttack:%u los:%u dist:%.2f held:%u owner:%u",
+                        me->GetGUIDLow(), dmgObs.tankGuid, dmgObs.targetGuid,
+                        (uint32)Companion::Damage::PullEstablished(dmgObs),
+                        (uint32)dmgObs.targetUnderCC, (uint32)dmgObs.canAttack,
+                        (uint32)dmgObs.inLos, dmgObs.distance,
+                        (uint32)dmgObs.held, (uint32)dmgObs.ownerAvailable);
+            }
+        }
+    }
     // PORT-015 (KAP-558): declared healer triage runs on this tick's
     // budget, before behavior execution: a hold or an owner loss
     // (the card's failure cases) suppresses healing exactly like it
@@ -2620,6 +2794,15 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
                 snap.isVictim = me->GetVictim() == target;
                 snap.isHeld = GetAliveHeldTarget() == target;
             }
+            if (req.source == Companion::Combat::Source::Damage && snap.alive && snap.inWorld)
+            {
+                // PORT-016: the pull-discipline facts, re-resolved
+                // from the live world immediately before the
+                // engagement is honored (the adapter revalidation
+                // the shared Verify consumes).
+                snap.targetUnderCC = TargetUnderCC(target);
+                snap.establishedTarget = IsEstablishedTankTarget(target->ToCreature());
+            }
         }
         if (snap.alive && snap.inWorld)
         {
@@ -2660,6 +2843,17 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
                     me->CombatStop();
                 _targets.ReleaseLive();
                 break;
+            case Companion::Combat::Source::Damage:
+                _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
+                if (me->GetVictim())
+                    me->CombatStop();
+                _targets.ReleaseLive();
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[Damage] target dropped GUID:%u target:%u reject:%s",
+                                   me->GetGUIDLow(),
+                                   (uint32)ObjectGuid(req.target).GetCounter(),
+                                   Companion::Combat::RejectName(verdict.reject));
+                break;
             case Companion::Combat::Source::Defend:
                 ClearDefendTarget("target invalid");
                 break;
@@ -2681,6 +2875,11 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
                 _targets.ReleaseLive();
                 break;
             case Companion::Combat::Source::ContinueCombat:
+                if (me->GetVictim())
+                    me->CombatStop();
+                _targets.ReleaseLive();
+                break;
+            case Companion::Combat::Source::Damage:
                 if (me->GetVictim())
                     me->CombatStop();
                 _targets.ReleaseLive();
@@ -2712,6 +2911,9 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
         else if (req.source == Companion::Combat::Source::Defend)
             sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        else if (req.source == Companion::Combat::Source::Damage)
+            sLog.outString("[Damage] fighting GUID:%u target:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
         else
             sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
@@ -2738,6 +2940,16 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
         me->GetMotionMaster()->MoveChase(target);
     else
         me->SetFacingToObject(target);
+    // PORT-016 (KAP-558): the damage companion's pull evidence line,
+    // sampled on the same 2 s combat pacing: the established-target
+    // and crowd-control facts at each offense step (the fixture
+    // contract, like the [Tank] threat line above).
+    if (IsDeclaredDamage() && sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Damage] pull GUID:%u t:%u established:%u cc:%u victim:%u",
+                       me->GetGUIDLow(), target->GetGUIDLow(),
+                       (uint32)IsEstablishedTankTarget(target->ToCreature()),
+                       (uint32)TargetUnderCC(target),
+                       target->GetVictim() ? (uint32)target->GetVictim()->GetGUIDLow() : 0);
     // PORT-014 (KAP-558): the declared tank matrix owns the assist offense
     // step: measured normal threat, a taunt when the protected party member
     // holds it, and the ordinary attack otherwise. The [Tank] threat line
@@ -2786,6 +2998,17 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
         ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Defend,
                                                                                           intent.generation, 35.0f}, diff);
+        return;
+    }
+    if (intent.action == Companion::Action::Damage)
+    {
+        // PORT-016 (KAP-558): the damage engagement runs through the
+        // shared executor; a vanished, out-of-reach, controlled or
+        // no-longer-established target drops the engagement (combat
+        // and the live slot released) and the prior order resumes.
+        ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Damage,
+                                                                                          intent.generation,
+                                                                                          Companion::Damage::kEngageDistance}, diff);
         return;
     }
     if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)

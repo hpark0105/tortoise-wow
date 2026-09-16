@@ -13,7 +13,7 @@
 namespace Companion
 {
 
-inline constexpr uint32_t kObservationVersion = 1;
+inline constexpr uint32_t kObservationVersion = 2; // PORT-016: damageTarget added
 
 struct Observation
 {
@@ -25,6 +25,7 @@ struct Observation
     uint64_t assistTarget = 0;   // PORT-005: owner-selected hostile; the executor re-resolves it
     uint64_t lootTarget = 0;     // PORT-007: dead, in-world corpse to loot; the executor re-resolves it
     uint64_t defendTarget = 0;   // PORT-006: owner-enabled reactive defend candidate; the executor re-resolves it
+    uint64_t damageTarget = 0;   // PORT-016: the declared tank's established victim; the executor re-resolves it
     bool following = false;      // an active follow goal exists
     bool held = false;           // an owner hold is active
     bool ownerAvailable = false; // the follow leader resolved to an available owner this tick
