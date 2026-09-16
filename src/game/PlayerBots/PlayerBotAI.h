@@ -8,6 +8,7 @@
 #include "Companion/Tank.h"
 #include "Companion/Healer.h"
 #include "Companion/Damage.h"
+#include "Companion/PlannerTransport.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -98,6 +99,15 @@ class PlayerBotAI: public PlayerAI
         uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
         bool _followReached = false;
         uint32 _followDebugTimer = 0;
+        // PORT-018 (KAP-558): shared party planner round state (the
+        // transport lives in PlayerBotMgr; disabled unless a service
+        // URL is configured).
+        uint32 _plannerLeaderGuid = 0;
+        uint32 _plannerGroupId = 0;
+        uint32 _plannerLastSubmitMs = 0;
+        uint32 _plannerReqId = 1;
+        Companion::Planner::Step _plannerOffer = {};
+        bool _plannerOfferValid = false;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
@@ -113,6 +123,7 @@ class PlayerBotAI: public PlayerAI
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
+        void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
         bool IsFollowOwnerAvailable() const;
         // KAP-558 hardening: an owned companion without an active order
         // follows its owner instead of running the legacy auto-hunt

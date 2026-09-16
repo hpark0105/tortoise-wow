@@ -8,6 +8,8 @@
 #include "ObjectMgr.h"
 #include "MoveSpline.h"
 #include "PlayerBotMgr.h"
+#include "ObjectAccessor.h"
+#include "Timer.h"
 #include "Group.h"
 #include "WorldPacket.h"
 #include "Map.h"
@@ -1875,6 +1877,15 @@ void PlayerBotAI::Remove()
         return;
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot] AI removed GUID:%u", me->GetGUIDLow());
+    // PORT-018 (KAP-558): our departure is a party-session change; kill
+    // any outstanding round we tracked so a stale offer cannot cross a
+    // membership boundary.
+    if (_plannerLeaderGuid)
+        sPlayerBotMgr.PlannerTransport().InvalidateSession(_plannerLeaderGuid);
+    _plannerGroupId = 0;
+    _plannerLeaderGuid = 0;
+    _plannerLastSubmitMs = 0;
+    _plannerOfferValid = false;
     me->setAI(nullptr);
     me = nullptr;
 }
@@ -2340,8 +2351,102 @@ Player* PlayerBotAI::FindOwnerByAccount() const
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// PORT-018 (KAP-558): one shared planner round per party.
+//
+// Eligibility is accepted player-party membership only: an owned
+// companion in a group led by a live player (never a bot). Any party
+// signature change (group id or leader) invalidates the transport
+// session. The lowest-GUID owned companion builds and submits the
+// request (queue depth 1, newest wins); every owned companion then
+// fetches and records its own step. Transport offers are recorded,
+// not executed: the deterministic policies own behavior until
+// PORT-019 maps them.
+// ---------------------------------------------------------------------------
+void PlayerBotAI::PlannerRoundStep(uint32 diff)
+{
+    (void)diff;
+    if (!IsOwnedCompanion() || !me || !me->GetGroup())
+        return;
+    Group const* group = me->GetGroup();
+    uint32 const groupId = group->GetId();
+    uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
+    if (!leaderLow || sPlayerBotMgr.FindBotByGuid(leaderLow))
+        return; // bot-led: no player owner to plan for
+    Companion::Planner::PlannerTransport& transport =
+        sPlayerBotMgr.PlannerTransport();
+    if (groupId != _plannerGroupId || leaderLow != _plannerLeaderGuid)
+    {
+        if (_plannerLeaderGuid && _plannerLeaderGuid != leaderLow)
+            transport.InvalidateSession(_plannerLeaderGuid);
+        _plannerGroupId = groupId;
+        _plannerLeaderGuid = leaderLow;
+        _plannerLastSubmitMs = 0; // fresh session: immediate first round
+    }
+    uint32 const nowMs = WorldTimer::getMSTime();
+    // Collect the party's owned companions; the lowest-GUID one submits.
+    uint32 submitterLow = 0;
+    uint32 botCount = 0;
+    uint32 botLows[Companion::Planner::kMaxPartyBots] = {};
+    uint8_t botCls[Companion::Planner::kMaxPartyBots] = {};
+    for (Group::MemberSlot const& slot : group->GetMemberSlots())
+    {
+        uint32 const slotLow = slot.guid.GetCounter();
+        Player* member = sObjectAccessor.FindPlayer(ObjectGuid(slotLow));
+        PlayerBotEntry* be = member ? sPlayerBotMgr.FindBotByGuid(slotLow) : nullptr;
+        if (!be || !be->ownerAccountId)
+            continue;
+        if (!submitterLow || slotLow < submitterLow)
+            submitterLow = slotLow;
+        if (botCount < Companion::Planner::kMaxPartyBots)
+        {
+            botLows[botCount] = slotLow;
+            botCls[botCount] = member->GetClass();
+            ++botCount;
+        }
+    }
+    if (submitterLow == me->GetGUIDLow() && botCount > 0 &&
+        (_plannerLastSubmitMs == 0 ||
+         nowMs - _plannerLastSubmitMs >= Companion::Planner::kPlannerPaceMs))
+    {
+        Companion::Planner::Envelope env;
+        env.requestId = ++_plannerReqId;
+        env.ownerGuid = leaderLow;
+        env.observationVersion = Companion::kObservationVersion;
+        env.captureTimeMs = nowMs;
+        env.stepCount = 0;
+        env.totalSize = Companion::Planner::kRequestBytes;
+        Companion::Planner::RequestBody body;
+        body.generation = _followSeq;
+        body.flags = (_held ? 0x01 : 0x00) | (_following ? 0x02 : 0x00) |
+                     (IsFollowOwnerAvailable() ? 0x04 : 0x00);
+        body.botCount = botCount;
+        for (uint32 i = 0; i < botCount; ++i)
+        {
+            body.bots[i].botGuid = botLows[i];
+            body.bots[i].cls = botCls[i];
+        }
+        uint8_t req[Companion::Planner::kRequestBytes];
+        Companion::Planner::EncodeEnvelope(req, env);
+        Companion::Planner::EncodeRequestBody(req + Companion::Planner::kEnvelopeBytes, body);
+        if (transport.SubmitShared(leaderLow, req, Companion::Planner::kRequestBytes, nowMs))
+            _plannerLastSubmitMs = nowMs;
+    }
+    // Record-only consumption (PORT-019 maps offers to behavior): every
+    // owned companion fetches its own step from the shared round.
+    Companion::Planner::Step offer;
+    _plannerOfferValid =
+        transport.FetchOffer(leaderLow, me->GetGUIDLow(), nowMs, offer);
+    if (_plannerOfferValid)
+        _plannerOffer = offer;
+}
+
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
+    // PORT-018 (KAP-558): planner rounds key on party membership, not
+    // order state, so the round step runs before the no-order early
+    // return.
+    PlannerRoundStep(diff);
     if (!_following && !_held && !_assistTargetGuid)
         return false;
     Companion::Observation observation;
