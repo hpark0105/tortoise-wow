@@ -78,6 +78,11 @@ struct ProfileDecl
     Profile profile;
     float chaseYd[kChaseValueCount];
     char const* exprLine[kExpressionSlotCount];
+    // PORT-025: deterministic status lines (one per pressure
+    // episode, one for the no-vendor failure report); catalog content,
+    // not persisted state, so the schema version is unchanged.
+    char const* pressureLine;
+    char const* noVendorLine;
 };
 
 // Both declared profiles allow both ids and the full value sets; they
@@ -89,13 +94,16 @@ inline ProfileDecl const& Decl(Profile p)
 {
     static ProfileDecl const reckless = {
         Profile::Reckless, {15.0f, 20.0f, 25.0f},
-        {"Let's go, stay behind me!", "I'll take the hits!"}};
+        {"Let's go, stay behind me!", "I'll take the hits!"},
+        "Ugh, my bags are full!", "No vendor in sight! Keeping them all for now."};
     static ProfileDecl const cautious = {
         Profile::Cautious, {25.0f, 30.0f, 35.0f},
-        {"I'll keep my distance.", "Stay close, stay safe."}};
+        {"I'll keep my distance.", "Stay close, stay safe."},
+        "My bags are nearly full; I need space.", "No vendor reachable; nothing has been sold."};
     static ProfileDecl const none = {
         Profile::None, {kChaseBaselineYd, kChaseBaselineYd, kChaseBaselineYd},
-        {"", ""}};
+        {"", ""},
+        "My bags are full.", "No vendor nearby; I will hold my bags."};
     switch (p)
     {
         case Profile::Reckless: return reckless;
@@ -119,6 +127,31 @@ inline bool MapExpressionLine(Profile p, uint8_t slot, char const*& outLine)
     if (p == Profile::None || slot >= kExpressionSlotCount)
         return false;
     char const* line = Decl(p).exprLine[slot];
+    if (!line || !line[0])
+        return false;
+    outLine = line;
+    return true;
+}
+
+// Map the deterministic bag-pressure status line. Unlike the
+// planner-driven Expression slot, the report itself is the
+// contract (one bounded line per pressure episode), so it maps
+// for every declared profile including the baseline.
+inline bool MapPressureLine(Profile p, char const*& outLine)
+{
+    char const* line = Decl(p).pressureLine;
+    if (!line || !line[0])
+        return false;
+    outLine = line;
+    return true;
+}
+
+// Map the deterministic no-vendor failure report line (rate
+// limited by the adapter; the companion waits for owner
+// guidance without deleting or selling anything).
+inline bool MapNoVendorLine(Profile p, char const*& outLine)
+{
+    char const* line = Decl(p).noVendorLine;
     if (!line || !line[0])
         return false;
     outLine = line;

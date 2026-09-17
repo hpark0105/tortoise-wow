@@ -11,14 +11,14 @@
 namespace Companion
 {
 
-inline constexpr uint32_t kDirectiveVersion = 1;
+inline constexpr uint32_t kDirectiveVersion = 2; // PORT-025: Vendor action added
 
 // The complete behavior vocabulary. Hold, Assist, ContinueCombat, Defend,
 // Loot and Follow share the one documented priority in Policy::Select
-// (Hold > Assist > ContinueCombat > Defend > Damage > Loot > Follow);
+// (Hold > Assist > ContinueCombat > Defend > Damage > Vendor > Loot > Follow);
 // recovery (corpse reclaim) preempts behavior selection at the
 // lifecycle level and is not a behavior action.
-enum class Action { None, Hold, Follow, ContinueCombat, Assist, Loot, Defend, Damage };
+enum class Action { None, Hold, Follow, ContinueCombat, Assist, Loot, Defend, Damage, Vendor };
 
 struct Intent
 {

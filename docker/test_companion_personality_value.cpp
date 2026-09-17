@@ -106,6 +106,35 @@ int main()
     CHECK(!CP::MapExpressionLine(CP::Profile::None, 0, line));
     CHECK(!CP::MapExpressionLine(CP::Profile::Reckless, 2, line));
 
+    // -- PORT-025 status lines: bounded, distinct, all profiles map --
+    for (CP::Profile p2 : {CP::Profile::None, CP::Profile::Reckless, CP::Profile::Cautious})
+    {
+        CP::ProfileDecl const& d = CP::Decl(p2);
+        CHECK(d.pressureLine && d.pressureLine[0]);
+        CHECK(std::strlen(d.pressureLine) <= CP::kExprLineMaxLen);
+        CHECK(d.pressureLine[0] != '.');
+        CHECK(std::strstr(d.pressureLine, "\n") == nullptr);
+        CHECK(d.noVendorLine && d.noVendorLine[0]);
+        CHECK(std::strlen(d.noVendorLine) <= CP::kExprLineMaxLen);
+        CHECK(d.noVendorLine[0] != '.');
+        CHECK(std::strstr(d.noVendorLine, "\n") == nullptr);
+    }
+    CHECK(std::strcmp(CP::Decl(CP::Profile::Reckless).pressureLine,
+                      CP::Decl(CP::Profile::Cautious).pressureLine) != 0);
+    CHECK(std::strcmp(CP::Decl(CP::Profile::Reckless).noVendorLine,
+                      CP::Decl(CP::Profile::Cautious).noVendorLine) != 0);
+    {
+        char const* status = nullptr;
+        CHECK(CP::MapPressureLine(CP::Profile::Reckless, status) &&
+              std::strcmp(status, "Ugh, my bags are full!") == 0);
+        CHECK(CP::MapPressureLine(CP::Profile::None, status) &&
+              std::strcmp(status, "My bags are full.") == 0);
+        CHECK(CP::MapNoVendorLine(CP::Profile::Cautious, status) &&
+              std::strcmp(status, "No vendor reachable; nothing has been sold.") == 0);
+        CHECK(CP::MapNoVendorLine(CP::Profile::None, status) &&
+              std::strcmp(status, "No vendor nearby; I will hold my bags.") == 0);
+    }
+
     // -- names round-trip; unknowns fail to the baseline ----------------
     CHECK(CP::ProfileFromName("reckless") == CP::Profile::Reckless);
     CHECK(CP::ProfileFromName("cautious") == CP::Profile::Cautious);
