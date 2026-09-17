@@ -782,3 +782,22 @@ cross-ref 23891 on KAP-549):
 - No park-agent worker (park-head holds the model mutex); retrieval sync
   still MCP-error (embedding service down), direct-read fallback used, no
   sync counts claimed. Jira untouched.
+
+2026-09-17 PORT-026 tick-impact measurement (park-head local-Qwen):
+- Measured the card's "measured offline/delayed tick impact" item with four
+  sequential port-free labs (tortoise-local:dev 7f02bf27, same party
+  scenario, Perf.ProcessingTelemetry=5, 120 s steady-state windows, last 22
+  samples): A transport disabled, B offline (closed port: 5 timeouts + 2
+  60 s cooldowns), C delayed 400 ms (53 delivered offers), D timeout past
+  the 5000 ms deadline (4 timeouts + 2 cooldowns).
+- Result: no measurable tick degradation. proc p50 med 5 ms in all runs;
+  p95 med 6/6.5/7/6 ms (max 26-59 ms); p99 med 23-33 ms (max 83-220 ms);
+  tick interval med 50 ms in all runs; baseline A itself had one 250 ms
+  overflow-bucket sample. Transport retry, cooldown and timeout paths were
+  exercised without disturbing tick processing.
+- Evidence: local/port026-tick-impact-summary.json and
+  local/tortoise-bot-tick{a,b,c,d}-<hex>-<ts>/ (world.log, telemetry.log,
+  metrics.json); driver local/port026_tick_impact.py (gitignored).
+  Personal containers verified unchanged per run.
+- Acceptance doc addendum + handoff/card status updated; the tick item is
+  closed out of the pending list. Hosted acceptance remains pending.

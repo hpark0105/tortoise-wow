@@ -281,14 +281,19 @@ build, service integration, runtime or client acceptance is claimed here.
   test_bot_combat_xp (known 3-day flake; history retained under
   local/tortoise-bot-xp-*; rerun green on the old pinned image). Not run -
   hosted diff review, formal QA handoff with read-only worker, in-game
-  client evidence, Jira transitions, dedicated delayed-tick measurement
-  (all parked for hosted/operator).
+  client evidence, Jira transitions (all parked for hosted/operator).
 - Known risks: combat_xp engagement flake across 09-12..09-17 and across
   images (the lab pins tortoise-local:mvp003-review, not dev); the equipment
   fixture was stale against the PORT-025 junk matrix, so future matrix
-  changes must re-check lab filler items; no separate offline/delayed
-  tick-impact microbenchmark was run (transport + real-adapter labs cover
-  the operational-when-unavailable paths).
+  changes must re-check lab filler items; the tick-impact measurement
+  used 120 s windows with 22 samples per run, so it bounds rather than
+  exhausts tick-tail behavior.
+- Offline/delayed tick-impact measurement completed 2026-09-17 (four
+  port-free labs: disabled, offline, 400 ms delayed, timeout; 120 s
+  windows, Perf.ProcessingTelemetry=5, last 22 samples): no measurable
+  tick degradation (proc p95 med 6-7 ms vs 6 ms disabled baseline; tick
+  interval med 50 ms in every run). Evidence:
+  local/port026-tick-impact-summary.json.
 - Worker/retrieval: no park-agent worker (park-head holds the single-model
   mutex; the 27B at 127.0.0.1:8090 is this session's own backend).
   Retrieval sync unavailable: the bridge returns an MCP error on sync
