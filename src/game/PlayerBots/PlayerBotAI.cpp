@@ -406,7 +406,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 if (sPlayerBotMgr.IsDebugEnabled())
                     sLog.outString("[PlayerBot] no-order idle GUID:%u", me->GetGUIDLow());
             }
-            else if (Unit* target = me->SelectNearestTarget(30.0f))
+            else if (Unit* target = sPlayerBotMgr.IsAmbientAcquireEnabled()
+                                 ? me->SelectNearestTarget(30.0f) : nullptr)
             {
                 // Autonomous companions never initiate PvP. A hostile player
                 // may still be the current victim while defending; this guard
@@ -2576,6 +2577,143 @@ void PlayerBotAI::ConversationRoundStep()
                        (uint32)safe.size());
 }
 
+// ---------------------------------------------------------------------------
+// PORT-023 (KAP-558): one owner-driven cooperative quest action
+// per tick.
+//
+// The companion mirrors the owner for one declared supported quest
+// (PlayerBot.CooperativeQuestId). The value-only policy
+// (Companion/Quest.h) selects Accept or TurnIn from the snapshot;
+// this adapter re-validates everything live and calls the same
+// authoritative quest helpers the packet handlers use (accept:
+// CanTakeQuest/CanAddQuest/AddQuest; turn-in:
+// CanCompleteQuest/CompleteQuest/CanRewardQuest/RewardQuest).
+// Objective progression is normal combat participation - the
+// vanilla tap/group credit rules move both personal quest logs;
+// the companion never selects a quest, never leads, and never
+// fabricates credit.
+//
+// Gating: owned companions only; the owner (session account ==
+// the entry's owner account) must be a live member of the
+// companion's party; hold, combat or death suppresses the step
+// (death preempts at the lifecycle level in UpdateRecovery).
+// Leaving the party stops cooperative planning without erasing
+// the companion's persisted quest state.
+void PlayerBotAI::CooperativeQuestStep(uint32 diff)
+{
+    uint32 const questId = sPlayerBotMgr.GetCooperativeQuestId();
+    if (!questId || !IsOwnedCompanion() || !me || !me->IsAlive() || !me->GetMap())
+        return;
+    if (_coopQuestDenyTimer)
+    {
+        _coopQuestDenyTimer = (_coopQuestDenyTimer > diff) ? _coopQuestDenyTimer - diff : 0;
+        return;
+    }
+    Group* group = me->GetGroup();
+    if (!group)
+        return;
+    Player* owner = FindOwnerByAccount();
+    if (!owner || !group->IsMember(owner->GetObjectGuid()))
+        return; // owner loss or party loss: no cooperative planning
+    Quest const* qInfo = sObjectMgr.GetQuestTemplate(questId);
+    if (!qInfo)
+        return;
+    // The policy snapshot (value-only; Companion/Quest.h).
+    Companion::Quest::Observation observation;
+    observation.generation = _followSeq;
+    observation.myStatus = (uint8_t)Companion::Quest::MapQuestStatus((uint32)me->GetQuestStatus(questId));
+    observation.ownerStatus = (uint8_t)Companion::Quest::MapQuestStatus((uint32)owner->GetQuestStatus(questId));
+    QuestStatusData const* qStatus = me->GetQuestStatusData(questId);
+    observation.rewarded = (qStatus != nullptr && qStatus->m_rewarded);
+    observation.held = _held;
+    observation.inCombat = me->IsInCombat();
+    observation.ownerInParty = true;
+    observation.ownerAvailable = true;
+    // Nearest live quest creature within INTERACTION_DISTANCE (the
+    // accept and the turn-in anchor; the declared quest's giver and
+    // finisher share the one quest relation). The authoritative
+    // checks below re-validate before acting.
+    Creature* anchor = nullptr;
+    {
+        class CoopQuestAnchorCheck
+        {
+        public:
+            CoopQuestAnchorCheck(Player const* obj, uint32 questId)
+                : i_obj(obj), i_questId(questId) {}
+            WorldObject const& GetFocusObject() const { return *i_obj; }
+            bool operator()(Creature const* u)
+            {
+                if (!u->IsAlive() || !u->HasQuest(i_questId))
+                    return false;
+                return i_obj->IsWithinDistInMap(u, INTERACTION_DISTANCE);
+            }
+        private:
+            Player const* const i_obj;
+            uint32 i_questId;
+            CoopQuestAnchorCheck(CoopQuestAnchorCheck const&);
+        };
+        CoopQuestAnchorCheck check(me, questId);
+        MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
+        Cell::VisitGridObjects(me, searcher, INTERACTION_DISTANCE);
+    }
+    observation.giverAvailable = (anchor != nullptr);
+    observation.finisherAvailable = (anchor != nullptr);
+    Companion::Quest::Intent const intent = Companion::Quest::Select(observation);
+    if (intent.action == Companion::Quest::Action::None)
+        return;
+    // Re-validate against live state immediately before acting.
+    if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+        return;
+    if (intent.action == Companion::Quest::Action::Accept)
+    {
+        if (me->GetQuestStatus(questId) != QUEST_STATUS_NONE)
+            return; // the log moved between snapshot and act
+        if (me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
+        {
+            me->AddQuest(qInfo, anchor);
+            if (me->GetQuestStatus(questId) != QUEST_STATUS_NONE)
+            {
+                sLog.outString("[CoopQuest] accepted GUID:%u quest:%u ownerStatus:%u anchor:%u",
+                               me->GetGUIDLow(), questId,
+                               (uint32)observation.ownerStatus, anchor->GetEntry());
+                return;
+            }
+        }
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] accept denied GUID:%u quest:%u interact:%u take:%u add:%u",
+                           me->GetGUIDLow(), questId,
+                           me->CanInteractWithQuestGiver(anchor) ? 1 : 0,
+                           me->CanTakeQuest(qInfo, false) ? 1 : 0,
+                           me->CanAddQuest(qInfo, false) ? 1 : 0);
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+    // TurnIn (choice index 0: a socketless session cannot choose). When
+    // the last credit lands the engine already marks the quest
+    // COMPLETE, so the handler-shaped sequence applies: CompleteQuest
+    // only while still INCOMPLETE; the reward step only needs COMPLETE.
+    if (me->CanCompleteQuest(questId))
+        me->CompleteQuest(questId);
+    if (me->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+    {
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+    if (me->CanRewardQuest(qInfo, false))
+    {
+        uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
+        me->RewardQuest(qInfo, 0, anchor, true);
+        sLog.outString("[CoopQuest] turnin GUID:%u quest:%u xpBefore:%u xpAfter:%u",
+                       me->GetGUIDLow(), questId, xpBefore, me->GetUInt32Value(PLAYER_XP));
+    }
+    else
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] reward denied GUID:%u quest:%u", me->GetGUIDLow(), questId);
+        _coopQuestDenyTimer = 5000;
+    }
+}
+
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
     // PORT-018 (KAP-558): planner rounds key on party membership, not
@@ -2583,6 +2721,7 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // return.
     PlannerRoundStep(diff);
     ConversationRoundStep(); // PORT-022: consume one bounded reply, if any
+    CooperativeQuestStep(diff); // PORT-023: at most one cooperative quest action
     if (!_following && !_held && !_assistTargetGuid)
         return false;
     Companion::Observation observation;
@@ -3030,7 +3169,18 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
             snap.inWorld = target->IsInWorld();
             if (snap.alive && snap.inWorld)
             {
-                snap.canAttack = me->CanAttack(target);
+                // The assist contract is the owner's canonical gate
+                // (IsAssistLegalTarget): any non-friendly targetable
+                // creature is attackable, because quest mobs are usually
+                // passive wildlife. The non-forced CanAttack also
+                // requires faction hostility, which the real player
+                // melee path does not, so assist revalidation uses the
+                // forced form for player executors only; the
+                // ContinueCombat/Damage verdicts keep their reviewed
+                // semantics unchanged.
+                snap.canAttack = me->CanAttack(target,
+                                               me->IsPlayer() &&
+                                               req.source == Companion::Combat::Source::Assist);
                 snap.friendly = me->IsFriendlyTo(target);
                 snap.isVictim = me->GetVictim() == target;
                 snap.isHeld = GetAliveHeldTarget() == target;

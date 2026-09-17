@@ -112,7 +112,12 @@ class PlayerBotMgr
         bool IsChatBot(uint32 playerGuid);
         bool IsDebugEnabled() const { return confDebug; }
         float GetWanderRadius() const { return confWanderRadius; }
+        bool IsAmbientAcquireEnabled() const { return confAmbientAcquire; }
         uint32 GetQuestId() const { return confQuestId; }
+        // PORT-023 (KAP-558): one declared supported cooperative
+        // quest (0 = disabled); the companion mirrors the owner
+        // through the normal quest APIs only.
+        uint32 GetCooperativeQuestId() const { return confCooperativeQuestId; }
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
         // PORT-018 (KAP-558): the bounded nonblocking party-planner
@@ -192,7 +197,9 @@ class PlayerBotMgr
         std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
         uint32 confQuestId; // MVP-006: one declared supported quest (0 = disabled)
+        uint32 confCooperativeQuestId; // PORT-023: one declared supported cooperative quest (0 = disabled)
         float confWanderRadius; // PORT-007 lab: 0 = legacy frand(8,20); >0 = max idle-wander radius (yd)
+        bool confAmbientAcquire; // PORT-023 lab: ambient auto-hunt acquire gate (default on; lab owner fixture disables it)
         bool forceLogoutDelay;
 
         // MVP-002 (KAP-552) lab-only stale-completion probe, armed from
@@ -258,6 +265,25 @@ class PlayerBotMgr
         std::vector<PartyInviteScriptEvent> m_partyInviteScript;
         uint32 m_partyInviteScriptStartMs;
         size_t m_partyInviteScriptIdx;
+
+        // PORT-023 (KAP-558) lab-only deterministic owner quest
+        // script, armed from PlayerBot.QuestScript (default empty
+        // = disabled). Events are semicolon-separated
+        // <delayMs>:<issuerGuid>:<questId>:<phase> with phase
+        // "accept" or "turnin"; the clock starts when every
+        // issuer is online and each delivery runs the same
+        // authoritative quest helpers the packet handlers use.
+        struct QuestScriptEvent
+        {
+            uint32 delayMs;
+            uint32 issuerGuid;
+            uint32 questId;
+            bool turnin;
+        };
+        void UpdateQuestScript();
+        std::vector<QuestScriptEvent> m_questScript;
+        uint32 m_questScriptStartMs;
+        size_t m_questScriptIdx;
 
         bool enable;
         uint32 AllocateReservedBotAccount(); // TW-010: fresh id in reserved range (>= 1e9)

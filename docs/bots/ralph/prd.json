@@ -1641,7 +1641,7 @@
       ],
       "priority": 64,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-023.md. The owning card records the exact quest, prerequisites, giver/finisher, objective types and group-credit rules from current Turtle data.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-023.md. The owning card records the exact quest, prerequisites, giver/finisher, objective types and group-credit rules from current Turtle data. Implemented (2026-09-16): Companion/Quest.h value policy + CooperativeQuestStep world adapter + lab-only owner QuestScript driver + three disposable Compose labs (eligible/ineligible/death-recovery). Runtime hardening: PlayerBot.AmbientAcquire gate for the lab owner, forced-form CanAttack revalidation for assist, handler-shaped turn-in gates on both paths. Passes stays false pending final three-lab evidence and operator acceptance.",
       "dependsOn": [
         "PORT-022"
       ],
