@@ -288,6 +288,14 @@ namespace DBUpdater
             ModuleLogSuffix(migration.Module).c_str(), migration.Hash.c_str());
         std::string sqlString{ migration.FileData.begin(), migration.FileData.end() };
 
+        // Windows editors may save migration files with a UTF-8 BOM; the raw bytes
+        // would otherwise corrupt the first statement (ER_PARSE_ERROR).
+        if (sqlString.size() >= 3 &&
+            static_cast<unsigned char>(sqlString[0]) == 0xEF &&
+            static_cast<unsigned char>(sqlString[1]) == 0xBB &&
+            static_cast<unsigned char>(sqlString[2]) == 0xBF)
+            sqlString.erase(0, 3);
+
 
 
         if (!targetDatabase->BeginTransaction())
