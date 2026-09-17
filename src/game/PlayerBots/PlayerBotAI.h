@@ -12,11 +12,15 @@
 #include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
 #include "Companion/Quest.h"
+#include "Companion/Equipment.h"
+#include <utility>
+#include <vector>
 
 struct PlayerBotEntry;
 class WorldSession;
 class PlayerBotAI;
 class Creature;
+class Item;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 
@@ -67,6 +71,7 @@ class PlayerBotAI: public PlayerAI
         Companion::Combat::TargetSlots _targets;
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
+        uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
         Companion::Combat::Leash _pursuitLeash; // PORT-008/012: pursuit reach budget
         bool _recoveryDead = false; // PORT-009: recovery state armed (dead with an active order)
         uint32 _recoveryReportMs = 0; // PORT-009: bounded report pace remaining (ms)
@@ -145,6 +150,11 @@ class PlayerBotAI: public PlayerAI
         // follows its owner instead of running the legacy auto-hunt
         // (autonomous acquisition + wander stay for ambient bots only).
         bool IsOwnedCompanion() const;
+        // PORT-024 (KAP-558): equipment progression from loot the owned
+        // companion legitimately received (value policy in
+        // Companion/Equipment.h + authoritative inventory APIs).
+        void EvaluateReceivedEquipment(std::vector<std::pair<uint32, uint32>> const& itemCounts);
+        void EvaluateReceivedInstance(Item* item, uint8 bag, uint8 slot);
         Player* FindOwnerByAccount() const;
         static constexpr float kOwnerFollowChaseDist = 25.0f;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);

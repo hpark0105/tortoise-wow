@@ -1673,7 +1673,7 @@
       ],
       "priority": 65,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/companion-port/port-024.md. One loot-distribution policy fixed before implementation, with declared classes/slots and an explicit deterministic upgrade comparison.",
+      "notes": "Card: docs/bots/ralph/companion-port/port-024.md. Implemented: single gate for the free AutoEquipForLevel refresh on owned companions, Companion/Equipment.h value-only strict-upgrade policy, CorpseLootStep evaluation via authoritative CanEquipItem + SwapItem 1:1 exchange, bounded inventory pressure for unstoreable loot. First revision silently rejected every legal upgrade (packed dest 0xFFxx compared against EQUIPMENT_SLOT_END); found by the Upgrade lab, fixed. 17/17 lab tests green on image sha256:355cdaae (Upgrade 6/6 incl. restart round-trip, Pressure 8/8, Ambient 3/3). passes=false pending operator acceptance.",
       "dependsOn": [
         "PORT-023"
       ],
