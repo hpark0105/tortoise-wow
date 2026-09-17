@@ -756,3 +756,29 @@ cross-ref 23891 on KAP-549):
   review is claimed for this entry. Post-change retrieval sync returned an
   MCP error after the service wait; no embedding or derived-write counts are
   claimed.
+
+2026-09-17 PORT-026 / KAP-543 (park-head local-Qwen; cumulative Phase 2 battery):
+- Full 36-module battery on tortoise-local:dev
+  sha256:7f02bf278719a6b9a1727c84c3be2540b4b3e232ae201dcb82cec1b50a9e2e16
+  (built from f96d4b2): 34/36 PASS (local/port026-summary.txt).
+- test_bot_equipment FAIL(1) root-caused to fixture staleness: Lab B filler
+  Tough Jerky (117) is the PORT-025 declared-sellable junk class, so vendor
+  cleanup sold all 16 stacks and the asserted pressure marker never fired.
+  Filler changed to Earthroot (2449, TRADE_GOODS, protected by the Classify
+  matrix); 4-token charge seeds corrected to 5. Rerun 17/17 OK in 385.1s;
+  failure evidence retained (local/tortoise-bot-eq-b8378696f55e-20260917T161801Z).
+- test_bot_combat_xp FAIL(1) is a known 3-day engagement flake (pass 09-12,
+  fail 09-13, fail 09-17; the lab pins mvp003-review, not dev); isolated
+  rerun 1/1 OK in 118.5s.
+- Phase F live real-model round PASS: one schema-valid response from
+  Qwen3.8-27B-UD-Q4_K_XL at 127.0.0.1:8090 in 1156 ms, 716/13 tokens
+  (local/port026-real_planner_live.log).
+- Gates: 15 value suites OK with no skips; py_compile docker/server.py OK;
+  docker compose config --quiet OK; git diff --check clean.
+- Wrote docs/bots/companion-phase-2-acceptance.md; updated
+  phase-2-handoff.md and port-026.md (passes=false retained; hosted
+  acceptance pending: diff review, QA handoff with read-only worker,
+  in-game client evidence, Jira transitions, delayed-tick measurement).
+- No park-agent worker (park-head holds the model mutex); retrieval sync
+  still MCP-error (embedding service down), direct-read fallback used, no
+  sync counts claimed. Jira untouched.

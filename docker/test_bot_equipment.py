@@ -19,8 +19,8 @@ refresh for the owned companion), and no equipment log lines in the
 new boot generation.
 
 Lab B (full-bag pressure): the same assist-kill flow, but the
-companion's main bag is pre-filled (16 stacks of 20 Tough Jerky, item
-117) and the vermin drops only the upgrade 15335. AutoStoreLoot
+companion's main bag is pre-filled (16 stacks of 20 Earthroot, item
+2449) and the vermin drops only the upgrade 15335. AutoStoreLoot
 cannot store it; the evaluator raises the bounded inventory-pressure
 state without deleting anything, equipment stays at the seeded
 baseline, and the companion still regroups.
@@ -55,7 +55,7 @@ ITEM_BASELINE = 1008     # Well-used Sword (ilvl 10, common): score 6020
 ITEM_UPGRADE = 15335     # Briarsteel Shortsword (ilvl 14, fine): score 9034
 ITEM_DOWNGRADE = 3267    # Forsaken Shortsword (ilvl 5, common): score 3015
 ITEM_ILLEGAL = 7298      # Blade of Cunning (rogue only)
-ITEM_FILLER = 117        # Tough Jerky (stack 20)
+ITEM_FILLER = 2449       # Earthroot (trade goods, common, stack 20)
 
 BASELINE_INSTANCE = 9000301
 
@@ -94,16 +94,16 @@ def _inventory_rows(rows):
 
 
 def _baseline_weapon(c):
-    inst = "(%d,%d,%d,0,0,1,0,'0 0 0 0',0,'',0,0,65535,0,0)" % (BASELINE_INSTANCE, ITEM_BASELINE, c)
+    inst = "(%d,%d,%d,0,0,1,0,'0 0 0 0 0',0,'',0,0,65535,0,0)" % (BASELINE_INSTANCE, ITEM_BASELINE, c)
     inv = "(%d,0,%d,%d,%d)" % (c, MAINHAND, BASELINE_INSTANCE, ITEM_BASELINE)
     return _instance_rows([inst]) + _inventory_rows([inv])
 
 
-def _jerky_stacks(c):
+def _filler_stacks(c):
     inst, inv = [], []
     for i in range(16):
         g = 9000410 + i
-        inst.append("(%d,%d,%d,0,0,20,0,'0 0 0 0',0,'',0,0,0,0,0)" % (g, ITEM_FILLER, c))
+        inst.append("(%d,%d,%d,0,0,20,0,'0 0 0 0 0',0,'',0,0,0,0,0)" % (g, ITEM_FILLER, c))
         inv.append("(%d,0,%d,%d,%d)" % (c, BAG_START + i, g, ITEM_FILLER))
     return _instance_rows(inst) + _inventory_rows(inv)
 
@@ -167,7 +167,7 @@ class LabMixin:
         if cls.baseline:
             sql += _baseline_weapon(cls.c)
         if cls.fill_bags:
-            sql += _jerky_stacks(cls.c)
+            sql += _filler_stacks(cls.c)
         if cls.loot_id:
             sql += _loot(cls.loot_id, cls.loot_items)
         sql += _vermin(cls.v)

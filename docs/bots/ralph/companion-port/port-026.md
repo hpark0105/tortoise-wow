@@ -1,7 +1,7 @@
 # PORT-026: Qualify Phase 2 conversation, cooperation, progression and personality
 
 - Depends on: PORT-025
-- Status: pending hosted dispatch; passes=false
+- Status: park-head cumulative battery complete 2026-09-17 (34/36 first-run; equipment fixture repaired + rerun 17/17, combat_xp flake rerun 1/1, live 27B round PASS); hosted acceptance pending; passes=false
 - Tracking: KAP-543 / Phase 2 acceptance
 - Execution mode: hosted acceptance with one fresh read-only QA worker
 - Shared contract: [execution and review](README.md)
