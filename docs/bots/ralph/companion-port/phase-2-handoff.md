@@ -1,5 +1,7 @@
 # Phase 2 handoff: personality and model integration
 
+Current status (2026-09-17, park-head local session): Phase 2 is implemented on feature/kap-558-port-phase2 through f96d4b2 (PORT-011..025). The PORT-026 cumulative battery is complete: 34/36 first-run, both failures repaired or isolated and rerun green, live 27B planner round PASS. Hosted acceptance is pending; passes=false. See the "Phase 2 cumulative battery" section below.
+
 Status: **planned as PORT-011..026; not implemented or accepted by this handoff**.
 Planning baseline: `796bc67` on `feature/kap-558-port-companion-port`
 (2026-09-15). Phase 1 runtime acceptance was reported by the operator. The
@@ -239,6 +241,63 @@ Python compilation, Compose configuration and diff checks passed. Retrieval sync
 was unavailable due the operator-known embedding-service failure, and a fresh
 read-only local-worker review was blocked by the shared-model mutex. No Phase 2
 build, service integration, runtime or client acceptance is claimed here.
+
+## Phase 2 cumulative battery (2026-09-17, park-head local-Qwen session)
+
+- Date 2026-09-17; branch feature/kap-558-port-phase2; recent baseline on
+  the branch: 192624c (PORT-024) .. f96d4b2 (PORT-025, HEAD). Uncommitted
+  tracked work at session start: none. This session changed
+  docker/test_bot_equipment.py (fixture repair) plus
+  docs/bots/companion-phase-2-acceptance.md, this handoff, the port-026
+  status line and progress.txt; all committed together as the session-stop
+  commit.
+- Image under test: tortoise-local:dev
+  sha256:7f02bf278719a6b9a1727c84c3be2540b4b3e232ae201dcb82cec1b50a9e2e16
+  (built 2026-09-17 from the committed tree).
+- Commands and results: full 36-module battery via local/port026-battery.ps1
+  (after local/port026-battery-warm.ps1 pre-warm) -> 34/36 PASS
+  (local/port026-summary.txt); test_bot_equipment rerun -> 17/17 OK in
+  385.1s (local/port026-equipment-rerun1.log); test_bot_combat_xp isolated
+  rerun -> 1/1 OK in 118.5s (local/port026-combat_xp-rerun1.log); Phase F
+  live round -> 1/1 OK in 89.9s (local/port026-real_planner_live.log);
+  python -m py_compile docker/server.py OK; docker compose config --quiet
+  OK; git diff --check clean.
+- Changed path and reason: docker/test_bot_equipment.py. Lab B filler item
+  117 (Tough Jerky) is a quality-1 consumable, i.e. the PORT-025
+  declared-sellable junk class, so the new vendor cleanup sold the filler
+  and cleared the bag pressure the test asserts on (fixture staleness, not
+  a product regression). Filler is now Earthroot 2449 (class 7 TRADE_GOODS,
+  protected by the Inventory.h Classify junk matrix); fixture charge seeds
+  corrected from 4 to 5 tokens to match Item::LoadFromDB
+  (MAX_ITEM_PROTO_SPELLS == 5). Invariant restored: Lab B must keep bag
+  pressure through the loot step so the pressure marker is observable.
+- Acceptance scenarios: passed - all deterministic Phase 2 scenarios per
+  docs/bots/companion-phase-2-acceptance.md (roles, chat safety, cooperative
+  quest, equipment/vendor/pressure/restart, party-session generation and
+  stale rejection, offline/timeout/malformed/stale/hold, live round).
+  Failed on first run - test_bot_equipment (fixture staleness; repaired,
+  failure evidence retained at
+  local/tortoise-bot-eq-b8378696f55e-20260917T161801Z/) and
+  test_bot_combat_xp (known 3-day flake; history retained under
+  local/tortoise-bot-xp-*; rerun green on the old pinned image). Not run -
+  hosted diff review, formal QA handoff with read-only worker, in-game
+  client evidence, Jira transitions, dedicated delayed-tick measurement
+  (all parked for hosted/operator).
+- Known risks: combat_xp engagement flake across 09-12..09-17 and across
+  images (the lab pins tortoise-local:mvp003-review, not dev); the equipment
+  fixture was stale against the PORT-025 junk matrix, so future matrix
+  changes must re-check lab filler items; no separate offline/delayed
+  tick-impact microbenchmark was run (transport + real-adapter labs cover
+  the operational-when-unavailable paths).
+- Worker/retrieval: no park-agent worker (park-head holds the single-model
+  mutex; the 27B at 127.0.0.1:8090 is this session's own backend).
+  Retrieval sync unavailable: the bridge returns an MCP error on sync
+  (embedding service down); bounded direct-read fallback used throughout;
+  no sync, embedding or derived-write counts are claimed.
+- Jira: untouched this session; Phase 2 stories stay In Progress until the
+  operator's in-game validation and the hosted QA handoff.
+- Next bounded assignment: hosted acceptance of PORT-026 (diff review +
+  formal QA handoff + in-game evidence + sign-off).
 
 ## Handoff update contract
 
