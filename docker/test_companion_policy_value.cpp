@@ -52,6 +52,10 @@ static void SetCandidate(CC::Observation& o, CC::Action a)
         case CC::Action::Damage:
             o.damageTarget = 55;
             break;
+        case CC::Action::Vendor:
+            o.vendorTarget = 66;
+            o.bagPressure = true;
+            break;
         default:
             break;
     }
@@ -67,6 +71,7 @@ static void TestSingleCandidates()
         {CC::Action::Defend, 33},
         {CC::Action::Loot, 44},
         {CC::Action::Damage, 55},
+        {CC::Action::Vendor, 66},
     };
     for (auto const& s : singles)
     {
@@ -93,8 +98,8 @@ static void TestSingleCandidates()
 
 static void TestPriorityEdges()
 {
-    // The complete documented priority, all 21 pairwise edges:
-    // Hold > Assist > ContinueCombat > Defend > Damage > Loot > Follow.
+    // The complete documented priority, all 28 pairwise edges:
+    // Hold > Assist > ContinueCombat > Defend > Damage > Vendor > Loot > Follow.
     struct { CC::Action higher; CC::Action lower; } const edges[] = {
         {CC::Action::Hold, CC::Action::Assist},
         {CC::Action::Hold, CC::Action::ContinueCombat},
@@ -117,10 +122,17 @@ static void TestPriorityEdges()
         {CC::Action::Damage, CC::Action::Loot},
         {CC::Action::Damage, CC::Action::Follow},
         {CC::Action::Loot, CC::Action::Follow},
+        {CC::Action::Hold, CC::Action::Vendor},
+        {CC::Action::Assist, CC::Action::Vendor},
+        {CC::Action::ContinueCombat, CC::Action::Vendor},
+        {CC::Action::Defend, CC::Action::Vendor},
+        {CC::Action::Damage, CC::Action::Vendor},
+        {CC::Action::Vendor, CC::Action::Loot},
+        {CC::Action::Vendor, CC::Action::Follow},
     };
     // indexed by enum order: None, Hold, Follow, ContinueCombat, Assist,
-    // Loot, Defend, Damage
-    uint64_t const targetFor[8] = {0, 0, 0, 11, 22, 44, 33, 55};
+    // Loot, Defend, Damage, Vendor
+    uint64_t const targetFor[9] = {0, 0, 0, 11, 22, 44, 33, 55, 66};
     for (auto const& e : edges)
     {
         CC::Observation o;
@@ -131,6 +143,15 @@ static void TestPriorityEdges()
         CHECK(i.action == e.higher);
         CHECK(i.target == targetFor[(int)e.higher]);
     }
+
+    // Vendor requires both a resolved vendor and active pressure;
+    // either field alone is no behavior.
+    CC::Observation vOnly;
+    vOnly.vendorTarget = 66;
+    CHECK(CC::Select(vOnly).action == CC::Action::None);
+    CC::Observation pOnly;
+    pOnly.bagPressure = true;
+    CHECK(CC::Select(pOnly).action == CC::Action::None);
 }
 
 static void TestStaleGeneration()
@@ -153,10 +174,10 @@ static void TestVersioning()
 {
     CC::Observation o;
     CHECK(o.version == CC::kObservationVersion);
-    CHECK(CC::kObservationVersion == 2); // PORT-016: damageTarget added
+    CHECK(CC::kObservationVersion == 3); // PORT-025: vendorTarget + bagPressure added
     CC::Intent i{CC::Action::Follow, 1, 0};
     CHECK(i.version == CC::kDirectiveVersion);
-    CHECK(CC::kDirectiveVersion == 1);
+    CHECK(CC::kDirectiveVersion == 2); // PORT-025: Vendor action added
 }
 
 int main()

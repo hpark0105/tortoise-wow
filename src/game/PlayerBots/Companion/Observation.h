@@ -13,7 +13,7 @@
 namespace Companion
 {
 
-inline constexpr uint32_t kObservationVersion = 2; // PORT-016: damageTarget added
+inline constexpr uint32_t kObservationVersion = 3; // PORT-025: vendorTarget + bagPressure added
 
 struct Observation
 {
@@ -26,6 +26,8 @@ struct Observation
     uint64_t lootTarget = 0;     // PORT-007: dead, in-world corpse to loot; the executor re-resolves it
     uint64_t defendTarget = 0;   // PORT-006: owner-enabled reactive defend candidate; the executor re-resolves it
     uint64_t damageTarget = 0;   // PORT-016: the declared tank's established victim; the executor re-resolves it
+    uint64_t vendorTarget = 0;    // PORT-025: resolved live vendor within the declared radius; the executor re-resolves it
+    bool bagPressure = false;     // PORT-025: the declared bag-pressure trigger is active
     bool following = false;      // an active follow goal exists
     bool held = false;           // an owner hold is active
     bool ownerAvailable = false; // the follow leader resolved to an available owner this tick

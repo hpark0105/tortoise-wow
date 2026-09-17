@@ -13,6 +13,7 @@
 #include "Companion/Personality.h"
 #include "Companion/Quest.h"
 #include "Companion/Equipment.h"
+#include "Companion/Inventory.h"
 #include <utility>
 #include <vector>
 
@@ -72,6 +73,12 @@ class PlayerBotAI: public PlayerAI
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
         uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
+        uint64_t _vendorTargetGuid = 0; // PORT-025: resolved vendor within the declared radius (0 = none)
+        uint32_t _vendorScanTimer = 0;  // PORT-025: re-scan pace accumulation (ms)
+        uint32_t _vendorFailTimer = 0;  // PORT-025: no-vendor report pace (ms)
+        bool _vendorFailReported = false; // PORT-025: first no-vendor report emitted
+        bool _pressureReported = false;   // PORT-025: episode status line emitted
+        bool _vendorExhausted = false;    // PORT-025: no sellable junk left this episode
         Companion::Combat::Leash _pursuitLeash; // PORT-008/012: pursuit reach budget
         bool _recoveryDead = false; // PORT-009: recovery state armed (dead with an active order)
         uint32 _recoveryReportMs = 0; // PORT-009: bounded report pace remaining (ms)
@@ -155,6 +162,14 @@ class PlayerBotAI: public PlayerAI
         // Companion/Equipment.h + authoritative inventory APIs).
         void EvaluateReceivedEquipment(std::vector<std::pair<uint32, uint32>> const& itemCounts);
         void EvaluateReceivedInstance(Item* item, uint8 bag, uint8 slot);
+        // PORT-025 (KAP-558): bag-pressure report + bounded vendor
+        // cleanup (value policy in Companion/Inventory.h; the sale
+        // mirrors the vendor packet handler's guards and APIs).
+        uint8_t CountFreeSlots() const;
+        Companion::Inventory::ItemInfo FillItemInfo(Item* item) const;
+        bool VendorPressureStep(uint32 diff);
+        void ExecuteVendor(Companion::Intent const& intent, uint32 diff);
+        void SellJunkToVendor(Creature* vendor);
         Player* FindOwnerByAccount() const;
         static constexpr float kOwnerFollowChaseDist = 25.0f;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);

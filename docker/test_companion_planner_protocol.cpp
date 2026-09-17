@@ -37,14 +37,14 @@ static int g_failures = 0;
     } while (0)
 
 static const char* kGoldenRequestHex =
-    "434c5031010000008877665544332211d14e090002000000"
+    "434c5031010000008877665544332211d14e090003000000"
     "40420f000000000000000000540000000700000002000000"
     "02000000d24e090001000000d34e09000400000000000000"
     "000000000000000000000000"
 ;
 
 static const char* kGoldenResponseHex =
-    "434c5031010000008877665544332211d14e090002000000"
+    "434c5031010000008877665544332211d14e090003000000"
     "104a0f00000000000200000068000000d24e090001000000"
     "070000000100000000000000f84d0f000000000000000000"
     "d34e0900010000000700000003000000c8252600f84d0f00"
@@ -430,7 +430,7 @@ static void TestGoldenVectors()
     CHECK(req.protocolVersion == 1);
     CHECK(req.requestId == 0x1122334455667788ULL);
     CHECK(req.ownerGuid == 610001);
-    CHECK(req.observationVersion == 2);
+    CHECK(req.observationVersion == 3);
     CHECK(req.observationVersion == Companion::kObservationVersion);
     CHECK(req.captureTimeMs == 1000000);
     CHECK(req.stepCount == 0);

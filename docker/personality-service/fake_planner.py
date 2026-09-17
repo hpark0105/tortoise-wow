@@ -23,7 +23,7 @@ import struct
 
 MAGIC = 0x31504C43          # "CLP1"
 PROTOCOL_VERSION = 1
-OBSERVATION_VERSION = 2     # Companion::kObservationVersion (PORT-016)
+OBSERVATION_VERSION = 3     # Companion::kObservationVersion (PORT-025)
 
 ENVELOPE = 40
 REQUEST_BODY = 44

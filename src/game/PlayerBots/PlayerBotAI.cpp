@@ -229,6 +229,41 @@ private:
     Creature* m_best;
     float m_dist;
 };
+
+// PORT-025 (KAP-558): nearest legal vendor within the declared
+// radius: live, in-world, vendor service flag, not evading. The
+// executor re-validates through the same interaction check the
+// vendor packet handler uses before any approach or sale.
+class BotVendorSearcher
+{
+public:
+    BotVendorSearcher(Unit const* source)
+        : me(source), m_best(nullptr), m_dist(0.0f) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive() || !u->IsInWorld())
+            return false;
+        if (!u->IsVendor() || u->IsInEvadeMode())
+            return false;
+        float const d = me->GetDistance(u);
+        if (!m_best || d < m_dist ||
+            (d == m_dist && u->GetGUIDLow() < m_best->GetGUIDLow()))
+        {
+            m_best = u;
+            m_dist = d;
+        }
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotVendorSearcher(BotVendorSearcher const&);
+    Unit const* me;
+    Creature* m_best;
+    float m_dist;
+};
 }
 
 bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
@@ -2885,6 +2920,323 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
     }
 }
 
+// ---------------------------------------------------------------------------
+// PORT-025 (KAP-558): one bounded bag-pressure episode per owned
+// companion. The episode starts when the declared trigger fires
+// (free item slots at or below kPressureFreeSlots, or a stored-loot
+// event the inventory could not accept) and ends when pressure
+// clears. At most one status line is said per episode; the no-vendor
+// failure is reported on the first failed scan and then rate-limited.
+// The vendor discovery is a bounded same-grid scan at the declared
+// pace; the value policy (Companion/Inventory.h) classifies every
+// item before any travel or sale, and the sale mirrors the vendor
+// packet handler's guards and APIs exactly. Nothing is ever deleted
+// or sold outside the declared junk set; an ambiguous item is
+// protected.
+uint8_t PlayerBotAI::CountFreeSlots() const
+{
+    if (!me)
+        return 0;
+    uint8_t free = 0;
+    // Bag0 item slots (equipment slots are worn gear: protected).
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            ++free;
+    // Sub-bags: declared capacity minus occupied slots.
+    for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+    {
+        Item* bagItem = me->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        if (!bagItem || !bagItem->GetProto())
+            continue;
+        uint8 const cap = (uint8)bagItem->GetProto()->ContainerSlots;
+        uint8 used = 0;
+        for (uint8 slot = 0; slot < cap; ++slot)
+            if (me->GetItemByPos(bag, slot))
+                ++used;
+        if (cap > used)
+            free += (cap - used);
+    }
+    return free;
+}
+
+Companion::Inventory::ItemInfo PlayerBotAI::FillItemInfo(Item* item) const
+{
+    Companion::Inventory::ItemInfo info;
+    if (!item)
+        return info; // unknown: fail closed (protected)
+    ItemPrototype const* proto = item->GetProto();
+    if (!proto)
+        return info;
+    info.quality = proto->Quality;
+    info.itemClass = proto->Class;
+    info.bonding = proto->Bonding;
+    info.sellPrice = proto->SellPrice;
+    info.isEquipped = item->IsEquipped();
+    info.isBag = item->IsBag();
+    info.isQuest = proto->Class == ITEM_CLASS_QUEST || proto->StartQuest != 0 ||
+                   me->HasQuestForItem(item->GetEntry());
+    info.isKeyOrCurrency = proto->Class == ITEM_CLASS_KEY || proto->Class == ITEM_CLASS_MONEY;
+    info.isUnique = proto->MaxCount == 1 && proto->Stackable == 0 &&
+                    proto->Class != ITEM_CLASS_CONSUMABLE;
+    info.hasEnchant = item->GetEnchantmentId(PERM_ENCHANTMENT_SLOT) != 0 ||
+                      item->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_0) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_1) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_2) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_3) != 0;
+    // The upgrade-over-equipped verdict needs the authoritative slot
+    // check; only the junk-matrix equipment classes can need it.
+    if (info.quality == 0 &&
+        (proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR))
+    {
+        uint16 dest = 0;
+        if (me->CanEquipItem(NULL_SLOT, dest, item, true) == EQUIP_ERR_OK && dest != NULL_SLOT)
+        {
+            uint8 const eslot = dest & 0xFF;
+            if (eslot < EQUIPMENT_SLOT_END)
+            {
+                Item* equipped = me->GetItemByPos(INVENTORY_SLOT_BAG_0, eslot);
+                uint32 const equippedScore = equipped
+                    ? Companion::Equipment::Score(
+                          EquipmentStatsFromProto(equipped->GetProto(), me->GetLevel()))
+                    : 0;
+                info.upgradeOverEquipped = Companion::Equipment::Score(
+                    EquipmentStatsFromProto(proto, me->GetLevel())) > equippedScore;
+            }
+        }
+    }
+    return info;
+}
+
+bool PlayerBotAI::VendorPressureStep(uint32 diff)
+{
+    if (!IsOwnedCompanion() || !me || !me->IsAlive() || !me->GetMap())
+        return false;
+    if (_held)
+        return false; // a hold preempts the whole cleanup path
+
+    uint8_t const freeSlots = CountFreeSlots();
+    bool const pressure = Companion::Inventory::PressureActive(freeSlots, _inventoryPressure);
+    if (pressure)
+    {
+        if (!_pressureReported)
+        {
+            // One bounded status line per pressure episode.
+            _pressureReported = true;
+            Companion::Personality::Profile const profile =
+                botEntry ? (Companion::Personality::Profile)botEntry->personalityProfile
+                         : Companion::Personality::Profile::None;
+            char const* line = nullptr;
+            if (Companion::Personality::MapPressureLine(profile, line))
+                me->Say(line, LANG_UNIVERSAL);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[Inventory] pressure GUID:%u free:%u stored:%u profile:%s",
+                               me->GetGUIDLow(), freeSlots, _inventoryPressure,
+                               Companion::Personality::ProfileName(profile));
+        }
+        if (!_vendorExhausted && !_vendorTargetGuid && !me->IsInCombat())
+        {
+            _vendorScanTimer += diff;
+            if (_vendorFailReported)
+                _vendorFailTimer += diff; // pace the next failure report
+            if (_vendorScanTimer >= Companion::Inventory::kVendorScanPaceMs)
+            {
+                _vendorScanTimer = 0;
+                BotVendorSearcher probe(me);
+                Creature* found = nullptr;
+                MaNGOS::CreatureLastSearcher<BotVendorSearcher> searcher(found, probe);
+                Cell::VisitGridObjects(me, searcher, Companion::Inventory::kVendorSearchRadiusYd);
+                Creature* vendor = probe.Best();
+                if (vendor)
+                {
+                    _vendorTargetGuid = vendor->GetObjectGuid().GetRawValue();
+                    _vendorFailReported = false;
+                    _vendorFailTimer = 0;
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[Inventory] vendor found GUID:%u vendor:%u entry:%u dist:%.1f",
+                                       me->GetGUIDLow(), vendor->GetGUIDLow(), vendor->GetEntry(),
+                                       me->GetDistance(vendor));
+                }
+                else if (!_vendorFailReported ||
+                         _vendorFailTimer >= Companion::Inventory::kVendorFailReportMs)
+                {
+                    // Bounded failure report: first scan immediate, then
+                    // rate-limited. The companion waits for owner guidance
+                    // without deleting or selling anything.
+                    _vendorFailReported = true;
+                    _vendorFailTimer = 0;
+                    Companion::Personality::Profile const profile =
+                        botEntry ? (Companion::Personality::Profile)botEntry->personalityProfile
+                                 : Companion::Personality::Profile::None;
+                    char const* line = nullptr;
+                    if (Companion::Personality::MapNoVendorLine(profile, line))
+                        me->Say(line, LANG_UNIVERSAL);
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[Inventory] no vendor GUID:%u radius:%u",
+                                       me->GetGUIDLow(),
+                                       (uint32)Companion::Inventory::kVendorSearchRadiusYd);
+                }
+            }
+        }
+    }
+    else
+    {
+        if (_pressureReported || _vendorTargetGuid || _vendorExhausted)
+        {
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[Inventory] pressure cleared GUID:%u free:%u",
+                               me->GetGUIDLow(), freeSlots);
+        }
+        _pressureReported = false;
+        _vendorTargetGuid = 0;
+        _vendorExhausted = false;
+        _vendorFailReported = false;
+        _vendorFailTimer = 0;
+        _vendorScanTimer = 0;
+        _inventoryPressure = 0; // episode resolved: stored loot is acceptable again
+    }
+    return pressure;
+}
+
+void PlayerBotAI::ExecuteVendor(Companion::Intent const& intent, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap())
+        return;
+    Creature* vendor = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+    if (!vendor || !vendor->IsAlive() || !vendor->IsInWorld() || !vendor->IsVendor() ||
+        !vendor->IsWithinDistInMap(me, Companion::Inventory::kVendorSearchRadiusYd))
+    {
+        // Stale or out-of-bounds vendor: drop it; the scan re-selects
+        // at the declared pace while pressure remains.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] vendor lost GUID:%u vendor:%u reason:stale",
+                           me->GetGUIDLow(), (uint32)ObjectGuid(intent.target).GetCounter());
+        _vendorTargetGuid = 0;
+        me->GetMotionMaster()->Clear(false);
+        return;
+    }
+    float const dist = me->GetDistance(vendor);
+    if (dist > INTERACTION_DISTANCE)
+    {
+        // Bounded approach: one path per idle or moved vendor, like
+        // the follow goal; a timed cast holds position so it completes.
+        if (me->IsNonMeleeSpellCasted(true))
+        {
+            if (!me->GetMotionMaster()->empty())
+                me->GetMotionMaster()->Clear(false);
+            return;
+        }
+        float const vx = vendor->GetPositionX();
+        float const vy = vendor->GetPositionY();
+        float const vz = vendor->GetPositionZ();
+        float const dx = vx - _followPathX;
+        float const dy = vy - _followPathY;
+        bool const moved = (dx * dx + dy * dy) > (2.0f * 2.0f);
+        if (me->GetMotionMaster()->empty() || moved ||
+            _followPathAgeMs >= kFollowPathRefreshMs)
+        {
+            _followPathX = vx;
+            _followPathY = vy;
+            _followPathZ = vz;
+            _followPathAgeMs = 0;
+            me->GetMotionMaster()->MovePoint(0, vx, vy, vz, MOVE_PATHFINDING);
+        }
+        else
+            _followPathAgeMs += diff;
+        return;
+    }
+    SellJunkToVendor(vendor);
+}
+
+void PlayerBotAI::SellJunkToVendor(Creature* vendor)
+{
+    if (!me || !vendor)
+        return;
+    // The authoritative interaction check the packet handler makes:
+    // service flag, life, hostility, combat state, reputation and the
+    // 5 yd range. A failed check drops the vendor (re-scan at pace).
+    Creature* npc = me->GetNPCIfCanInteractWith(vendor->GetObjectGuid(), UNIT_NPC_FLAG_VENDOR);
+    if (!npc)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] vendor lost GUID:%u vendor:%u reason:interact",
+                           me->GetGUIDLow(), vendor->GetGUIDLow());
+        _vendorTargetGuid = 0;
+        return;
+    }
+    uint8 sold = 0;
+    bool sawSellable = false; // an item passed the declared junk gate this pass
+    auto sellPass = [&](uint8 bag, uint8 slot)
+    {
+        Item* item = me->GetItemByPos(bag, slot);
+        if (!item)
+            return;
+        Companion::Inventory::ItemInfo const info = FillItemInfo(item);
+        if (Companion::Inventory::Classify(info) != Companion::Inventory::Verdict::Sellable)
+            return; // protected: leave it
+        sawSellable = true;
+        if (sold >= Companion::Inventory::kMaxSalesPerTick)
+            return; // pace: the rest is sold on later ticks
+        // Handler-shaped full-stack sale: re-resolve by GUID and apply
+        // the same guards the vendor packet handler applies.
+        Item* live = me->GetItemByGuid(item->GetObjectGuid());
+        if (!live || me->GetObjectGuid() != live->GetOwnerGuid() ||
+            me->IsBankPos(live->GetPos()) ||
+            me->GetLootGuid() == live->GetObjectGuid() ||
+            (live->IsBag() && !((Bag*)live)->IsEmpty()))
+            return;
+        ItemPrototype const* proto = live->GetProto();
+        if (!proto || proto->SellPrice == 0)
+            return;
+        uint32 money = proto->SellPrice * live->GetCount();
+        // Handler parity: a negative-charge spell prices the item
+        // proportionally to the charges remaining.
+        for (auto i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+        {
+            auto const &spell = proto->Spells[i];
+            if (spell.SpellId != 0 && spell.SpellCharges < 0)
+            {
+                auto const multiplier = static_cast<float>(live->GetSpellCharges(i)) /
+                                       static_cast<float>(spell.SpellCharges);
+                money *= multiplier;
+                break;
+            }
+        }
+        me->LogItem(live, LogItemAction::Sold);
+        me->ItemRemovedQuestCheck(live->GetEntry(), live->GetCount());
+        me->RemoveItem(live->GetBagSlot(), live->GetSlot(), true);
+        me->InterruptSpellsWithCastItem(live);
+        live->RemoveFromUpdateQueueOf(me);
+        me->AddItemToBuyBackSlot(live, money, npc->GetObjectGuid());
+        me->LogModifyMoney(money, "SellItem", npc->GetObjectGuid(), live->GetEntry());
+        ++sold;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] sold GUID:%u item:%u count:%u money:%u vendor:%u",
+                           me->GetGUIDLow(), live->GetEntry(), live->GetCount(), money,
+                           npc->GetGUIDLow());
+    };
+    // Bounded pass: bag0 item slots, then sub-bags (the shape
+    // EvaluateReceivedEquipment already uses).
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        sellPass(INVENTORY_SLOT_BAG_0, slot);
+    for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+        for (uint8 slot = 0; slot < 36; ++slot)
+            sellPass(bag, slot);
+    if (!sawSellable)
+    {
+        // Every remaining item is protected: the declared junk set is
+        // empty. Stop the vendor travel for this episode; the prior
+        // owner goal resumes and the companion waits for owner
+        // guidance.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] exhausted GUID:%u free:%u",
+                           me->GetGUIDLow(), CountFreeSlots());
+        _vendorExhausted = true;
+        _vendorTargetGuid = 0;
+        me->GetMotionMaster()->Clear(false);
+    }
+}
+
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
     // PORT-018 (KAP-558): planner rounds key on party membership, not
@@ -2895,11 +3247,30 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     CooperativeQuestStep(diff); // PORT-023: at most one cooperative quest action
     if (!_following && !_held && !_assistTargetGuid)
         return false;
+    // PORT-025 (KAP-558): bag-pressure episode bookkeeping (one
+    // status line per episode) + bounded vendor discovery. Runs
+    // before the observation fill so the Vendor candidate is visible
+    // to Select; hold, combat, recovery and owner loss preempt the
+    // travel and sale at the policy and executor level.
+    bool const bagPressure = VendorPressureStep(diff);
     Companion::Observation observation;
     observation.generation = _followSeq;
     observation.following = _following;
     observation.held = _held;
     observation.ownerAvailable = IsFollowOwnerAvailable();
+    // PORT-025: the resolved vendor (re-validated live) and the
+    // declared pressure state; the executor re-resolves the vendor
+    // from its GUID and re-checks the world before any approach or
+    // sale.
+    observation.bagPressure = bagPressure;
+    if (_vendorTargetGuid)
+    {
+        Creature* vendor = me->GetMap()->GetCreature(ObjectGuid(_vendorTargetGuid));
+        if (vendor && vendor->IsAlive() && vendor->IsInWorld() && vendor->IsVendor())
+            observation.vendorTarget = vendor->GetObjectGuid().GetRawValue();
+        else
+            _vendorTargetGuid = 0;
+    }
     // PORT-005: re-resolve the assisted target from its GUID every tick; a
     // dead, vanished or unloaded target clears the assist (the companion
     // resumes its previous order) and never substitutes another enemy.
@@ -2952,7 +3323,8 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // Hold > Assist > ContinueCombat > Defend > Follow, so a hold always
     // wins and an active fight is never abandoned for a new defender.
     // PORT-007: defend also interrupts a Loot goal (life over loot).
-    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot) &&
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot ||
+         intent.action == Companion::Action::Vendor) &&
         botEntry && botEntry->defendEnabled)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
@@ -3048,7 +3420,8 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // preservation, reach). The Damage intent runs through the shared
     // combat executor; once acquired, the fight persists as
     // ContinueCombat through the live slot.
-    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot) &&
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot ||
+         intent.action == Companion::Action::Vendor) &&
         IsDeclaredDamage())
     {
         Companion::Damage::Observation const dmgObs = FillDamageObservation();
@@ -3580,6 +3953,16 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
             me->CombatStop();
         me->GetMotionMaster()->Clear(false);
         ClearTarget();
+        return;
+    }
+    if (intent.action == Companion::Action::Vendor)
+    {
+        // PORT-025 (KAP-558): the hold gate above already stopped
+        // motion for Hold / held / owner loss; the bounded vendor
+        // approach and handler-shaped sale run only when the owner
+        // goal is otherwise idle. A stale or vanished vendor drops
+        // the goal; the scan re-selects at the declared pace.
+        ExecuteVendor(intent, diff);
         return;
     }
     if (intent.action == Companion::Action::Loot)
