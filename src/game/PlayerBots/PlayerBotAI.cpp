@@ -25,6 +25,7 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include <map>
 
 
 namespace
@@ -596,6 +597,11 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
             for (std::vector<std::pair<uint32, uint32>>::const_iterator itr = itemCounts.begin(); itr != itemCounts.end(); ++itr)
                 sLog.outString("[PlayerBot] corpse loot stored GUID:%u item:%u before:%u after:%u",
                                me->GetGUIDLow(), itr->first, itr->second, me->GetItemCount(itr->first));
+        // PORT-024 (KAP-558): owned companions progress their
+        // equipment from the items just received; ambient bots
+        // keep the legacy loot-only path.
+        if (IsOwnedCompanion())
+            EvaluateReceivedEquipment(itemCounts);
         me->GetSession()->DoLootRelease(guid);
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot processed GUID:%u target:%u",
@@ -628,6 +634,161 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
         _lootWindowMs = 0;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-024 (KAP-558): equipment progression from loot legitimately
+// received by owned companions.
+//
+// EvaluateReceivedEquipment receives the (entry, count before this
+// loot window) pairs captured before AutoStoreLoot. An entry whose
+// saved count did not grow was eligible loot the bags could not
+// accept: it raises the bounded inventory-pressure state for
+// PORT-025 and nothing is ever deleted to make room. An entry whose
+// count grew was received; up to the delta of its instances in the
+// bags is evaluated (bounded, idempotent: re-evaluating a retained
+// instance can only repeat its earlier verdict).
+//
+// EvaluateReceivedInstance asks the authoritative CanEquipItem for
+// legality and slot (class, level, skill, proficiency, unique rules,
+// live combat state) and Companion::Equipment for the verdict: only
+// a strict upgrade moves, via SwapItem, the received instance into
+// the equipment slot; the replaced gear returns to the bag slot the
+// new item came from (a 1:1 exchange, so full bags can never block
+// an upgrade). Illegal or non-upgrade items stay in the bag
+// untouched. The model never supplies item IDs, scores or equip
+// commands.
+
+static Companion::Equipment::ItemStats EquipmentStatsFromProto(ItemPrototype const* proto, uint32 playerLevel)
+{
+    Companion::Equipment::ItemStats s;
+    s.playerLevel = playerLevel;
+    if (proto)
+    {
+        s.requiredLevel = proto->RequiredLevel;
+        s.itemLevel = proto->ItemLevel;
+        s.quality = proto->Quality;
+    }
+    return s;
+}
+
+void PlayerBotAI::EvaluateReceivedEquipment(std::vector<std::pair<uint32, uint32>> const& itemCounts)
+{
+    if (!me || !me->GetMap())
+        return;
+
+    std::map<uint32, uint32> before;
+    for (std::vector<std::pair<uint32, uint32>>::const_iterator itr = itemCounts.begin();
+         itr != itemCounts.end(); ++itr)
+        before.emplace(itr->first, itr->second);   // first occurrence wins
+
+    for (std::map<uint32, uint32>::const_iterator kv = before.begin(); kv != before.end(); ++kv)
+    {
+        uint32 const entry = kv->first;
+        uint32 const after = me->GetItemCount(entry);
+        if (after <= kv->second)
+        {
+            // Eligible loot the inventory could not accept: raise the
+            // bounded pressure state; the item stays where the normal
+            // inventory rules left it (on the corpse).
+            if (_inventoryPressure < 8)
+                ++_inventoryPressure;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] equipment pressure GUID:%u item:%u stored:0",
+                               me->GetGUIDLow(), entry);
+            continue;
+        }
+
+        uint32 const received = after - kv->second;
+        uint32 evaluated = 0;
+        // Bounded scan: bag0 item slots, then any sub-bags.
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START;
+             slot < INVENTORY_SLOT_ITEM_END && evaluated < received; ++slot)
+        {
+            Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (!item || item->GetEntry() != entry)
+                continue;
+            ++evaluated;
+            EvaluateReceivedInstance(item, INVENTORY_SLOT_BAG_0, slot);
+        }
+        for (uint8 bag = INVENTORY_SLOT_BAG_START;
+             bag < INVENTORY_SLOT_BAG_END && evaluated < received; ++bag)
+        {
+            for (uint8 slot = 0; slot < 36 && evaluated < received; ++slot)
+            {
+                Item* item = me->GetItemByPos(bag, slot);
+                if (!item || item->GetEntry() != entry)
+                    continue;
+                ++evaluated;
+                EvaluateReceivedInstance(item, bag, slot);
+            }
+        }
+    }
+}
+
+void PlayerBotAI::EvaluateReceivedInstance(Item* item, uint8 bag, uint8 slot)
+{
+    ItemPrototype const* proto = item ? item->GetProto() : nullptr;
+    if (!proto)
+        return;
+
+    // Authoritative legality + slot. swap=true: the slot may be
+    // occupied; the replaced gear returns to the bag slot this item
+    // came from. Same checks the packet handlers apply (not_loading
+    // defaults to true, as in AutoEquipForLevel). CanEquipItem packs
+    // dest as (INVENTORY_SLOT_BAG_0 << 8) | equipmentSlot; the low byte
+    // is the equipment slot index.
+    uint16 dest = 0;
+    InventoryResult const res = me->CanEquipItem(NULL_SLOT, dest, item, true);
+    if (res != EQUIP_ERR_OK || dest == NULL_SLOT)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment skip illegal GUID:%u item:%u err:%u",
+                           me->GetGUIDLow(), item->GetEntry(), uint32(res));
+        return;
+    }
+    uint8 const eslot = dest & 0xFF;
+    if (eslot >= EQUIPMENT_SLOT_END)
+    {
+        // Not an equipment slot (e.g. a bag position): normal
+        // storage already placed the item; the equipment policy does
+        // not move bags.
+        return;
+    }
+
+    uint32 const level = me->GetLevel();
+    Item* equipped = me->GetItemByPos(INVENTORY_SLOT_BAG_0, eslot);
+    uint32_t const newScore = Companion::Equipment::Score(EquipmentStatsFromProto(proto, level));
+    uint32_t const eqScore = equipped
+        ? Companion::Equipment::Score(EquipmentStatsFromProto(equipped->GetProto(), level))
+        : 0;
+
+    if (Companion::Equipment::Compare(newScore, eqScore) != Companion::Equipment::Verdict::Equip)
+    {
+        // Sidegrade or downgrade: equipment unchanged, item retained.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment keep GUID:%u item:%u new:%u eq:%u",
+                           me->GetGUIDLow(), item->GetEntry(), uint32_t(newScore), uint32_t(eqScore));
+        return;
+    }
+
+    me->SwapItem(uint16((bag << 8) | slot), dest);
+
+    Item* now = me->GetItemByPos(INVENTORY_SLOT_BAG_0, eslot);
+    if (now && now->GetEntry() == item->GetEntry())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment upgraded GUID:%u slot:%u item:%u new:%u eq:%u",
+                           me->GetGUIDLow(), uint32(eslot), item->GetEntry(), uint32_t(newScore), uint32_t(eqScore));
+    }
+    else
+    {
+        // The core refused the move after the pre-checks (transient
+        // world state): the item stays in the bag, equipment unchanged.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment swap denied GUID:%u slot:%u item:%u",
+                           me->GetGUIDLow(), uint32(eslot), item->GetEntry());
+    }
 }
 
 void PlayerBotAI::RememberCombatTarget(Unit* unit)
@@ -1715,6 +1876,16 @@ namespace
 void PlayerBotAI::AutoEquipForLevel()
 {
     if (!me)
+        return;
+
+    // PORT-024 (KAP-558): owned companions progress equipment only
+    // from items they legitimately receive through the loot policy
+    // (Companion/Equipment.h + EvaluateReceivedEquipment). The free
+    // level-based refresh stays authoritative for ambient world
+    // bots. One gate here covers login, level-up, the UpdateAI
+    // level-change fallback and party leave/rejoin (a rejoin is a
+    // relogin).
+    if (IsOwnedCompanion())
         return;
 
     uint8 level = me->GetLevel();
