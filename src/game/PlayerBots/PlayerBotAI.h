@@ -11,6 +11,7 @@
 #include "Companion/PlannerTransport.h"
 #include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
+#include "Companion/Quest.h"
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -88,6 +89,10 @@ class PlayerBotAI: public PlayerAI
         uint32 _questScanTimer = 0;
         uint32 _questDebugTimer = 0;
         uint8 _questDenyCount = 0;
+        // PORT-023 (KAP-558): cooperative quest accept/turn-in
+        // denial backoff (ms); a persistent denial re-checks the
+        // world at a bounded pace instead of every tick.
+        uint32 _coopQuestDenyTimer = 0;
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
         bool _held = false; // PORT-004: owner-directed hold; persists until new order
@@ -133,6 +138,7 @@ class PlayerBotAI: public PlayerAI
         bool UpdateCompanion(uint32 diff);
         void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
         void ConversationRoundStep(); // PORT-022: consume one bounded reply (world thread never waits)
+        void CooperativeQuestStep(uint32 diff); // PORT-023: one owner-driven cooperative quest action (value policy + authoritative quest APIs)
         void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
         // KAP-558 hardening: an owned companion without an active order

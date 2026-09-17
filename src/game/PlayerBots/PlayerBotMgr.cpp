@@ -126,10 +126,16 @@ void PlayerBotMgr::LoadConfig()
     // MVP-006: one declared quest the companion progresses through the
     // normal quest APIs (accept, objective credit, turn-in).
     confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
+    confCooperativeQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.CooperativeQuestId", 0);
     // PORT-007 (KAP-558): lab-only idle-wander clamp. Default 0 keeps
     // the legacy frand(8,20) radius; fixtures set a small value so
     // seeded bots stay geometrically stable before scripted holds land.
     confWanderRadius = sConfig.GetFloatDefault("PlayerBot.WanderRadius", 0.0f);
+    // PORT-023 (KAP-558) lab-only gate: ambient (unowned) bots may
+    // autonomously acquire nearby targets (default on; the lab
+    // owner fixture disables it so a temp-logged owner idles at
+    // spawn instead of hunting the fixture pack).
+    confAmbientAcquire = sConfig.GetBoolDefault("PlayerBot.AmbientAcquire", true);
     if (confQuestId)
         sLog.outString("Playerbot: declared quest %u enabled (MVP-006)", confQuestId);
     // TW-014 (KAP-557) lab-only deterministic follow/stop script (default
@@ -203,6 +209,54 @@ void PlayerBotMgr::LoadConfig()
         }
         if (!m_followScript.empty() && confDebug)
             sLog.outString("[PlayerBot][FollowScript] armed events:%u (TW-014 lab script)", (uint32)m_followScript.size());
+    }
+    // PORT-023 (KAP-558) lab-only deterministic owner quest script
+    // (default off). Events are semicolon-separated
+    // <delayMs>:<issuerGuid>:<questId>:<phase> with phase "accept"
+    // or "turnin"; see QuestScriptEvent in PlayerBotMgr.h.
+    m_questScript.clear();
+    m_questScriptStartMs = 0;
+    m_questScriptIdx = 0;
+    {
+        std::string scriptToken = sConfig.GetStringDefault("PlayerBot.QuestScript", "");
+        size_t pos = 0;
+        while (pos <= scriptToken.size())
+        {
+            size_t semi = scriptToken.find(';', pos);
+            if (semi == std::string::npos)
+                semi = scriptToken.size();
+            std::string ev = scriptToken.substr(pos, semi - pos);
+            pos = semi + 1;
+            if (ev.empty())
+                continue;
+            size_t c1 = ev.find(':');
+            size_t c2 = (c1 == std::string::npos) ? std::string::npos : ev.find(':', c1 + 1);
+            size_t c3 = (c2 == std::string::npos) ? std::string::npos : ev.find(':', c2 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos || c3 == std::string::npos)
+            {
+                sLog.outError("Playerbot: quest-script event malformed; skipped: %s", ev.c_str());
+                continue;
+            }
+            QuestScriptEvent qe;
+            qe.delayMs = (uint32)atoi(ev.substr(0, c1).c_str());
+            qe.issuerGuid = (uint32)atoi(ev.substr(c1 + 1, c2 - c1 - 1).c_str());
+            qe.questId = (uint32)atoi(ev.substr(c2 + 1, c3 - c2 - 1).c_str());
+            std::string phase = ev.substr(c3 + 1);
+            qe.turnin = (phase == "turnin");
+            if (!qe.turnin && phase != "accept")
+            {
+                sLog.outError("Playerbot: quest-script phase invalid; skipped: %s", ev.c_str());
+                continue;
+            }
+            if (qe.issuerGuid == 0 || qe.questId == 0)
+            {
+                sLog.outError("Playerbot: quest-script event incomplete; skipped: %s", ev.c_str());
+                continue;
+            }
+            m_questScript.push_back(qe);
+        }
+        if (!m_questScript.empty() && confDebug)
+            sLog.outString("[PlayerBot][QuestScript] armed events:%u (PORT-023 lab script)", (uint32)m_questScript.size());
     }
     // NEXT-002 (post-MVP) lab-only deterministic party-invite script
     // (default off). Events are semicolon-separated
@@ -671,6 +725,9 @@ void PlayerBotMgr::Update(uint32 diff)
     // NEXT-002 (post-MVP): deterministic party-invite script (lab-only,
     // config-gated; cheap state check when disabled).
     UpdatePartyInviteScript();
+    // PORT-023 (KAP-558): deterministic owner quest script
+    // (lab-only, config-gated; cheap state check when disabled).
+    UpdateQuestScript();
     if (!((m_elapsedTime - m_lastUpdate) > confUpdateDiff))
         return; //Pas besoin d'update
 
@@ -1655,15 +1712,23 @@ namespace
 // Search radius for the .botassist name lookup, centered on the companion.
 float const kBotAssistSearchRange = 30.0f;
 
-// PORT-005 (KAP-558): an explicitly named assist target is legal when the
-// bot can attack it in the ordinary sense, or when the neutral-faction
-// evidence rule from defend applies (the target is actively fighting the
-// issuer or the bot; the player melee path and Unit::Attack permit such
-// fights, so an owner order naming that target must not be rejected).
+// PORT-005/PORT-023 (KAP-558): an explicitly named assist target is legal
+// when the bot can attack it the way the core attack path allows, or when
+// the neutral-faction evidence rule from defend applies (the target is
+// actively fighting the issuer or the bot). The core player melee path
+// (Unit::Attack) performs no faction hostility check: this client's player
+// faction templates carry no hostile masks for "attacker"-style creatures
+// (Westfall Nightsabers/Thistle Boars, faction templates 7/189), so the
+// non-forced CanAttack is effectively always false for a player and would
+// reject every pre-combat assist; the player gate mirrors Unit::Attack.
 static bool IsAssistLegalTarget(Unit const* me, Unit const* issuer, Unit const* u)
 {
     if (u->IsPlayer() || me->IsFriendlyTo(u))
         return false;
+    if (u->IsCreature() && ((Creature const*)u)->IsInEvadeMode())
+        return false;
+    if (me->IsPlayer())
+        return u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself());
     if (me->CanAttack(u))
         return true;
     if (!u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
@@ -2428,5 +2493,144 @@ void PlayerBotMgr::UpdatePartyInviteScript()
                                ev.delayMs, ev.inviterGuid, ev.inviteeName.c_str());
         }
         ++m_partyInviteScriptIdx;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PORT-023 (KAP-558): lab-only deterministic owner quest script.
+//
+// The fixture owner is a temp-logged bot session and cannot drive the
+// normal CMSG_QUESTGIVER_* packet flow on its own. Each event
+// resolves the issuer and the nearest live quest creature (HasQuest)
+// within 30 yd and runs the same authoritative helpers the packet
+// handlers use:
+//   accept: CanInteractWithQuestGiver + CanTakeQuest + CanAddQuest
+//           -> AddQuest(qInfo, creature)
+//   turnin: CanCompleteQuest -> CompleteQuest -> CanRewardQuest ->
+//           RewardQuest(qInfo, 0, creature, true)
+// Lab-only and config-gated (default off); a real owner accepts and
+// turns in through the client UI unchanged.
+void PlayerBotMgr::UpdateQuestScript()
+{
+    if (m_questScript.empty() || m_questScriptIdx >= m_questScript.size())
+        return;
+
+    if (m_questScriptStartMs == 0)
+    {
+        // The clock starts only once every issuer is online; earlier,
+        // their sessions do not exist yet.
+        for (size_t i = 0; i < m_questScript.size(); ++i)
+        {
+            std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(m_questScript[i].issuerGuid);
+            if (it == m_bots.end() || it->second->state != PB_STATE_ONLINE)
+                return;
+        }
+        m_questScriptStartMs = WorldTimer::getMSTime();
+        if (confDebug)
+            sLog.outString("[PlayerBot][QuestScript] started events:%u", (uint32)m_questScript.size());
+        return;
+    }
+
+    uint32 const now = WorldTimer::getMSTime() - m_questScriptStartMs;
+    while (m_questScriptIdx < m_questScript.size() &&
+           m_questScript[m_questScriptIdx].delayMs <= now)
+    {
+        QuestScriptEvent const& ev = m_questScript[m_questScriptIdx];
+        std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(ev.issuerGuid);
+        WorldSession* sess = (it != m_bots.end()) ? it->second->session : nullptr;
+        Player* issuer = sess ? sess->GetPlayer() : nullptr;
+        if (!issuer || !issuer->IsAlive() || !issuer->GetMap())
+        {
+            sLog.outError("[PlayerBot][QuestScript] issuer %u unavailable; event skipped", ev.issuerGuid);
+            ++m_questScriptIdx;
+            continue;
+        }
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(ev.questId);
+        if (!qInfo)
+        {
+            sLog.outError("[PlayerBot][QuestScript] quest %u unknown; event skipped", ev.questId);
+            ++m_questScriptIdx;
+            continue;
+        }
+        // Nearest live creature with the declared quest within 30 yd
+        // (the same search discipline as MVP-006's FindQuestGiver).
+        Creature* questNpc = nullptr;
+        {
+            class QuestScriptNpcCheck
+            {
+            public:
+                QuestScriptNpcCheck(Player const* obj, uint32 questId)
+                    : i_obj(obj), i_questId(questId) {}
+                WorldObject const& GetFocusObject() const { return *i_obj; }
+                bool operator()(Creature const* u)
+                {
+                    if (!u->IsAlive() || !u->HasQuest(i_questId))
+                        return false;
+                    return i_obj->IsWithinDistInMap(u, 30.0f);
+                }
+            private:
+                Player const* const i_obj;
+                uint32 i_questId;
+                QuestScriptNpcCheck(QuestScriptNpcCheck const&);
+            };
+            QuestScriptNpcCheck check(issuer, ev.questId);
+            MaNGOS::CreatureLastSearcher<QuestScriptNpcCheck> searcher(questNpc, check);
+            Cell::VisitGridObjects(issuer, searcher, 30.0f);
+        }
+        if (!questNpc)
+        {
+            sLog.outError("[PlayerBot][QuestScript] no quest npc for quest %u near issuer %u; event skipped",
+                          ev.questId, issuer->GetGUIDLow());
+            ++m_questScriptIdx;
+            continue;
+        }
+        if (!ev.turnin)
+        {
+            // The authoritative accept path (HandleQuestGiverAcceptQuest).
+            if (issuer->CanInteractWithQuestGiver(questNpc) &&
+                issuer->CanTakeQuest(qInfo, false) &&
+                issuer->CanAddQuest(qInfo, false))
+            {
+                issuer->AddQuest(qInfo, questNpc);
+                bool const ok = issuer->GetQuestStatus(ev.questId) != QUEST_STATUS_NONE;
+                sLog.outString("[PlayerBot][QuestScript] accept issuer:%u quest:%u giver:%u ok:%u",
+                               issuer->GetGUIDLow(), ev.questId, questNpc->GetEntry(), ok ? 1 : 0);
+            }
+            else
+            {
+                sLog.outString("[PlayerBot][QuestScript] accept denied issuer:%u quest:%u interact:%u take:%u add:%u",
+                               issuer->GetGUIDLow(), ev.questId,
+                               issuer->CanInteractWithQuestGiver(questNpc) ? 1 : 0,
+                               issuer->CanTakeQuest(qInfo, false) ? 1 : 0,
+                               issuer->CanAddQuest(qInfo, false) ? 1 : 0);
+            }
+        }
+        else
+        {
+            // The authoritative turn-in path (CMSG_QUESTGIVER_REQUEST_REWARD
+            // + CMSG_QUESTGIVER_CHOOSE_REWARD, choice index 0). When the
+            // last credit lands the engine already marks the quest
+            // COMPLETE, so CompleteQuest only runs while still
+            // INCOMPLETE, exactly as the handler does; the reward step
+            // only needs COMPLETE plus CanRewardQuest.
+            uint32 xpBefore = issuer->GetUInt32Value(PLAYER_XP);
+            if (issuer->CanCompleteQuest(ev.questId))
+                issuer->CompleteQuest(ev.questId);
+            if (issuer->GetQuestStatus(ev.questId) == QUEST_STATUS_COMPLETE &&
+                issuer->CanRewardQuest(qInfo, false))
+            {
+                issuer->RewardQuest(qInfo, 0, questNpc, true);
+                sLog.outString("[PlayerBot][QuestScript] turnin issuer:%u quest:%u xpBefore:%u xpAfter:%u",
+                               issuer->GetGUIDLow(), ev.questId, xpBefore,
+                               issuer->GetUInt32Value(PLAYER_XP));
+            }
+            else
+            {
+                sLog.outString("[PlayerBot][QuestScript] turnin not-complete issuer:%u quest:%u status:%u",
+                               issuer->GetGUIDLow(), ev.questId,
+                               (uint32)issuer->GetQuestStatus(ev.questId));
+            }
+        }
+        ++m_questScriptIdx;
     }
 }
