@@ -129,7 +129,45 @@ none is in-game client observation.
   (test_bot_planner_transport 2/2, test_companion_planner_transport_value,
   test_companion_real_planner_value 14/14, real_planner phases A-E), which
   prove gameplay stays operational when the service is absent, slow,
-  malformed or stale; a dedicated delayed-tick measurement remains pending.
+  malformed or stale. The dedicated delayed-tick measurement was
+  completed the same day (addendum below).
+
+## Offline/delayed tick impact measurement (addendum, 2026-09-17)
+
+The card's "measured offline/delayed tick impact" validation item was
+completed the same day as a bounded park-head measurement: four sequential
+disposable port-free labs (same image, same owner+companion party scenario,
+Perf.ProcessingTelemetry=5, 120 s steady-state windows; last 22 samples of
+each 5 s interval compared). Driver and evidence are gitignored under
+local/.
+
+| Run | Service state | p50 med | p95 med | p95 max | p99 med | p99 max | tick med | overflow | transport activity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | disabled (no URL) | 5 ms | 6 ms | 39 ms | 29 ms | 168 ms | 50 ms | 1 | 0 lines |
+| B | offline (closed port) | 5 ms | 6.5 ms | 26 ms | 33 ms | 220 ms | 50 ms | 1 | 5 timeouts, 2 cooldowns |
+| C | delayed (400 ms, inside the 5 s deadline) | 5 ms | 7 ms | 59 ms | 23 ms | 83 ms | 50 ms | 1 | 53 delivered offers |
+| D | timeout (past the 5 s deadline) | 5 ms | 6 ms | 28 ms | 25.5 ms | 136 ms | 50 ms | 0 | 4 timeouts, 2 cooldowns, 1 pre-settle offer |
+
+All values in ms per 5 s interval; medians over the 22-sample steady-state
+window. Result: no measurable world-tick degradation in any service state.
+p95 medians move +0 to +1 ms against the disabled baseline and p99 maxima
+stay within the baseline's own spread (A itself shows a 168 ms max and one
+250 ms overflow-bucket sample); tick cadence is a steady 50 ms (20 Hz) in
+every run. The transport's connect-fail retry, 60 s cooldown, delayed
+delivery and deadline-timeout paths are all exercised (log counts above)
+without disturbing tick processing. The single offer in D is the pre-settle
+round answered before the timeout scenario was applied.
+
+Limits: 120 s windows with 22 samples per run bound the tick-tail estimate;
+the scenario is a single companion party, not population scale.
+
+Evidence: local/port026-tick-impact-summary.json (summary + per-run metrics)
+and, per run, local/tortoise-bot-ticka-a20172ccb221-20260917T192620Z/,
+local/tortoise-bot-tickb-87617e099782-20260917T192937Z/,
+local/tortoise-bot-tickc-1652168f40f4-20260917T193245Z/,
+local/tortoise-bot-tickd-c7e9eb37990c-20260917T193554Z/ (world.log,
+telemetry.log, metrics.json); driver local/port026_tick_impact.py.
+Personal containers verified unchanged after every run.
 
 ## Deterministic gates (this session)
 
@@ -204,7 +242,6 @@ run them:
   bag-pressure reporting and protected vendor cleanup observed from the
   client.
 - Jira/KAP state transitions for the Phase 2 stories.
-- A dedicated offline/delayed tick-impact measurement (see Phase F note).
 
 ## Evidence index (gitignored local/)
 
@@ -219,3 +256,4 @@ run them:
 - local/tortoise-bot-xp-442359fa43f9-20260912T213020Z/,
   local/tortoise-bot-xp-51d307558393-20260913T215206Z/,
   local/tortoise-bot-xp-0e3a7e1c4c23-20260917T171226Z/ - combat_xp history
+- local/port026-tick-impact-summary.json, local/tortoise-bot-tick[a-d]-<hex>-<ts>/ - tick-impact measurement (addendum)
