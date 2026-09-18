@@ -2784,6 +2784,90 @@ void PlayerBotAI::ConversationRoundStep()
 }
 
 // ---------------------------------------------------------------------------
+// PORT-027 (KAP-558): in-world status lines for the declared
+// cooperative quest. The companion says its quest state so the
+// owner does not need the server log. Only the server-maintained
+// per-objective counts (QuestStatusData) are read - no inventory
+// scan, no fabricated credit. Single kill objective: "6/15 <mob>";
+// single item objective: "3/10 <item>"; otherwise the summed
+// "9/17 objectives".
+// ---------------------------------------------------------------------------
+namespace
+{
+uint32 CoopQuestProgressHave(QuestStatusData const* qStatus)
+{
+    uint32 total = 0;
+    for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        total += qStatus->m_creatureOrGOcount[i] + qStatus->m_itemcount[i];
+    return total;
+}
+
+std::string CoopQuestProgressLine(Quest const* qInfo, QuestStatusData const* qStatus)
+{
+    uint32 totalNeed = 0, killNeed = 0, itemNeed = 0;
+    char const* killName = nullptr;
+    char const* itemName = nullptr;
+    for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+    {
+        uint32 const cNeed = qInfo->ReqCreatureOrGOCount[i];
+        uint32 const iNeed = qInfo->ReqItemCount[i];
+        totalNeed += cNeed + iNeed;
+        if (cNeed)
+        {
+            killNeed += cNeed;
+            if (!killName && qInfo->ReqCreatureOrGOId[i] > 0)
+                if (CreatureInfo const* ci = sObjectMgr.GetCreatureTemplate((uint32)qInfo->ReqCreatureOrGOId[i]))
+                    killName = ci->name.c_str();
+        }
+        if (iNeed)
+        {
+            itemNeed += iNeed;
+            if (!itemName && qInfo->ReqItemId[i])
+                if (ItemPrototype const* ip = sObjectMgr.GetItemPrototype(qInfo->ReqItemId[i]))
+                    itemName = ip->Name1.c_str();
+        }
+    }
+    uint32 const have = CoopQuestProgressHave(qStatus);
+    std::string line = std::to_string(have) + "/" + std::to_string(totalNeed) + " ";
+    if (killNeed && !itemNeed && killName)
+        line += killName;
+    else if (itemNeed && !killNeed && itemName)
+        line += itemName;
+    else
+        line += "objectives";
+    return line;
+}
+} // namespace
+
+void PlayerBotAI::CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status)
+{
+    (void)questId;
+    if (!qStatus)
+        return;
+    if (qStatus->m_rewarded)
+    {
+        _coopQuestAnnouncedProgress = -1;
+        _coopQuestAnnouncedStatus = 0;
+        return;
+    }
+    int32 const progress = (status == Companion::Quest::kStatusNone)
+        ? -1 : (int32)CoopQuestProgressHave(qStatus);
+    if (status != _coopQuestAnnouncedStatus)
+    {
+        if (status == Companion::Quest::kStatusComplete)
+            me->Say("[Quest] Complete - turning in.", LANG_UNIVERSAL);
+        _coopQuestAnnouncedStatus = status;
+        _coopQuestAnnouncedProgress = progress;
+    }
+    else if (status == Companion::Quest::kStatusInProgress && progress != _coopQuestAnnouncedProgress)
+    {
+        _coopQuestAnnouncedProgress = progress;
+        std::string line = "[Quest] " + CoopQuestProgressLine(qInfo, qStatus) + ".";
+        me->Say(line.c_str(), LANG_UNIVERSAL);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PORT-023 (KAP-558): one owner-driven cooperative quest action
 // per tick.
 //
@@ -2835,6 +2919,9 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
     observation.inCombat = me->IsInCombat();
     observation.ownerInParty = true;
     observation.ownerAvailable = true;
+    // PORT-027: in-world status line before the action path (the
+    // accept/turn-in lines are said from those paths themselves).
+    CooperativeQuestProgressAnnounce(questId, qInfo, qStatus, observation.myStatus);
     // Nearest live quest creature within INTERACTION_DISTANCE (the
     // accept and the turn-in anchor; the declared quest's giver and
     // finisher share the one quest relation). The authoritative
@@ -2882,6 +2969,19 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
                 sLog.outString("[CoopQuest] accepted GUID:%u quest:%u ownerStatus:%u anchor:%u",
                                me->GetGUIDLow(), questId,
                                (uint32)observation.ownerStatus, anchor->GetEntry());
+                // PORT-027: in-world accept line with the starting count.
+                if (QuestStatusData const* aStatus = me->GetQuestStatusData(questId))
+                {
+                    std::string line = "[Quest] Accepted " + qInfo->GetTitle() + " (" +
+                                       CoopQuestProgressLine(qInfo, aStatus) + ").";
+                    me->Say(line.c_str(), LANG_UNIVERSAL);
+                    _coopQuestAnnouncedProgress = (int32)CoopQuestProgressHave(aStatus);
+                }
+                else
+                {
+                    _coopQuestAnnouncedProgress = 0;
+                }
+                _coopQuestAnnouncedStatus = Companion::Quest::kStatusInProgress;
                 return;
             }
         }
@@ -2911,6 +3011,11 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
         me->RewardQuest(qInfo, 0, anchor, true);
         sLog.outString("[CoopQuest] turnin GUID:%u quest:%u xpBefore:%u xpAfter:%u",
                        me->GetGUIDLow(), questId, xpBefore, me->GetUInt32Value(PLAYER_XP));
+        // PORT-027: in-world turn-in line.
+        std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
+        me->Say(line.c_str(), LANG_UNIVERSAL);
+        _coopQuestAnnouncedStatus = 0;
+        _coopQuestAnnouncedProgress = -1;
     }
     else
     {

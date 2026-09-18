@@ -105,6 +105,15 @@ class PlayerBotAI: public PlayerAI
         // denial backoff (ms); a persistent denial re-checks the
         // world at a bounded pace instead of every tick.
         uint32 _coopQuestDenyTimer = 0;
+        // PORT-027 (KAP-558): in-world announcements for the
+        // declared cooperative quest. Progress is said only on
+        // change; the complete line is said once per
+        // IN_PROGRESS->COMPLETE transition; the accept and
+        // turn-in lines are said from the action paths (they
+        // hold the authoritative result); a rewarded quest
+        // resets the tracker silently.
+        int32 _coopQuestAnnouncedProgress = -1;
+        uint8 _coopQuestAnnouncedStatus = 0;
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
         bool _held = false; // PORT-004: owner-directed hold; persists until new order
@@ -151,6 +160,7 @@ class PlayerBotAI: public PlayerAI
         void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
         void ConversationRoundStep(); // PORT-022: consume one bounded reply (world thread never waits)
         void CooperativeQuestStep(uint32 diff); // PORT-023: one owner-driven cooperative quest action (value policy + authoritative quest APIs)
+        void CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status); // PORT-027: in-world quest status line (progress/complete)
         void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
         // KAP-558 hardening: an owned companion without an active order
