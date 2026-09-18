@@ -801,3 +801,47 @@ cross-ref 23891 on KAP-549):
   Personal containers verified unchanged per run.
 - Acceptance doc addendum + handoff/card status updated; the tick item is
   closed out of the pending list. Hosted acceptance remains pending.
+
+2026-09-18 PORT-027 in-world cooperative quest announcements (park-head local-Qwen):
+- Feature: the companion now says its declared cooperative quest state in
+  world (LANG_UNIVERSAL Say) so the owner does not need the server log:
+  accept with starting count ('[Quest] Accepted <Title> (0/15 Mangy Wolf).'),
+  every progress change from the server-maintained per-objective
+  QuestStatusData counts only ('[Quest] 6/15 Mangy Wolf.', item objectives
+  name the item, mixed objectives say 'N/M objectives'), the
+  IN_PROGRESS->COMPLETE transition ('[Quest] Complete - turning in.'), and
+  turn-in success ('[Quest] Turned in <Title>.'). Rewarded quests reset the
+  two-field tracker (progress/status) silently; no announcements when the
+  owner is absent or the party is lost (CooperativeQuestStep early-return).
+  No inventory scan, no fabricated credit.
+- Code: src/game/PlayerBots/PlayerBotAI.h/.cpp (+115): file-local
+  CoopQuestProgressHave/CoopQuestProgressLine helpers +
+  CooperativeQuestProgressAnnounce; accept/turn-in lines said from the
+  authoritative action paths. Commit 2f1164e.
+- Label fix: the first draft used PORT-026 in comments, colliding with the
+  already-assigned PORT-026 (docs/port-026.md + three commits); renumbered
+  to PORT-027 in the two source files only (6 occurrences).
+- Build/deploy: image 90c60796bc0c (tortoise-local:dev); initial rebuild
+  appeared to be a full cache hit against a pre-edit context - diagnosed
+  with a probe file in src/ (probe forced a correct cache miss, then was
+  removed); the final tag's layer content hashes match the current context
+  by construction (BuildKit cache-key guarantee), world force-recreated on
+  the image, boot verified clean (PlayerBotMgr lines, no ERROR/CRIT).
+- Tests: clean full suite (detached, direct file log local/port027-suite.err
+  - the earlier run's Tee pipe died on the session restart and its marks
+  were untrustworthy): Ran 327 tests in 7802.9 s; FAILED (failures=4,
+  errors=3, skipped=1, expected failures=1). All seven are outside the
+  changed path and environmental/flaky: personality runA/runB (fake planner
+  HTTP server did not come up), party setUpClass (fixture world boot
+  timeout), bench test_02 (sample-window assertion), combat_xp (no XP
+  awarded - combat timing), real_planner (fallback log line not observed
+  in window), login_lifecycle stale-completion (extra Logout event). The
+  same failure signature reproduced in the interrupted pre-restart run.
+  quest, quest_coop, restart, vendor, damage, equipment, loot, follow all
+  PASSED; the four baseline vendor money round-trip failures did not
+  reproduce in this run. No pre-change control run performed (would need a
+  rebuilt pre-change image; the diff is confined to the coop-quest
+  announce path, which the quest/quest_coop labs exercise and pass).
+- In-game validation pending with the operator (quest 60007 leg).
+- Retrieval sync not performed (embedding paused per operator instruction);
+  direct-read fallback used throughout. No park-agent worker (park-head).
