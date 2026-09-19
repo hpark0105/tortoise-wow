@@ -118,6 +118,7 @@ class PlayerBotMgr
         // quest (0 = disabled); the companion mirrors the owner
         // through the normal quest APIs only.
         uint32 GetCooperativeQuestId() const { return confCooperativeQuestId; }
+        bool GetMirrorOwnerQuests() const { return confMirrorOwnerQuests; } // PORT-030 (KAP-558)
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
         // PORT-018 (KAP-558): the bounded nonblocking party-planner
@@ -198,6 +199,7 @@ class PlayerBotMgr
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
         uint32 confQuestId; // MVP-006: one declared supported quest (0 = disabled)
         uint32 confCooperativeQuestId; // PORT-023: one declared supported cooperative quest (0 = disabled)
+        bool confMirrorOwnerQuests; // PORT-030: dynamic mirror of the owner's kill-only quests (0 = off)
         float confWanderRadius; // PORT-007 lab: 0 = legacy frand(8,20); >0 = max idle-wander radius (yd)
         bool confAmbientAcquire; // PORT-023 lab: ambient auto-hunt acquire gate (default on; lab owner fixture disables it)
         bool forceLogoutDelay;

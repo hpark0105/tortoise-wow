@@ -16,6 +16,7 @@
 #include "Companion/Inventory.h"
 #include <utility>
 #include <vector>
+#include <map>
 
 struct PlayerBotEntry;
 class WorldSession;
@@ -105,15 +106,17 @@ class PlayerBotAI: public PlayerAI
         // denial backoff (ms); a persistent denial re-checks the
         // world at a bounded pace instead of every tick.
         uint32 _coopQuestDenyTimer = 0;
-        // PORT-027 (KAP-558): in-world announcements for the
-        // declared cooperative quest. Progress is said only on
-        // change; the complete line is said once per
+        // PORT-027 (KAP-558): in-world announcements for
+        // cooperative quests. Progress is said only on change;
+        // the complete line is said once per
         // IN_PROGRESS->COMPLETE transition; the accept and
         // turn-in lines are said from the action paths (they
         // hold the authoritative result); a rewarded quest
-        // resets the tracker silently.
-        int32 _coopQuestAnnouncedProgress = -1;
-        uint8 _coopQuestAnnouncedStatus = 0;
+        // resets the tracker silently. PORT-030 (KAP-558):
+        // keyed per quest so dynamic mirror mode can track
+        // several mirrored quests at once.
+        struct CoopQuestAnnounceState { int32 progress = -1; uint8 status = 0; };
+        std::map<uint32, CoopQuestAnnounceState> _coopQuestAnnounce;
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
         bool _held = false; // PORT-004: owner-directed hold; persists until new order
@@ -159,7 +162,9 @@ class PlayerBotAI: public PlayerAI
         bool UpdateCompanion(uint32 diff);
         void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
         void ConversationRoundStep(); // PORT-022: consume one bounded reply (world thread never waits)
-        void CooperativeQuestStep(uint32 diff); // PORT-023: one owner-driven cooperative quest action (value policy + authoritative quest APIs)
+        void CooperativeQuestStep(uint32 diff); // PORT-023/030: one owner-driven cooperative quest action (declared quest, or dynamic kill-only mirror)
+        void CooperativeDeclaredQuestStep(uint32 questId, Player* owner); // PORT-023: single declared quest path (value policy + authoritative quest APIs)
+        void MirrorOwnerQuestStep(Player* owner); // PORT-030: dynamic mirror of the owner's kill-only quests (no per-quest config)
         void CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status); // PORT-027: in-world quest status line (progress/complete)
         void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
