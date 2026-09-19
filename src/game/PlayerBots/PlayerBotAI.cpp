@@ -1162,6 +1162,7 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
 void PlayerBotAI::OnPlayerLogin()
 {
     _lastLevel = me ? me->GetLevel() : 0;
+    RepairBrokenEquipment();
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
     InitQuestState();
@@ -1172,6 +1173,36 @@ void PlayerBotAI::OnLevelUp()
     _lastLevel = me ? me->GetLevel() : _lastLevel;
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
+}
+
+// PORT-029 (KAP-558): repair broken equipment for owned companions
+// at login. Fixture/lab-seeded item instances (character_inventory /
+// item_instance rows written directly by tests) may carry zero
+// durability and non-1 counts. IsBroken() items are excluded from
+// Player::HasItemFitToSpellReqirements, so a "born broken" weapon or
+// shield rejects every spell with an equipment requirement
+// (SPELL_FAILED_EQUIPPED_ITEM_CLASS) and leaves the rotation on
+// ordinary attacks. Durability is restored to the prototype maximum;
+// non-stackable counts are normalized to 1. Idempotent; the next
+// autosave persists the corrected values.
+void PlayerBotAI::RepairBrokenEquipment()
+{
+    if (!me || !IsOwnedCompanion())
+        return;
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item)
+            continue;
+        ItemPrototype const* proto = item->GetProto();
+        if (!proto)
+            continue;
+        if (item->IsBroken())
+            item->SetUInt32Value(ITEM_FIELD_DURABILITY, proto->MaxDurability);
+        if (proto->Stackable <= 1 && item->GetCount() != 1)
+            item->SetCount(1);
+    }
 }
 
 void PlayerBotAI::AutoLearnSpellsForLevel()
@@ -1199,9 +1230,33 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
         if (ability->racemask && !(ability->racemask & raceMask))
             continue;
 
-        // Skip tradeskills / profession gated spells
-        if (ability->req_skill_value != 0)
-            continue;
+        // PORT-028 (KAP-558): category-based filter instead of the old
+        // blanket req_skill_value skip. The 1.12 data gates most class
+        // abilities on req_skill_value (the "raises this skill line"
+        // marker, uniformly 1 in this DBC), so the old skip dropped
+        // nearly every combat spell and left the companion auto-attack
+        // only. Learn from Weapon Skills (6), Class Skills (7) and
+        // Armor Proficiencies (8); skip Professions (11), Secondary
+        // Skills (9) and Not Displayed (12). A gated entry first raises
+        // the required skill line; UpdateSkill refuses a 0-value line,
+        // so a missing line still skips the entry.
+        if (ability->skillId)
+        {
+            SkillLineEntry const* skillLine = sSkillLineStore.LookupEntry(ability->skillId);
+            int32 const category = skillLine ? skillLine->categoryId : 0;
+            if (category != 6 && category != 7 && category != 8)
+                continue;
+            uint32 const have = me->GetSkillValue((uint16)ability->skillId);
+            if (ability->req_skill_value > have)
+            {
+                if (have == 0 || !me->UpdateSkill(ability->skillId, ability->req_skill_value - have))
+                    continue;
+            }
+        }
+        else if (ability->req_skill_value != 0)
+        {
+            continue; // unknown skill line with a gate: keep the old skip
+        }
 
         SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(ability->spellId);
         if (!spellInfo)
