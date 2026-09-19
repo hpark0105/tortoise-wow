@@ -845,3 +845,106 @@ cross-ref 23891 on KAP-549):
 - In-game validation pending with the operator (quest 60007 leg).
 - Retrieval sync not performed (embedding paused per operator instruction);
   direct-read fallback used throughout. No park-agent worker (park-head).
+
+2026-09-18 PORT-028/029 validated live; PORT-030 dynamic quest mirror, PORT-031 conversation reliability, PORT-032 follow stance (park-head local-Qwen):
+  - PORT-028 verified in game: companion (guid 2, warrior) learned DBC
+    skill-line spells via the OnLevelUp hook (level 7->8 gained 284 Heroic
+    Strike r2 and 1715 Shield Bash). DBC evidence (data/dbc, WDBC format):
+    SkillLineAbility 15 cols; all 161 warrior rows gate skillId=26
+    req_skill_value=1; the learnOnGet=2 rows are base-class abilities the
+    engine grants natively (78/196/198/201/2457/107/5301/8737/9077/9078/
+    9116) - present in m_spells at login but never persisted to
+    character_spell, which is why the DB shows only learned rows. Hamstring
+    7372 spellLevel=32 (talent-gated): never learned by design. Probes:
+    local/dbc_probe3.py, local/dbc_sim.py, local/dbc_sim3.py.
+  - PORT-029 root cause of "only Charge works": the lab fixture seeded the
+    companion weapon/shield with durability=0 and stack counts 10-16 (born
+    broken). Player::HasItemFitToSpellReqirements (Player.cpp:21741) rejects
+    broken equipment -> every weapon/shield spell failed res:25 =
+    SPELL_FAILED_EQUIPPED_ITEM_CLASS (SpellDefines.h:311); Charge has no
+    equip requirement. Fix: RepairBrokenEquipment() at OnPlayerLogin for
+    owned companions (durability -> proto->MaxDurability, count -> 1 when
+    proto->Stackable<=1) plus a one-off DB repair of the 9 instances while
+    the world was down. Operator confirmed the companion now uses Rend /
+    Heroic Strike / Shield Bash (log: cast-accepted spell:1715/772/100,
+    zero res:25). Fork slot layout (Player.h:585, Turtle 1.18.1):
+    15=MAINHAND, 16=OFFHAND, 17=RANGED, 14=BACK, 19-22 bags - not vanilla
+    1.12 slot order.
+  - PORT-030: dynamic owner-quest mirror (no per-quest config). Dispatcher
+    CooperativeQuestStep -> declared path (byte-identical old behavior) or
+    MirrorOwnerQuestStep when PlayerBot.MirrorOwnerQuests=1 and
+    CooperativeQuestId=0. Mirrors any owner quest INCOMPLETE (status 3) that
+    IsKillOnlyQuest() passes (all objectives ReqCreatureOrGOId>0, no
+    item/source/spell objectives), within INTERACTION_DISTANCE (5.0f) of the
+    anchor, via authoritative CanTakeQuest/CanAddQuest/AddQuest; re-mirrors
+    stale rewarded REPEATABLE rows; turn-in loop for own COMPLETE+unrewarded
+    quests near the finisher. Per-quest announce state map. Committed
+    a30d505 with PORT-032. Note: the server.py PLAYERBOT_MIRROR_OWNER_QUESTS
+    passthrough alone never reached the container; the compose.yaml world
+    environment passthrough was missing and was added this session.
+  - PORT-031: in-game /p "Companion hey" was submitted
+    ("[Conversation] submit bot:2 len:13") then failed "no reply". Chain
+    verified end to end: world ConversationTransport -> 18341
+    real_planner_server.py -> 127.0.0.1:8090 llama-server (Qwen3.8-27B
+    Q4_K_XL, 262k ctx). Root cause: planner /plan rounds pace every 2 s and
+    each model call ran to the 4000 ms cap, pinning the single-flight
+    MODEL_LOCK, so one-shot /converse rounds mostly hit HTTP 500 busy and
+    were dropped (no reply is the designed fallback). Fix: (a) world side -
+    one bounded retry of a failed converse round (Slot.attempt, fresh stamp,
+    party signature re-validated on Poll); (b) service side - per-path
+    budgets: plan model timeout 1500 ms rate-gated to one call per tick
+    window (10 s, Hold elsewhere), converse waits up to 1000 ms for the lock
+    then 2500 ms model - worst case ~3.5 s under the world's hard 4000 ms
+    kRoundTimeoutMs. Validated on throwaway port 18342: converse none 200 in
+    2108 ms ("I am here."), plan model ok 953 ms steps:2, second plan gated
+    0 ms Hold, reckless persona 200 in 546 ms in-character. Live 18341
+    service restarted with stdout to local/real-planner.log. Committed
+    13f57ec.
+  - PORT-032: UpdateFollow aimed the path at the leader's exact position
+    (kFollowRange 2.0f stop), so the companion stood on the player's center.
+    Path target is now a fixed 1.5 yd offset to the leader's right (side
+    vector (cos o, -sin o) for facing (sin o, cos o)); the kFollowRange stop
+    rule still owns arrival so there is no overlap. Committed a30d505.
+  - Personality: PLAYERBOT_PERSONALITY_PROFILE=reckless set in .env (compose
+    passthrough added). SyncPersonality seeds the bot_personality row on the
+    companion's next login (companion was baseline schemaVersion=0, so the
+    config seed applies); a persisted row is never rewritten, so changing the
+    profile later requires deleting the row. Reckless persona confirmed live
+    in the 18342 validation (in-character reply).
+  - Labs (post PORT-028/029 image): 57 tests in 1804 s, FAILED (failures=1) -
+    only test_bot_combat_xp.test_normal_combat_awards_xp ("0 not greater than
+    0"), the pre-existing baseline failure (same in the PORT-027 full-suite
+    baseline; that lab pins tortoise-local:mvp003-review, a level-3 bot vs
+    level-1 wolf calibration artifact, not the dev binary). damage / assist /
+    defend / quest_coop all PASSED on tortoise-local:dev.
+  - Labs (this session: test_bot_follow, test_bot_companion_converse,
+    test_bot_companion_personality) running at write time; results to be
+    appended to the next entry.
+  - Operator in-game confirmations: GM invisibility cleared (character_aura
+    spell 16380 + extra_flags reset while world down); companion now uses
+    weapon skills in combat; Lulu quest (60007) accepted, kills credited,
+    turned in for both, companion leveled up; "my bags are full" vendor
+    line observed with .botfollow.
+  - Retrieval sync not performed (embedding paused per operator instruction);
+    direct-read fallback used throughout. No park-agent worker (park-head).
+
+2026-09-19 follow-up: /p no-reply root cause (party membership), lab port collision (park-head local-Qwen):
+  - Operator's /p still got no reply. World log: repeated
+    "[Conversation] invalidate bot:2" every tick = the no-group branch of
+    ConversationRoundStep: the companion was not in a party. /p only reaches
+    party members and BotPartyMessage additionally requires issuer+bot in the
+    same group, so every addressed message was dropped before the transport.
+    .botfollow deliberately does not party up (TW-014: "party membership is
+    not required and not checked"); .botrecruit <bot> is the party-join
+    command (works offline: queues login + recruit). In-game flow:
+    .botrecruit Companion, .botfollow Companion, /p Companion hey.
+  - The follow/converse/personality lab run (started 2026-09-18) was invalid
+    and killed: the personality lab _free_port() scanned 18341..18369 and
+    landed on the live planner service port 18341 (bind probe collided with
+    the 0.0.0.0 listener); its fake server never served /scenario,
+    _wait_server kept polling the live service (686 404 lines in
+    local/real-planner.log), and the shared model single-flight could have
+    been contaminated. Fix: lab range moved to 18371..18399 (clear of live
+    18341 and the converse lab's 18441..18469); rerun pending.
+  - Retrieval sync not performed (embedding paused per operator instruction);
+    direct-read fallback used. No park-agent worker (park-head).

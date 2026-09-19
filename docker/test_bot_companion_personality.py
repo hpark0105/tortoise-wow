@@ -70,14 +70,14 @@ DELETE FROM tw_world.creature WHERE map=0
 
 
 def _free_port():
-    for port in range(18341, 18370):
+    for port in range(18371, 18400):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("127.0.0.1", port))
                 return port
             except OSError:
                 continue
-    raise RuntimeError("no free fake-planner port in 18341..18369")
+    raise RuntimeError("no free fake-planner port in 18371..18399")
 
 
 def _http(port, path, data=None):
