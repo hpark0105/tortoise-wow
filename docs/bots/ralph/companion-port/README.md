@@ -36,11 +36,36 @@ they have not been created as individual Jira issues.
 - [PORT-009: Support one normal companion death and recovery path](port-009.md)
 - [PORT-010: Qualify one useful companion and review commits](port-010.md)
 
+Phase 2 begins only after the PORT-010 acceptance record is reconciled. Its
+canonical execution order is:
+
+- [PORT-011: Preserve landed targeting/fallback and close cast-result telemetry gaps](port-011.md)
+- [PORT-012: Extract the reviewed combat executor and resolve capability gaps](port-012.md)
+- [PORT-013: Extract the reviewed typed-intent boundary and add pure-policy coverage](port-013.md)
+- [PORT-014: Implement one legal tank threat policy](port-014.md)
+- [PORT-015: Implement one legal healer triage policy](port-015.md)
+- [PORT-016: Implement damage assist and pull discipline](port-016.md)
+- [PORT-017: Specify the planner protocol and fake-service contract](port-017.md)
+- [PORT-018: Add bounded nonblocking shared party-planner transport](port-018.md)
+- [PORT-019: Add bounded personality preferences and expression](port-019.md)
+- [PORT-020: Persist minimal versioned personality state](port-020.md)
+- [PORT-021: Connect the real local model through the accepted adapter](port-021.md)
+- [PORT-022: Add bounded conversational party chat](port-022.md)
+- [PORT-023: Complete one cooperative quest with the owner](port-023.md)
+- [PORT-024: Progress companion equipment from earned loot](port-024.md)
+- [PORT-025: Report bag pressure and sell protected junk at a vendor](port-025.md)
+- [PORT-026: Qualify Phase 2 conversation, cooperation, progression and personality](port-026.md)
+
 PORT-001 precedes CMP-010; then PORT-002 through PORT-010 run sequentially.
 CMP-011 is a hosted roll-up, not another implementation assignment.
-Tank/healer policies, general questing, population scale, and LLM runtime
-integration wait until this wave is accepted. The prior follow/stop MVP remains
-historical evidence; it is not acceptance of this useful-companion milestone.
+PORT-011 through PORT-026 are the Phase 2 decomposition. The old CMP-012,
+CMP-013, CMP-014 and LLM-010 cards become roll-up acceptance references for
+PORT-014, PORT-015, PORT-016 and PORT-017..018 respectively; do not dispatch
+both versions as duplicate implementation work. General autonomous questing,
+population scale and learned behavior remain later phases; Phase 2 contains one
+bounded cooperative quest only. The prior follow/stop MVP
+remains historical evidence; it is not acceptance of this useful-companion
+milestone.
 
 ## Worker and commit governance
 
@@ -65,10 +90,10 @@ historical evidence; it is not acceptance of this useful-companion milestone.
    QA assignment and actual client observations. Missing human gameplay evidence
    stays pending. Existing Jira pipeline rules apply only if that pipeline is used.
 
-Local park-agent launch was blocked by PowerShell script-execution policy in the
-preceding review. No local review is claimed for these cards. Resolve the approved
-launcher before dispatch; do not weaken machine policy silently. Hosted Codex can
-continue direct review while local execution is unavailable.
+If `park-agent` is blocked by another active local session, the shared-model
+mutex, or the approved launcher, report the exact fallback reason. Do not weaken
+machine policy or run concurrent local-model requests. Hosted Codex can continue
+bounded direct review while local execution is unavailable.
 
 ## Shared validation gates
 

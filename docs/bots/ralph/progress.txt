@@ -756,3 +756,195 @@ cross-ref 23891 on KAP-549):
   review is claimed for this entry. Post-change retrieval sync returned an
   MCP error after the service wait; no embedding or derived-write counts are
   claimed.
+
+2026-09-17 PORT-026 / KAP-543 (park-head local-Qwen; cumulative Phase 2 battery):
+- Full 36-module battery on tortoise-local:dev
+  sha256:7f02bf278719a6b9a1727c84c3be2540b4b3e232ae201dcb82cec1b50a9e2e16
+  (built from f96d4b2): 34/36 PASS (local/port026-summary.txt).
+- test_bot_equipment FAIL(1) root-caused to fixture staleness: Lab B filler
+  Tough Jerky (117) is the PORT-025 declared-sellable junk class, so vendor
+  cleanup sold all 16 stacks and the asserted pressure marker never fired.
+  Filler changed to Earthroot (2449, TRADE_GOODS, protected by the Classify
+  matrix); 4-token charge seeds corrected to 5. Rerun 17/17 OK in 385.1s;
+  failure evidence retained (local/tortoise-bot-eq-b8378696f55e-20260917T161801Z).
+- test_bot_combat_xp FAIL(1) is a known 3-day engagement flake (pass 09-12,
+  fail 09-13, fail 09-17; the lab pins mvp003-review, not dev); isolated
+  rerun 1/1 OK in 118.5s.
+- Phase F live real-model round PASS: one schema-valid response from
+  Qwen3.8-27B-UD-Q4_K_XL at 127.0.0.1:8090 in 1156 ms, 716/13 tokens
+  (local/port026-real_planner_live.log).
+- Gates: 15 value suites OK with no skips; py_compile docker/server.py OK;
+  docker compose config --quiet OK; git diff --check clean.
+- Wrote docs/bots/companion-phase-2-acceptance.md; updated
+  phase-2-handoff.md and port-026.md (passes=false retained; hosted
+  acceptance pending: diff review, QA handoff with read-only worker,
+  in-game client evidence, Jira transitions, delayed-tick measurement).
+- No park-agent worker (park-head holds the model mutex); retrieval sync
+  still MCP-error (embedding service down), direct-read fallback used, no
+  sync counts claimed. Jira untouched.
+
+2026-09-17 PORT-026 tick-impact measurement (park-head local-Qwen):
+- Measured the card's "measured offline/delayed tick impact" item with four
+  sequential port-free labs (tortoise-local:dev 7f02bf27, same party
+  scenario, Perf.ProcessingTelemetry=5, 120 s steady-state windows, last 22
+  samples): A transport disabled, B offline (closed port: 5 timeouts + 2
+  60 s cooldowns), C delayed 400 ms (53 delivered offers), D timeout past
+  the 5000 ms deadline (4 timeouts + 2 cooldowns).
+- Result: no measurable tick degradation. proc p50 med 5 ms in all runs;
+  p95 med 6/6.5/7/6 ms (max 26-59 ms); p99 med 23-33 ms (max 83-220 ms);
+  tick interval med 50 ms in all runs; baseline A itself had one 250 ms
+  overflow-bucket sample. Transport retry, cooldown and timeout paths were
+  exercised without disturbing tick processing.
+- Evidence: local/port026-tick-impact-summary.json and
+  local/tortoise-bot-tick{a,b,c,d}-<hex>-<ts>/ (world.log, telemetry.log,
+  metrics.json); driver local/port026_tick_impact.py (gitignored).
+  Personal containers verified unchanged per run.
+- Acceptance doc addendum + handoff/card status updated; the tick item is
+  closed out of the pending list. Hosted acceptance remains pending.
+
+2026-09-18 PORT-027 in-world cooperative quest announcements (park-head local-Qwen):
+- Feature: the companion now says its declared cooperative quest state in
+  world (LANG_UNIVERSAL Say) so the owner does not need the server log:
+  accept with starting count ('[Quest] Accepted <Title> (0/15 Mangy Wolf).'),
+  every progress change from the server-maintained per-objective
+  QuestStatusData counts only ('[Quest] 6/15 Mangy Wolf.', item objectives
+  name the item, mixed objectives say 'N/M objectives'), the
+  IN_PROGRESS->COMPLETE transition ('[Quest] Complete - turning in.'), and
+  turn-in success ('[Quest] Turned in <Title>.'). Rewarded quests reset the
+  two-field tracker (progress/status) silently; no announcements when the
+  owner is absent or the party is lost (CooperativeQuestStep early-return).
+  No inventory scan, no fabricated credit.
+- Code: src/game/PlayerBots/PlayerBotAI.h/.cpp (+115): file-local
+  CoopQuestProgressHave/CoopQuestProgressLine helpers +
+  CooperativeQuestProgressAnnounce; accept/turn-in lines said from the
+  authoritative action paths. Commit 2f1164e.
+- Label fix: the first draft used PORT-026 in comments, colliding with the
+  already-assigned PORT-026 (docs/port-026.md + three commits); renumbered
+  to PORT-027 in the two source files only (6 occurrences).
+- Build/deploy: image 90c60796bc0c (tortoise-local:dev); initial rebuild
+  appeared to be a full cache hit against a pre-edit context - diagnosed
+  with a probe file in src/ (probe forced a correct cache miss, then was
+  removed); the final tag's layer content hashes match the current context
+  by construction (BuildKit cache-key guarantee), world force-recreated on
+  the image, boot verified clean (PlayerBotMgr lines, no ERROR/CRIT).
+- Tests: clean full suite (detached, direct file log local/port027-suite.err
+  - the earlier run's Tee pipe died on the session restart and its marks
+  were untrustworthy): Ran 327 tests in 7802.9 s; FAILED (failures=4,
+  errors=3, skipped=1, expected failures=1). All seven are outside the
+  changed path and environmental/flaky: personality runA/runB (fake planner
+  HTTP server did not come up), party setUpClass (fixture world boot
+  timeout), bench test_02 (sample-window assertion), combat_xp (no XP
+  awarded - combat timing), real_planner (fallback log line not observed
+  in window), login_lifecycle stale-completion (extra Logout event). The
+  same failure signature reproduced in the interrupted pre-restart run.
+  quest, quest_coop, restart, vendor, damage, equipment, loot, follow all
+  PASSED; the four baseline vendor money round-trip failures did not
+  reproduce in this run. No pre-change control run performed (would need a
+  rebuilt pre-change image; the diff is confined to the coop-quest
+  announce path, which the quest/quest_coop labs exercise and pass).
+- In-game validation pending with the operator (quest 60007 leg).
+- Retrieval sync not performed (embedding paused per operator instruction);
+  direct-read fallback used throughout. No park-agent worker (park-head).
+
+2026-09-18 PORT-028/029 validated live; PORT-030 dynamic quest mirror, PORT-031 conversation reliability, PORT-032 follow stance (park-head local-Qwen):
+  - PORT-028 verified in game: companion (guid 2, warrior) learned DBC
+    skill-line spells via the OnLevelUp hook (level 7->8 gained 284 Heroic
+    Strike r2 and 1715 Shield Bash). DBC evidence (data/dbc, WDBC format):
+    SkillLineAbility 15 cols; all 161 warrior rows gate skillId=26
+    req_skill_value=1; the learnOnGet=2 rows are base-class abilities the
+    engine grants natively (78/196/198/201/2457/107/5301/8737/9077/9078/
+    9116) - present in m_spells at login but never persisted to
+    character_spell, which is why the DB shows only learned rows. Hamstring
+    7372 spellLevel=32 (talent-gated): never learned by design. Probes:
+    local/dbc_probe3.py, local/dbc_sim.py, local/dbc_sim3.py.
+  - PORT-029 root cause of "only Charge works": the lab fixture seeded the
+    companion weapon/shield with durability=0 and stack counts 10-16 (born
+    broken). Player::HasItemFitToSpellReqirements (Player.cpp:21741) rejects
+    broken equipment -> every weapon/shield spell failed res:25 =
+    SPELL_FAILED_EQUIPPED_ITEM_CLASS (SpellDefines.h:311); Charge has no
+    equip requirement. Fix: RepairBrokenEquipment() at OnPlayerLogin for
+    owned companions (durability -> proto->MaxDurability, count -> 1 when
+    proto->Stackable<=1) plus a one-off DB repair of the 9 instances while
+    the world was down. Operator confirmed the companion now uses Rend /
+    Heroic Strike / Shield Bash (log: cast-accepted spell:1715/772/100,
+    zero res:25). Fork slot layout (Player.h:585, Turtle 1.18.1):
+    15=MAINHAND, 16=OFFHAND, 17=RANGED, 14=BACK, 19-22 bags - not vanilla
+    1.12 slot order.
+  - PORT-030: dynamic owner-quest mirror (no per-quest config). Dispatcher
+    CooperativeQuestStep -> declared path (byte-identical old behavior) or
+    MirrorOwnerQuestStep when PlayerBot.MirrorOwnerQuests=1 and
+    CooperativeQuestId=0. Mirrors any owner quest INCOMPLETE (status 3) that
+    IsKillOnlyQuest() passes (all objectives ReqCreatureOrGOId>0, no
+    item/source/spell objectives), within INTERACTION_DISTANCE (5.0f) of the
+    anchor, via authoritative CanTakeQuest/CanAddQuest/AddQuest; re-mirrors
+    stale rewarded REPEATABLE rows; turn-in loop for own COMPLETE+unrewarded
+    quests near the finisher. Per-quest announce state map. Committed
+    a30d505 with PORT-032. Note: the server.py PLAYERBOT_MIRROR_OWNER_QUESTS
+    passthrough alone never reached the container; the compose.yaml world
+    environment passthrough was missing and was added this session.
+  - PORT-031: in-game /p "Companion hey" was submitted
+    ("[Conversation] submit bot:2 len:13") then failed "no reply". Chain
+    verified end to end: world ConversationTransport -> 18341
+    real_planner_server.py -> 127.0.0.1:8090 llama-server (Qwen3.8-27B
+    Q4_K_XL, 262k ctx). Root cause: planner /plan rounds pace every 2 s and
+    each model call ran to the 4000 ms cap, pinning the single-flight
+    MODEL_LOCK, so one-shot /converse rounds mostly hit HTTP 500 busy and
+    were dropped (no reply is the designed fallback). Fix: (a) world side -
+    one bounded retry of a failed converse round (Slot.attempt, fresh stamp,
+    party signature re-validated on Poll); (b) service side - per-path
+    budgets: plan model timeout 1500 ms rate-gated to one call per tick
+    window (10 s, Hold elsewhere), converse waits up to 1000 ms for the lock
+    then 2500 ms model - worst case ~3.5 s under the world's hard 4000 ms
+    kRoundTimeoutMs. Validated on throwaway port 18342: converse none 200 in
+    2108 ms ("I am here."), plan model ok 953 ms steps:2, second plan gated
+    0 ms Hold, reckless persona 200 in 546 ms in-character. Live 18341
+    service restarted with stdout to local/real-planner.log. Committed
+    13f57ec.
+  - PORT-032: UpdateFollow aimed the path at the leader's exact position
+    (kFollowRange 2.0f stop), so the companion stood on the player's center.
+    Path target is now a fixed 1.5 yd offset to the leader's right (side
+    vector (cos o, -sin o) for facing (sin o, cos o)); the kFollowRange stop
+    rule still owns arrival so there is no overlap. Committed a30d505.
+  - Personality: PLAYERBOT_PERSONALITY_PROFILE=reckless set in .env (compose
+    passthrough added). SyncPersonality seeds the bot_personality row on the
+    companion's next login (companion was baseline schemaVersion=0, so the
+    config seed applies); a persisted row is never rewritten, so changing the
+    profile later requires deleting the row. Reckless persona confirmed live
+    in the 18342 validation (in-character reply).
+  - Labs (post PORT-028/029 image): 57 tests in 1804 s, FAILED (failures=1) -
+    only test_bot_combat_xp.test_normal_combat_awards_xp ("0 not greater than
+    0"), the pre-existing baseline failure (same in the PORT-027 full-suite
+    baseline; that lab pins tortoise-local:mvp003-review, a level-3 bot vs
+    level-1 wolf calibration artifact, not the dev binary). damage / assist /
+    defend / quest_coop all PASSED on tortoise-local:dev.
+  - Labs (this session: test_bot_follow, test_bot_companion_converse,
+    test_bot_companion_personality) running at write time; results to be
+    appended to the next entry.
+  - Operator in-game confirmations: GM invisibility cleared (character_aura
+    spell 16380 + extra_flags reset while world down); companion now uses
+    weapon skills in combat; Lulu quest (60007) accepted, kills credited,
+    turned in for both, companion leveled up; "my bags are full" vendor
+    line observed with .botfollow.
+  - Retrieval sync not performed (embedding paused per operator instruction);
+    direct-read fallback used throughout. No park-agent worker (park-head).
+
+2026-09-19 follow-up: /p no-reply root cause (party membership), lab port collision (park-head local-Qwen):
+  - Operator's /p still got no reply. World log: repeated
+    "[Conversation] invalidate bot:2" every tick = the no-group branch of
+    ConversationRoundStep: the companion was not in a party. /p only reaches
+    party members and BotPartyMessage additionally requires issuer+bot in the
+    same group, so every addressed message was dropped before the transport.
+    .botfollow deliberately does not party up (TW-014: "party membership is
+    not required and not checked"); .botrecruit <bot> is the party-join
+    command (works offline: queues login + recruit). In-game flow:
+    .botrecruit Companion, .botfollow Companion, /p Companion hey.
+  - The follow/converse/personality lab run (started 2026-09-18) was invalid
+    and killed: the personality lab _free_port() scanned 18341..18369 and
+    landed on the live planner service port 18341 (bind probe collided with
+    the 0.0.0.0 listener); its fake server never served /scenario,
+    _wait_server kept polling the live service (686 404 lines in
+    local/real-planner.log), and the shared model single-flight could have
+    been contaminated. Fix: lab range moved to 18371..18399 (clear of live
+    18341 and the converse lab's 18441..18469); rerun pending.
+  - Retrieval sync not performed (embedding paused per operator instruction);
+    direct-read fallback used. No park-agent worker (park-head).

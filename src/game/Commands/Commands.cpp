@@ -19542,3 +19542,33 @@ bool ChatHandler::HandleBotPartyCommand(char* args, uint8 action)
     }
     return ok;
 }
+
+// PORT-022 (KAP-558): lab-only conversation injector. Feeds the same
+// dispatcher BotPartyMessage uses for live party chat, so a follow-script
+// event can address a party companion deterministically:
+//   .botpartymsg <botname> [message]
+// The dispatcher re-validates party membership and ownership.
+bool ChatHandler::HandleBotPartyMsgCommand(char* args)
+{
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+    std::string rest(args ? args : "");
+    size_t const b = rest.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos)
+    {
+        SendSysMessage("Usage: .botpartymsg <botname> [message]");
+        return false;
+    }
+    bool ok = sPlayerBotMgr.BotPartyMessage(p, rest);
+    if (!ok)
+    {
+        SendSysMessage("Bot party message rejected.");
+        SetSentErrorMessage(true);
+    }
+    return ok;
+}

@@ -4,27 +4,33 @@
 #include "PlayerAI.h"
 #include "WorldSession.h"
 #include "Companion/Policy.h"
+#include "Companion/Combat.h"
+#include "Companion/Tank.h"
+#include "Companion/Healer.h"
+#include "Companion/Damage.h"
+#include "Companion/PlannerTransport.h"
+#include "Companion/ConversationTransport.h"
+#include "Companion/Personality.h"
+#include "Companion/Quest.h"
+#include "Companion/Equipment.h"
+#include "Companion/Inventory.h"
+#include <utility>
+#include <vector>
+#include <map>
 
 struct PlayerBotEntry;
 class WorldSession;
 class PlayerBotAI;
 class Creature;
+class Item;
 
 PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 
-// Hardening item 3 (KAP-558): a combat engagement routed through the
-// shared executor (ExecuteCombat). The source intent selects the legality
-// rules and the drop-out cleanup; the request carries values only (target
-// GUID, generation, distance limit) - the executor re-resolves the target
-// from the world each tick and never stores engine pointers.
-enum class CombatSource { Assist, ContinueCombat, Defend };
-struct CombatRequest
-{
-    uint64_t targetGuid;
-    CombatSource source;
-    uint32_t generation;
-    float maxDistance;
-};
+// PORT-012 (KAP-558): the combat engagement request, source taxonomy,
+// target validator, pursuit leash, target slots, capability model and
+// cast-result vocabulary live in Companion/Combat.h (value-only); the
+// executor re-resolves the target from the world each tick and never
+// stores engine pointers.
 
 class PlayerBotAI: public PlayerAI
 {
@@ -61,11 +67,20 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
-        ObjectGuid _combatTargetGuid; // Hardening item 4: held live combat target (0 = none)
-        ObjectGuid _lootCorpseGuid; // Hardening item 4: dead corpse pending loot (0 = none)
+        // Hardening item 4 / PORT-012: the live combat target and the
+        // dead corpse pending loot are explicit slots with named transitions
+        // (Companion::Combat::TargetSlots); owner orders never live here.
+        Companion::Combat::TargetSlots _targets;
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
-        uint32 _pursuitLeashMs = 0; // PORT-008: remaining (ms) of the pursuit reach budget; 0 = disarmed
+        uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
+        uint64_t _vendorTargetGuid = 0; // PORT-025: resolved vendor within the declared radius (0 = none)
+        uint32_t _vendorScanTimer = 0;  // PORT-025: re-scan pace accumulation (ms)
+        uint32_t _vendorFailTimer = 0;  // PORT-025: no-vendor report pace (ms)
+        bool _vendorFailReported = false; // PORT-025: first no-vendor report emitted
+        bool _pressureReported = false;   // PORT-025: episode status line emitted
+        bool _vendorExhausted = false;    // PORT-025: no sellable junk left this episode
+        Companion::Combat::Leash _pursuitLeash; // PORT-008/012: pursuit reach budget
         bool _recoveryDead = false; // PORT-009: recovery state armed (dead with an active order)
         uint32 _recoveryReportMs = 0; // PORT-009: bounded report pace remaining (ms)
         uint32 _recoveryWalkMs = 0; // PORT-009: corpse walk re-issue window remaining (ms)
@@ -87,6 +102,21 @@ class PlayerBotAI: public PlayerAI
         uint32 _questScanTimer = 0;
         uint32 _questDebugTimer = 0;
         uint8 _questDenyCount = 0;
+        // PORT-023 (KAP-558): cooperative quest accept/turn-in
+        // denial backoff (ms); a persistent denial re-checks the
+        // world at a bounded pace instead of every tick.
+        uint32 _coopQuestDenyTimer = 0;
+        // PORT-027 (KAP-558): in-world announcements for
+        // cooperative quests. Progress is said only on change;
+        // the complete line is said once per
+        // IN_PROGRESS->COMPLETE transition; the accept and
+        // turn-in lines are said from the action paths (they
+        // hold the authoritative result); a rewarded quest
+        // resets the tracker silently. PORT-030 (KAP-558):
+        // keyed per quest so dynamic mirror mode can track
+        // several mirrored quests at once.
+        struct CoopQuestAnnounceState { int32 progress = -1; uint8 status = 0; };
+        std::map<uint32, CoopQuestAnnounceState> _coopQuestAnnounce;
         // TW-014 (KAP-557): active follow goal (leader guid + monotonic seq).
         bool _following = false;
         bool _held = false; // PORT-004: owner-directed hold; persists until new order
@@ -94,11 +124,27 @@ class PlayerBotAI: public PlayerAI
         uint64_t _defendTargetGuid = 0; // PORT-006: current defend candidate (0 = none)
         uint32 _defendProbeTimer = 0; // PORT-006: debug probe pacing (2000 ms)
         uint32 _defendTargetGrace = 0; // PORT-006: grace remaining (ms) for a locked defend target
+        uint32 _damageWaitTimer = 0; // PORT-016: [Damage] wait-line pacing (2000 ms)
         uint32 _followSeq = 0;
         uint32 _followLeaderGuid = 0;
         uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
         bool _followReached = false;
         uint32 _followDebugTimer = 0;
+        // PORT-018 (KAP-558): shared party planner round state (the
+        // transport lives in PlayerBotMgr; disabled unless a service
+        // URL is configured).
+        uint32 _plannerLeaderGuid = 0;
+        uint32 _plannerGroupId = 0;
+        uint32 _plannerLastSubmitMs = 0;
+        uint32 _plannerReqId = 1;
+        Companion::Planner::Step _plannerOffer = {};
+        bool _plannerOfferValid = false;
+        // PORT-019 (KAP-558): bounded personality runtime state.
+        // Effects of validated planner Preference steps only; owner
+        // orders, hold, recovery and role policy always win over
+        // them and Reset() returns the deterministic baseline.
+        float _personalityChaseDist = kOwnerFollowChaseDist;
+        uint32 _personalityLastExprMs = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
@@ -106,18 +152,39 @@ class PlayerBotAI: public PlayerAI
         void ExecuteLoot(Creature* corpse, uint32 diff);
         bool UpdateFollow(uint32 diff);
         bool PursuitLeashTick(Unit* target, uint32 diff); // PORT-008: one tick of the pursuit reach budget
-        // Hardening item 3 (KAP-558): shared combat executor for the
-        // Assist, ContinueCombat and Defend intents (see CombatRequest);
-        // the per-source debug lines are the fixture contract.
-        bool ExecuteCombat(CombatRequest const& req, uint32 diff);
+        // Hardening item 3 / PORT-012 (KAP-558): shared combat executor
+        // for the Assist, ContinueCombat and Defend intents (see
+        // Companion::Combat::Request); the per-source debug lines are
+        // the fixture contract.
+        bool ExecuteCombat(Companion::Combat::Request const& req, uint32 diff);
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
+        void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
+        void ConversationRoundStep(); // PORT-022: consume one bounded reply (world thread never waits)
+        void CooperativeQuestStep(uint32 diff); // PORT-023/030: one owner-driven cooperative quest action (declared quest, or dynamic kill-only mirror)
+        void CooperativeDeclaredQuestStep(uint32 questId, Player* owner); // PORT-023: single declared quest path (value policy + authoritative quest APIs)
+        void MirrorOwnerQuestStep(Player* owner); // PORT-030: dynamic mirror of the owner's kill-only quests (no per-quest config)
+        void CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status); // PORT-027: in-world quest status line (progress/complete)
+        void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
         // KAP-558 hardening: an owned companion without an active order
         // follows its owner instead of running the legacy auto-hunt
         // (autonomous acquisition + wander stay for ambient bots only).
         bool IsOwnedCompanion() const;
+        // PORT-024 (KAP-558): equipment progression from loot the owned
+        // companion legitimately received (value policy in
+        // Companion/Equipment.h + authoritative inventory APIs).
+        void EvaluateReceivedEquipment(std::vector<std::pair<uint32, uint32>> const& itemCounts);
+        void EvaluateReceivedInstance(Item* item, uint8 bag, uint8 slot);
+        // PORT-025 (KAP-558): bag-pressure report + bounded vendor
+        // cleanup (value policy in Companion/Inventory.h; the sale
+        // mirrors the vendor packet handler's guards and APIs).
+        uint8_t CountFreeSlots() const;
+        Companion::Inventory::ItemInfo FillItemInfo(Item* item) const;
+        bool VendorPressureStep(uint32 diff);
+        void ExecuteVendor(Companion::Intent const& intent, uint32 diff);
+        void SellJunkToVendor(Creature* vendor);
         Player* FindOwnerByAccount() const;
         static constexpr float kOwnerFollowChaseDist = 25.0f;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
@@ -137,10 +204,41 @@ class PlayerBotAI: public PlayerAI
         Creature* FindQuestGiver() const;
         Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
+        // PORT-029 (KAP-558): fixture-seeded item instances may carry
+        // zero durability (born broken) and non-1 counts; the engine
+        // excludes broken items from spell equipment requirements,
+        // which silently strips every weapon/armor-requiring ability.
+        // Repair owned-companion equipment in memory at login.
+        void RepairBrokenEquipment();
         uint32 SelectOffensiveSpell(Unit* target) const;
         // Hardening (KAP-558): cast-or-attack step; arms _abilityTimer only
         // on a successful cast (see TryOffensiveCastOrAttack).
         bool TryOffensiveCastOrAttack(Unit* target);
+        // PORT-014 (KAP-558): declared tank threat policy (see
+        // Companion/Tank.h): the pinned matrix gate, the per-evaluation
+        // observation fill and the taunt step (a rejected taunt falls
+        // back to the ordinary attack in the same evaluation).
+        bool IsDeclaredTank() const;
+        Companion::Tank::Observation FillTankObservation(Unit* target) const;
+        void TankTauntStep(Unit* target);
+        // PORT-015 (KAP-558): declared healer triage policy (see
+        // Companion/Healer.h): the pinned matrix gate, the per-tick
+        // triage observation filled from the live world, and the one
+        // cast step with the PORT-012 cast outcome diagnostics.
+        bool IsDeclaredHealer() const;
+        Companion::Healer::Observation FillHealerObservation() const;
+        void HealerTriageStep(Companion::Healer::Observation const& obs,
+                              Companion::Healer::Decision const& decision);
+        // PORT-016 (KAP-558): declared damage tank-pull policy (see
+        // Companion/Damage.h): the pinned matrix gate, the per-tick
+        // observation filled from the live world, the crowd-control
+        // preservation set, and the established-target
+        // revalidation for the shared executor.
+        bool IsDeclaredDamage() const;
+        Unit* FindDeclaredTank() const;
+        bool TargetUnderCC(Unit* unit) const;
+        Companion::Damage::Observation FillDamageObservation() const;
+        bool IsEstablishedTankTarget(Creature* target) const;
         void AutoEquipForLevel();
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;

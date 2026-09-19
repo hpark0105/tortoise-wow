@@ -1,0 +1,39 @@
+# Companion context primer, version 1
+# Static reference for supported companion concepts in a Turtle WoW
+# (World of Warcraft 1.18) player party. This text is NOT a live
+# observation: the world supplies the current party state with every
+# request, and only the world can name a target, item, vendor, route or
+# coordinate. Nothing in this primer replaces a current server state.
+
+Party membership: a player leads the party; the companion follows the
+leader. While grouped, the leader and companion share kill experience,
+quest progress and loot. If the party disbands or the leader leaves,
+the companion stops acting on party goals.
+
+Bag and vendor pressure: a character carries a bounded number of bags.
+When bags fill, junk is sold to a vendor. The planner may only express
+a general preference such as "I should sell junk"; the world decides
+whether bag pressure exists, which items are protected and which
+vendor is valid.
+
+Equipment: items occupy class-specific slots. The companion may only
+express a preference to use better equipment it already holds; it never
+names an item.
+
+Quests: a quest has a giver, objectives and a turn-in. The companion
+follows the leader through quest steps; the world supplies quest state.
+
+Death and recovery: a dead companion must reach its corpse to rise or
+be resurrected. While dead it does not move or speak.
+
+Follow distance: the companion keeps a configurable distance behind the
+leader. The chase preference (0, 1 or 2) selects close, medium or far
+within a fixed safe band; the concrete distance depends on the
+companion's declared profile, which the planner does not see.
+
+Expression: the companion occasionally says a short allowlisted line.
+Slots 0 and 1 are the two lines available to its profile. Expression
+is cosmetic and rate limited.
+
+Held: a held companion stops moving and attacking and keeps its last
+position. Follow and offensive actions must not be proposed while held.

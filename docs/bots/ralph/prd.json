@@ -759,9 +759,9 @@
       ],
       "priority": 64,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/post-mvp/cmp-012.md",
+      "notes": "Hosted roll-up for PORT-014; do not dispatch as duplicate implementation. Cards: docs/bots/ralph/post-mvp/cmp-012.md and companion-port/port-014.md.",
       "dependsOn": [
-        "CMP-011"
+        "PORT-014"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -776,7 +776,8 @@
       "milestone": "P2",
       "validation": [
         "declared tank-class two-creature pull lab"
-      ]
+      ],
+      "executionMode": "hosted-acceptance"
     },
     {
       "id": "CMP-013",
@@ -788,9 +789,9 @@
       ],
       "priority": 65,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/post-mvp/cmp-013.md",
+      "notes": "Hosted roll-up for PORT-015; do not dispatch as duplicate implementation. Cards: docs/bots/ralph/post-mvp/cmp-013.md and companion-port/port-015.md.",
       "dependsOn": [
-        "CMP-011"
+        "PORT-015"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -805,7 +806,8 @@
       "milestone": "P2",
       "validation": [
         "declared healer-class resource and triage lab"
-      ]
+      ],
+      "executionMode": "hosted-acceptance"
     },
     {
       "id": "CMP-014",
@@ -817,10 +819,9 @@
       ],
       "priority": 66,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/post-mvp/cmp-014.md",
+      "notes": "Hosted roll-up for PORT-016; do not dispatch as duplicate implementation. Cards: docs/bots/ralph/post-mvp/cmp-014.md and companion-port/port-016.md.",
       "dependsOn": [
-        "CMP-011",
-        "CMP-012"
+        "PORT-016"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -835,7 +836,8 @@
       "milestone": "P2",
       "validation": [
         "declared damage-class pull-discipline lab"
-      ]
+      ],
+      "executionMode": "hosted-acceptance"
     },
     {
       "id": "POP-020",
@@ -905,11 +907,9 @@
       ],
       "priority": 80,
       "passes": false,
-      "notes": "Card: docs/bots/ralph/post-mvp/llm-010.md; related park-llama concurrency card: docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md",
+      "notes": "Hosted roll-up for PORT-017 and PORT-018; do not dispatch as duplicate implementation. Related park-llama concurrency card: docs/bots/ralph/mvp/llm-001-park-llama-concurrency.md.",
       "dependsOn": [
-        "CMP-012",
-        "CMP-013",
-        "CMP-014"
+        "PORT-018"
       ],
       "allowedScope": [
         "src/game/PlayerBots/",
@@ -926,7 +926,8 @@
       "validation": [
         "schema and stale-response tests",
         "thirty-minute model-offline companion run"
-      ]
+      ],
+      "executionMode": "hosted-acceptance"
     },
     {
       "id": "PORT-001",
@@ -1245,9 +1246,516 @@
       ],
       "executionMode": "hosted-acceptance",
       "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-011",
+      "title": "Close deterministic targeting and cast-result gaps",
+      "description": "Harden same-name assist selection and ensure rejected spell casts fall back to legal deterministic attacks before Phase 2 refactoring.",
+      "acceptanceCriteria": [
+        "A dead or invalid same-name unit cannot mask a legal live hostile assist target, while dead-only lookup retains a precise rejection.",
+        "A rejected preferred spell does not arm a false delay or suppress a legal ordinary attack.",
+        "Diagnostics record the selected spell and a bounded authoritative success or rejection category without treating an attempted cast as success."
+      ],
+      "priority": 52,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-011.md. Phase 2 entry hardening.",
+      "dependsOn": [
+        "PORT-010"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "docker/test_bot_companion_assist.py",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Focused same-name targeting and failed-cast fallback labs plus affected companion regressions."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-012",
+      "title": "Extract authoritative combat execution and explicit target state",
+      "description": "Share target validation and combat execution across assist, defend and existing combat, and separate live combat state from corpse-loot state.",
+      "acceptanceCriteria": [
+        "Assist, defend and existing combat use one authoritative live target validator and executor without behavior drift.",
+        "Combat-target and loot-corpse state transition and clear independently without retaining live pointers.",
+        "The executor selects only known currently usable abilities, records a bounded cast outcome, and immediately falls back after rejection without consuming the action window."
+      ],
+      "priority": 53,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-012.md.",
+      "dependsOn": [
+        "PORT-011"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/Companion/",
+        "src/game/CMakeLists.txt",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Compile and complete Phase 1 companion regression matrix."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-013",
+      "title": "Establish the immutable observation and typed directive boundary",
+      "description": "Create versioned value-only observation and directive types, make Defend first-class, and centralize deterministic priority and execution validation.",
+      "acceptanceCriteria": [
+        "The complete deterministic priority is represented by typed value-only policy inputs and outputs.",
+        "Stale or invalid directives fail live execution validation without changing lifecycle or persistence code."
+      ],
+      "priority": 54,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-013.md.",
+      "dependsOn": [
+        "PORT-012"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/CMakeLists.txt",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Pure policy/generation checks and complete Phase 1 behavior regressions."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-014",
+      "title": "Implement one legal tank threat policy",
+      "description": "Implement one declared Turtle tank class and level using normal learned abilities and measured threat for a bounded pull.",
+      "acceptanceCriteria": [
+        "The supported tank establishes and recovers threat without unrelated pulls and respects owner authority.",
+        "Unsafe, unreachable or unsupported pulls produce a bounded safe outcome without fabricated abilities or threat.",
+        "Every attempted tank ability uses shared cast-result diagnostics and rejected casts immediately fall back without a false delay."
+      ],
+      "priority": 55,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-014.md. Implementation unit for CMP-012.",
+      "dependsOn": [
+        "PORT-013"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/CMakeLists.txt",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Declared tank-class one- and two-creature threat labs."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-015",
+      "title": "Implement one legal healer triage policy",
+      "description": "Implement one declared Turtle healer class and level with explicit party triage, range, LOS and mana rules.",
+      "acceptanceCriteria": [
+        "The supported healer selects the declared highest-priority legal injured party member and uses learned affordable healing.",
+        "Low-resource, unavailable, stale or unreachable cases hold safely and preserve deterministic owner authority.",
+        "Every attempted heal uses shared cast-result diagnostics and rejection immediately produces the next legal triage or follow outcome."
+      ],
+      "priority": 56,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-015.md. Implementation unit for CMP-013. Implemented: value-only triage policy (Companion/Healer.h) with owner > self > most-injured priority, 70% per-mille threshold, 96+32 mana floor, withDelayed one-flight gate and hold-position for the movement-interruptible cast (the re-accept storm fix). Value 1/1 and disposable runtime lab 12/12 on tortoise-local:dev 21a0e9d2 (2026-09-16). passes=false pending user approval.",
+      "dependsOn": [
+        "PORT-013"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/CMakeLists.txt",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Declared healer triage, resource, range/LOS and stale-order labs."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-016",
+      "title": "Implement damage assist and pull discipline",
+      "description": "Implement one declared Turtle damage class that waits for tank threat, preserves control and attacks only the approved target.",
+      "acceptanceCriteria": [
+        "Damage begins after the declared threat gate and does not pull or damage unrelated or controlled targets.",
+        "Hold, newer owner orders and unsupported or ambiguous pull state prevent stale offense.",
+        "The policy excludes currently unusable spells and a rejected cast cannot consume the action window or suppress the ordinary attack or next legal action."
+      ],
+      "priority": 57,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-016.md. Implementation unit for CMP-014. Implemented on feature/kap-558-port-phase2: Companion/Damage.h policy (Rogue matrix, pull gate, CC preservation set, v2) + adapter packed-GUID handoff (the executor resolves packed object GUIDs; the observation keeps the low-GUID value contract). Runtime fixture docker/test_bot_damage.py is 10/10 green; Phase 1 matrix, tank and healer fixtures are green. passes stays false pending in-game verification sign-off.",
+      "dependsOn": [
+        "PORT-014",
+        "PORT-015"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/CMakeLists.txt",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Threat-delay, controlled-target, owner-override and unsupported-class labs."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-017",
+      "title": "Specify the planner protocol and fake-service contract",
+      "description": "Define bounded versioned party observation and response schemas and a deterministic fake service before production transport.",
+      "acceptanceCriteria": [
+        "Schemas bound identity, versions, generations, age, counts, sizes and allowlisted values without live pointers or executable text.",
+        "The fake service deterministically exercises success, delay, timeout, malformed, oversized, unsupported and stale responses."
+      ],
+      "priority": 58,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-017.md. Implemented and contract-verified (value tests, deterministic fake, cross-language CLI anchor); passes pending head sign-off. Protocol prerequisite to LLM-010.",
+      "dependsOn": [
+        "PORT-014",
+        "PORT-015",
+        "PORT-016"
+      ],
+      "allowedScope": [
+        "docs/bots/",
+        "src/game/PlayerBots/Companion/",
+        "docker/personality-service/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Schema round-trip, negative parser and deterministic fake-service contract tests."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-018",
+      "title": "Add bounded nonblocking shared party-planner transport",
+      "description": "Send one event-driven shared party request without blocking the world thread and offer only current validated responses to deterministic controllers.",
+      "acceptanceCriteria": [
+        "World ticks perform no service I/O or waiting; queue, in-flight work, retries, sizes and deadlines are capped.",
+        "Offline, delayed, malformed, stale, duplicate and reordered responses cause no model action or deterministic gameplay delay.",
+        "Only accepted player-party membership enables planner requests; leaving, removal or disband invalidates the old session generation while preserving personality and character progression."
+      ],
+      "priority": 59,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-018.md. Implemented: bounded worker-thread transport (5s round deadline, 60s backoff, queue depth 1, newest wins), party-session generations, validated record-only offers; value + live fake-service fixtures; passes pending head sign-off. Implementation unit for LLM-010.",
+      "dependsOn": [
+        "PORT-017"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/CMakeLists.txt",
+        "docker/personality-service/",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Fake-service matrix, lifecycle cancellation and measured offline/delayed world-tick impact."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-019",
+      "title": "Add bounded personality preferences and expression",
+      "description": "Add versioned profiles that influence allowlisted expression and preferences among deterministic safe tactics.",
+      "acceptanceCriteria": [
+        "Two declared profiles produce bounded observable differences without overriding owner orders or deterministic safety.",
+        "Unsafe, unknown, excessive or stale personality output falls back to the deterministic baseline."
+      ],
+      "priority": 60,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-019.md. Implemented (2026-09-16): Companion/Personality.h declared profiles (Reckless/Cautious), FollowChase/Expression preferences through validated Preference steps, PlayerBot.PersonalityProfile config, allowlisted Say with 15 s rate limit; value suite plus test_bot_companion_personality A/B and model-absence baseline; wire kMaxPreference raised 255 -> 0xFFFF so the packed (id<<8)|value payload passes protocol validation (fixture-verified). Fixture re-verified green 2026-09-16 (A/B/C). passes held for head sign-off. Learning and reflection remain Phase 4.",
+      "dependsOn": [
+        "PORT-018"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "docker/personality-service/",
+        "data/bot-knowledge/",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Deterministic profile A/B, conflict, sanitization, rate-limit and fallback tests."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-020",
+      "title": "Persist minimal versioned personality state",
+      "description": "Persist profile identity and explicitly approved bounded preference state without coupling character saves to service availability.",
+      "acceptanceCriteria": [
+        "Supported profile identity survives logout, restart, party leave/rejoin and isolated restore without changing normal character state or learned spells.",
+        "Reinviting the same bot restores its existing personality under a new party-session generation rather than assigning a new profile.",
+        "Missing, unknown or invalid personality data fails closed to a documented deterministic default."
+      ],
+      "priority": 61,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-020.md. Implemented (2026-09-16): bot_personality versioned row in the ordered character updater (schema 1, declared profile id); roster join with AcceptPersisted fail-closed plus first-login config seed that never overwrites a persisted or rejected row; PlayerBotAI reads the persisted identity so config changes never reassign a personality. Value suite extended; test_bot_companion_personality_persist proves seed/restart/tamper behavior in one isolated project (gen-3 container isolation repair 2026-09-16; re-run green). passes held for head sign-off. Learning history and social memory remain Phase 4.",
+      "dependsOn": [
+        "PORT-019"
+      ],
+      "allowedScope": [
+        "sql/database_updates/character/",
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotMgr.cpp",
+        "src/game/PlayerBots/PlayerBotMgr.h",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Idempotent migration and disposable restart, recall, restore and invalid-version tests."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-021",
+      "title": "Connect the real local model through the accepted adapter",
+      "description": "Map the approved local provider into the accepted schema and transport without moving prompts, provider details or execution authority into PlayerBotAI.",
+      "acceptanceCriteria": [
+        "One bounded shared party request receives a current schema-valid personality result from the approved local service.",
+        "Busy, offline, slow, malformed or extra-schema provider output yields no model action and no deterministic gameplay delay."
+      ],
+      "priority": 62,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-021.md. Implemented (2026-09-16): real_planner value adapter + host-side real_planner_server (strict JSON schema, closed no-target action vocabulary, versioned digest-pinned primer, single-flight model call, Hold fallback for offline/busy/timeout/malformed); model_client stdlib OpenAI-compatible client with key-file auth; capture policy + round-consumption order repair documented in planner-protocol.md (fetch-before-submit so the 10 s production tick can consume rounds); value suite test_companion_real_planner_value; runtime fixture test_bot_companion_real_planner (offline/timeout/schema/malformed/busy phases + optional live round); measure_candidates.py harness for the blocked candidate comparison (shared-model concurrency with the active head session). Candidate model selection awaits operator-run measurement; passes held for head sign-off.",
+      "dependsOn": [
+        "PORT-020"
+      ],
+      "allowedScope": [
+        "docker/personality-service/",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Real-adapter contract, one measured current response, sensitive-data inspection and busy/offline/malformed/stale fallback tests."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-022",
+      "title": "Add bounded conversational party chat",
+      "description": "Let a player address a current party companion through one declared chat channel and receive a bounded personality-consistent response from the approved local model adapter. Text-only, with no path to gameplay directives.",
+      "acceptanceCriteria": [
+        "Only a bot in the player's current party may receive a request; one addressed message yields at most one bounded response and leaving the group invalidates outstanding work and blocks new requests.",
+        "Conversation output is sanitized text that cannot contain or be reinterpreted as a command, target, spell, item, coordinate or gameplay directive; the world thread never waits for the response."
+      ],
+      "priority": 63,
+      "passes": false,
+      "notes": "Implemented (PORT-022): ConversationTransport (value ConvRound), BotPartyMessage intake, ConversationRoundStep consumer, party-chat + .botpartymsg wiring, /converse on the real+fake adapters (converse.py). Value tests green (ConvRound + adapter); runtime fixture docker/test_bot_companion_converse.py covers all failure classes. Raw transcripts are not persisted by default and prompt-injection text is never echoed. passes=false pending acceptance; Jira move pending operator approval.",
+      "dependsOn": [
+        "PORT-021"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "docker/personality-service/",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Fake- and real-adapter fixtures for a greeting, a random question, a personality-distinct reply, addressed/unaddressed messages, party leave/rejoin, rate/length/sanitization, timeout/malformed/stale responses, and concurrent combat with no world-thread delay or gameplay action."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-023",
+      "title": "Complete one cooperative quest with the owner",
+      "description": "Implement one owner-driven cooperative quest vertical slice for one declared Turtle quest: both characters use their own normal quest logs, accept through the authoritative quest path, perform the bounded objectives together and turn in independently. Not general autonomous quest selection.",
+      "acceptanceCriteria": [
+        "When both characters are eligible, the owner starts the supported cooperative goal, the companion accepts normally, receives only authoritative credit, reaches completion and turns in through the normal reward path; quest state and rewards survive logout and world restart.",
+        "Hold, combat safety, death/recovery, owner loss and newer orders retain their existing priority; leaving the party stops cooperative planning without erasing the companion's persisted quest state."
+      ],
+      "priority": 64,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-023.md. The owning card records the exact quest, prerequisites, giver/finisher, objective types and group-credit rules from current Turtle data. Implemented (2026-09-16): Companion/Quest.h value policy + CooperativeQuestStep world adapter + lab-only owner QuestScript driver + three disposable Compose labs (eligible/ineligible/death-recovery). Runtime hardening: PlayerBot.AmbientAcquire gate for the lab owner, forced-form CanAttack revalidation for assist, handler-shaped turn-in gates on both paths. Passes stays false pending final three-lab evidence and operator acceptance.",
+      "dependsOn": [
+        "PORT-022"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "src/game/PlayerBots/Companion/",
+        "src/game/CMakeLists.txt",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Disposable eligible/ineligible pair fixture, normal acceptance, supported kill or loot credit, Hold and party-loss interruption, death/recovery, turn-in/reward, restart persistence, and separate player/companion state evidence."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-024",
+      "title": "Progress companion equipment from earned loot",
+      "description": "Deterministic equipment progression from loot the companion legitimately receives: a deterministic evaluator proves an upgrade and equips it through normal inventory APIs. No free companion gear refresh.",
+      "acceptanceCriteria": [
+        "A persistent companion that legitimately receives a usable loot item equips it only when the deterministic upgrade comparison proves it is an upgrade, and item and money state persist after logout and world restart.",
+        "Leaving or rejoining the party cannot replace earned gear with generated gear; equipped, quest and protected items are never sold or discarded and the model never supplies item IDs or equips directly."
+      ],
+      "priority": 65,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-024.md. Implemented: single gate for the free AutoEquipForLevel refresh on owned companions, Companion/Equipment.h value-only strict-upgrade policy, CorpseLootStep evaluation via authoritative CanEquipItem + SwapItem 1:1 exchange, bounded inventory pressure for unstoreable loot. First revision silently rejected every legal upgrade (packed dest 0xFFxx compared against EQUIPMENT_SLOT_END); found by the Upgrade lab, fixed. 17/17 lab tests green on image sha256:355cdaae (Upgrade 6/6 incl. restart round-trip, Pressure 8/8, Ambient 3/3). passes=false pending operator acceptance.",
+      "dependsOn": [
+        "PORT-023"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Earned-loot upgrade, non-upgrade rejection, protected-item safety, party leave/rejoin with no free gear, and restart persistence fixtures."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-025",
+      "title": "Report bag pressure and sell approved junk at a vendor",
+      "description": "Bag-pressure reporting and authoritative vendor cleanup: when the companion reaches the declared free-slot threshold it reports the pressure once at a bounded rate and may sell only approved junk to an authoritative reachable vendor.",
+      "acceptanceCriteria": [
+        "Equipped, quest and upgrade items are protected; only approved junk is sold through the normal sell and money APIs and the resulting money and inventory state persists after the sale.",
+        "Vendor search is bounded by a declared radius and travel bound; no route invention, no item invention and no selling of protected items."
+      ],
+      "priority": 66,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-025.md. Protected and sellable item classes, the free-slot threshold, notification cadence and vendor radius are fixed by the owning card.",
+      "dependsOn": [
+        "PORT-024"
+      ],
+      "allowedScope": [
+        "src/game/PlayerBots/Companion/",
+        "src/game/PlayerBots/PlayerBotAI.cpp",
+        "src/game/PlayerBots/PlayerBotAI.h",
+        "docker/"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Threshold and reporting-rate fixtures, protected-item safety, approved-junk sale through normal APIs, vendor reachability bounds, and post-sale money/inventory persistence."
+      ],
+      "executionMode": "bounded-local-worker",
+      "trackingJiraKey": "KAP-558"
+    },
+    {
+      "id": "PORT-026",
+      "title": "Qualify Phase 2 conversation, cooperation, progression and personality",
+      "description": "Hosted cumulative acceptance of deterministic roles, shared planning, party lifecycle, bounded personality, persistence, local-model integration, conversational chat, the cooperative quest, equipment progression and bag/vendor cleanup.",
+      "acceptanceCriteria": [
+        "The declared party passes legal tank, healer and damage behavior plus bounded personality expression and persistence across restart and party leave/rejoin.",
+        "Offline, slow, malformed and stale responses leave deterministic gameplay operational, Hold invalidates outstanding work, and the quest and equipment/bag paths persist normal authoritative state for both characters."
+      ],
+      "priority": 67,
+      "passes": false,
+      "notes": "Card: docs/bots/ralph/companion-port/port-026.md. Hosted acceptance only; QA worker must not edit source.",
+      "dependsOn": [
+        "PORT-025"
+      ],
+      "allowedScope": [
+        "docs/bots/ralph/companion-port/phase-2-handoff.md",
+        "docs/bots/ralph/prd.json"
+      ],
+      "jiraKey": null,
+      "issueType": "Story",
+      "headReviewRequired": true,
+      "jiraStatus": "Not created",
+      "milestone": "phase-2-personality",
+      "validation": [
+        "Full deterministic gates, Phase 1/2 regressions, fake- and real-service matrices, party lifecycle and persistence, quest/equipment/bag acceptance, read-only QA and bounded client evidence."
+      ],
+      "executionMode": "hosted-acceptance",
+      "trackingJiraKey": "KAP-558"
     }
   ],
-  "lastReviewed": "2026-09-13",
+  "lastReviewed": "2026-09-16",
   "mvpDefinition": {
     "foundationGate": "One owned bot earns XP, loot, and supported quest progress through normal game paths; the exact state survives restart and isolated restore.",
     "playableCompanion": "The foundation gate plus owner-safe targeting and deterministic owner-only follow/stop with no LLM dependency.",

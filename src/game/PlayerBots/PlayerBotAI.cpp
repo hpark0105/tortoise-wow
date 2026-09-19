@@ -8,6 +8,8 @@
 #include "ObjectMgr.h"
 #include "MoveSpline.h"
 #include "PlayerBotMgr.h"
+#include "ObjectAccessor.h"
+#include "Timer.h"
 #include "Group.h"
 #include "WorldPacket.h"
 #include "Map.h"
@@ -23,12 +25,14 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include <map>
 
 
 namespace
 {
 // TW-014 (KAP-557): the companion holds this range around its owner.
 const float kFollowRange = 2.0f;
+const float kFollowSideOffsetYd = 1.5f; // PORT-032: stand beside, not on the leader
 
 // PORT-007 (KAP-558): a corpse loot attempt is bounded by this window (ms) so
 // a denied or unreachable corpse cannot trap the companion; on expiry the
@@ -41,7 +45,6 @@ uint32 const kLootWindowMs = 20000;
 // A target within melee reach disarms the budget, so an actual fight has
 // unbounded kill time. Phase-1 named constant; per-entry config is
 // future work.
-uint32 const kPursuitLeashMs = 30000;
 // PORT-009 (KAP-558): while a dead companion cannot yet reclaim its
 // corpse (no corpse, reclaim delay not over, or out of range), the
 // recovery state is reported at most this often (ms).
@@ -104,20 +107,28 @@ uint32 const kDefendTargetGraceMs = 5000;
 // hit one of ours carry that evidence (victim pointer or
 // attacker-set membership), and stale evidence decays when the fight
 // ends.
+// PORT-012 (KAP-558): the defend legality predicate is the module's
+// snapshot predicate; this fill keeps the defend scan and the shared
+// executor snapshot on one rule set.
+static Companion::Combat::TargetSnapshot DefendSnapshot(Unit const* me, Unit const* owner, Creature const* u)
+{
+    Companion::Combat::TargetSnapshot s;
+    s.exists = true;
+    s.alive = u->IsAlive();
+    s.inWorld = u->IsInWorld();
+    s.friendly = me->IsFriendlyTo(u);
+    s.canAttack = me->CanAttack(u);
+    s.targetable = u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself());
+    Unit const* const victim = u->GetVictim();
+    s.victimIsProtected = victim == me || (owner && victim == owner);
+    s.attackingMe = u->GetAttackers().count(const_cast<Unit*>(me)) != 0;
+    s.attackingOwner = owner != nullptr && u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+    return s;
+}
+
 static bool DefendTargetLegal(Unit const* me, Unit const* owner, Creature const* u)
 {
-    if (me->IsFriendlyTo(u))
-        return false;
-    if (me->CanAttack(u))
-        return true;
-    if (!u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
-        return false;
-    Unit const* const victim = u->GetVictim();
-    if (victim == me || (owner && victim == owner))
-        return true;
-    if (u->GetAttackers().count(const_cast<Unit*>(me)) != 0)
-        return true;
-    return owner != nullptr && u->GetAttackers().count(const_cast<Unit*>(owner)) != 0;
+    return Companion::Combat::DefendTargetLegal(DefendSnapshot(me, owner, u));
 }
 
 class BotDefendScan
@@ -215,6 +226,41 @@ public:
 
 private:
     BotDefendProbe(BotDefendProbe const&);
+    Unit const* me;
+    Creature* m_best;
+    float m_dist;
+};
+
+// PORT-025 (KAP-558): nearest legal vendor within the declared
+// radius: live, in-world, vendor service flag, not evading. The
+// executor re-validates through the same interaction check the
+// vendor packet handler uses before any approach or sale.
+class BotVendorSearcher
+{
+public:
+    BotVendorSearcher(Unit const* source)
+        : me(source), m_best(nullptr), m_dist(0.0f) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive() || !u->IsInWorld())
+            return false;
+        if (!u->IsVendor() || u->IsInEvadeMode())
+            return false;
+        float const d = me->GetDistance(u);
+        if (!m_best || d < m_dist ||
+            (d == m_dist && u->GetGUIDLow() < m_best->GetGUIDLow()))
+        {
+            m_best = u;
+            m_dist = d;
+        }
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotVendorSearcher(BotVendorSearcher const&);
     Unit const* me;
     Creature* m_best;
     float m_dist;
@@ -397,7 +443,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 if (sPlayerBotMgr.IsDebugEnabled())
                     sLog.outString("[PlayerBot] no-order idle GUID:%u", me->GetGUIDLow());
             }
-            else if (Unit* target = me->SelectNearestTarget(30.0f))
+            else if (Unit* target = sPlayerBotMgr.IsAmbientAcquireEnabled()
+                                 ? me->SelectNearestTarget(30.0f) : nullptr)
             {
                 // Autonomous companions never initiate PvP. A hostile player
                 // may still be the current victim while defending; this guard
@@ -440,7 +487,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 // XP, and never roams into solo fights.
                 Player* owner = FindOwnerByAccount();
                 if (owner && owner->GetMapId() == me->GetMapId() &&
-                    me->GetDistance(owner) > kOwnerFollowChaseDist)
+                    me->GetDistance(owner) > _personalityChaseDist)
                 {
                     _wanderTimer = urand(1500, 3000);
                     me->GetMotionMaster()->MovePoint(0, owner->GetPositionX(),
@@ -491,11 +538,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
 
 Creature* PlayerBotAI::GetAliveHeldTarget() const
 {
-    // Hardening item 4 (KAP-558): the held target is a dedicated live-target
-    // guid now; the corpse side lives in _lootCorpseGuid.
-    if (!_combatTargetGuid || !me || !me->GetMap())
+    // Hardening item 4 / PORT-012 (KAP-558): the held target is the
+    // dedicated live slot; the corpse side lives in the corpse slot.
+    if (_targets.live == 0 || !me || !me->GetMap())
         return nullptr;
-    Creature* creature = me->GetMap()->GetCreature(_combatTargetGuid);
+    Creature* creature = me->GetMap()->GetCreature(ObjectGuid(_targets.live));
     if (creature && creature->IsAlive())
         return creature;
     return nullptr;
@@ -503,8 +550,11 @@ Creature* PlayerBotAI::GetAliveHeldTarget() const
 
 void PlayerBotAI::ClearTarget()
 {
-    _combatTargetGuid = ObjectGuid();
-    _lootCorpseGuid = ObjectGuid();
+    // Full cleanup (owner orders: hold/stop/assist replacement, legacy
+    // range drop): both slots and the loot attempt state. Combat-only
+    // and loot-only releases use the explicit slot transitions instead
+    // (PORT-012: neither may touch the other slot).
+    _targets.ClearAll();
     _lootRetryCount = 0;
     _lootWindowMs = 0;
 }
@@ -513,31 +563,26 @@ bool PlayerBotAI::TryLootDefeatedTarget()
 {
     if (!me->GetMap())
         return false;
-    // Hardening item 4 (KAP-558): the single dual-role guid is split; a
-    // held combat target that died in between becomes the pending loot
-    // corpse, and a re-embodied corpse hands the target back to the
-    // combat side (the same duality the single guid used to play).
-    if (_combatTargetGuid)
+    // Hardening item 4 / PORT-012 (KAP-558): the live and loot-corpse
+    // sides are explicit slots with named transitions: a held combat
+    // target that died in between promotes to the pending loot corpse,
+    // and a re-embodied corpse hands the target back to the combat side.
+    if (_targets.live)
     {
-        Creature* held = me->GetMap()->GetCreature(_combatTargetGuid);
-        if (!held)
-            _combatTargetGuid = ObjectGuid();
-        else if (!held->IsAlive())
-        {
-            _lootCorpseGuid = _combatTargetGuid;
-            _combatTargetGuid = ObjectGuid();
+        Creature* held = me->GetMap()->GetCreature(ObjectGuid(_targets.live));
+        if (_targets.OnLiveResolved(held != nullptr, held != nullptr && held->IsAlive())
+            == Companion::Combat::TargetSlots::Transition::LiveToCorpse)
             _lootRetryCount = 0;
-        }
     }
-    if (!_lootCorpseGuid)
+    if (!_targets.corpse)
         return false;
-    Creature* creature = me->GetMap()->GetCreature(_lootCorpseGuid);
+    Creature* creature = me->GetMap()->GetCreature(ObjectGuid(_targets.corpse));
     if (!creature)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] loot target missing GUID:%u target:%u",
-                           me->GetGUIDLow(), _lootCorpseGuid.GetCounter());
-        _lootCorpseGuid = ObjectGuid();
+                           me->GetGUIDLow(), (uint32)_targets.corpse);
+        _targets.ReleaseCorpse();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
         return false;
@@ -546,8 +591,7 @@ bool PlayerBotAI::TryLootDefeatedTarget()
     {
         // Re-embodied: it is the held combat target again; the combat loop
         // keeps pursuing it. Do not clear it here.
-        _combatTargetGuid = _lootCorpseGuid;
-        _lootCorpseGuid = ObjectGuid();
+        _targets.OnCorpseResolved(true, true);
         _lootWindowMs = 0;
         return false;
     }
@@ -589,11 +633,16 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
             for (std::vector<std::pair<uint32, uint32>>::const_iterator itr = itemCounts.begin(); itr != itemCounts.end(); ++itr)
                 sLog.outString("[PlayerBot] corpse loot stored GUID:%u item:%u before:%u after:%u",
                                me->GetGUIDLow(), itr->first, itr->second, me->GetItemCount(itr->first));
+        // PORT-024 (KAP-558): owned companions progress their
+        // equipment from the items just received; ambient bots
+        // keep the legacy loot-only path.
+        if (IsOwnedCompanion())
+            EvaluateReceivedEquipment(itemCounts);
         me->GetSession()->DoLootRelease(guid);
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot processed GUID:%u target:%u",
                            me->GetGUIDLow(), guid.GetCounter());
-        _lootCorpseGuid = ObjectGuid();
+        _targets.ReleaseCorpse();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
         return true;
@@ -616,23 +665,177 @@ bool PlayerBotAI::CorpseLootStep(Creature* creature)
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] corpse loot giving up GUID:%u target:%u",
                            me->GetGUIDLow(), guid.GetCounter());
-        _lootCorpseGuid = ObjectGuid();
+        _targets.ReleaseCorpse();
         _lootRetryCount = 0;
         _lootWindowMs = 0;
     }
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// PORT-024 (KAP-558): equipment progression from loot legitimately
+// received by owned companions.
+//
+// EvaluateReceivedEquipment receives the (entry, count before this
+// loot window) pairs captured before AutoStoreLoot. An entry whose
+// saved count did not grow was eligible loot the bags could not
+// accept: it raises the bounded inventory-pressure state for
+// PORT-025 and nothing is ever deleted to make room. An entry whose
+// count grew was received; up to the delta of its instances in the
+// bags is evaluated (bounded, idempotent: re-evaluating a retained
+// instance can only repeat its earlier verdict).
+//
+// EvaluateReceivedInstance asks the authoritative CanEquipItem for
+// legality and slot (class, level, skill, proficiency, unique rules,
+// live combat state) and Companion::Equipment for the verdict: only
+// a strict upgrade moves, via SwapItem, the received instance into
+// the equipment slot; the replaced gear returns to the bag slot the
+// new item came from (a 1:1 exchange, so full bags can never block
+// an upgrade). Illegal or non-upgrade items stay in the bag
+// untouched. The model never supplies item IDs, scores or equip
+// commands.
+
+static Companion::Equipment::ItemStats EquipmentStatsFromProto(ItemPrototype const* proto, uint32 playerLevel)
+{
+    Companion::Equipment::ItemStats s;
+    s.playerLevel = playerLevel;
+    if (proto)
+    {
+        s.requiredLevel = proto->RequiredLevel;
+        s.itemLevel = proto->ItemLevel;
+        s.quality = proto->Quality;
+    }
+    return s;
+}
+
+void PlayerBotAI::EvaluateReceivedEquipment(std::vector<std::pair<uint32, uint32>> const& itemCounts)
+{
+    if (!me || !me->GetMap())
+        return;
+
+    std::map<uint32, uint32> before;
+    for (std::vector<std::pair<uint32, uint32>>::const_iterator itr = itemCounts.begin();
+         itr != itemCounts.end(); ++itr)
+        before.emplace(itr->first, itr->second);   // first occurrence wins
+
+    for (std::map<uint32, uint32>::const_iterator kv = before.begin(); kv != before.end(); ++kv)
+    {
+        uint32 const entry = kv->first;
+        uint32 const after = me->GetItemCount(entry);
+        if (after <= kv->second)
+        {
+            // Eligible loot the inventory could not accept: raise the
+            // bounded pressure state; the item stays where the normal
+            // inventory rules left it (on the corpse).
+            if (_inventoryPressure < 8)
+                ++_inventoryPressure;
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot] equipment pressure GUID:%u item:%u stored:0",
+                               me->GetGUIDLow(), entry);
+            continue;
+        }
+
+        uint32 const received = after - kv->second;
+        uint32 evaluated = 0;
+        // Bounded scan: bag0 item slots, then any sub-bags.
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START;
+             slot < INVENTORY_SLOT_ITEM_END && evaluated < received; ++slot)
+        {
+            Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (!item || item->GetEntry() != entry)
+                continue;
+            ++evaluated;
+            EvaluateReceivedInstance(item, INVENTORY_SLOT_BAG_0, slot);
+        }
+        for (uint8 bag = INVENTORY_SLOT_BAG_START;
+             bag < INVENTORY_SLOT_BAG_END && evaluated < received; ++bag)
+        {
+            for (uint8 slot = 0; slot < 36 && evaluated < received; ++slot)
+            {
+                Item* item = me->GetItemByPos(bag, slot);
+                if (!item || item->GetEntry() != entry)
+                    continue;
+                ++evaluated;
+                EvaluateReceivedInstance(item, bag, slot);
+            }
+        }
+    }
+}
+
+void PlayerBotAI::EvaluateReceivedInstance(Item* item, uint8 bag, uint8 slot)
+{
+    ItemPrototype const* proto = item ? item->GetProto() : nullptr;
+    if (!proto)
+        return;
+
+    // Authoritative legality + slot. swap=true: the slot may be
+    // occupied; the replaced gear returns to the bag slot this item
+    // came from. Same checks the packet handlers apply (not_loading
+    // defaults to true, as in AutoEquipForLevel). CanEquipItem packs
+    // dest as (INVENTORY_SLOT_BAG_0 << 8) | equipmentSlot; the low byte
+    // is the equipment slot index.
+    uint16 dest = 0;
+    InventoryResult const res = me->CanEquipItem(NULL_SLOT, dest, item, true);
+    if (res != EQUIP_ERR_OK || dest == NULL_SLOT)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment skip illegal GUID:%u item:%u err:%u",
+                           me->GetGUIDLow(), item->GetEntry(), uint32(res));
+        return;
+    }
+    uint8 const eslot = dest & 0xFF;
+    if (eslot >= EQUIPMENT_SLOT_END)
+    {
+        // Not an equipment slot (e.g. a bag position): normal
+        // storage already placed the item; the equipment policy does
+        // not move bags.
+        return;
+    }
+
+    uint32 const level = me->GetLevel();
+    Item* equipped = me->GetItemByPos(INVENTORY_SLOT_BAG_0, eslot);
+    uint32_t const newScore = Companion::Equipment::Score(EquipmentStatsFromProto(proto, level));
+    uint32_t const eqScore = equipped
+        ? Companion::Equipment::Score(EquipmentStatsFromProto(equipped->GetProto(), level))
+        : 0;
+
+    if (Companion::Equipment::Compare(newScore, eqScore) != Companion::Equipment::Verdict::Equip)
+    {
+        // Sidegrade or downgrade: equipment unchanged, item retained.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment keep GUID:%u item:%u new:%u eq:%u",
+                           me->GetGUIDLow(), item->GetEntry(), uint32_t(newScore), uint32_t(eqScore));
+        return;
+    }
+
+    me->SwapItem(uint16((bag << 8) | slot), dest);
+
+    Item* now = me->GetItemByPos(INVENTORY_SLOT_BAG_0, eslot);
+    if (now && now->GetEntry() == item->GetEntry())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment upgraded GUID:%u slot:%u item:%u new:%u eq:%u",
+                           me->GetGUIDLow(), uint32(eslot), item->GetEntry(), uint32_t(newScore), uint32_t(eqScore));
+    }
+    else
+    {
+        // The core refused the move after the pre-checks (transient
+        // world state): the item stays in the bag, equipment unchanged.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot] equipment swap denied GUID:%u slot:%u item:%u",
+                           me->GetGUIDLow(), uint32(eslot), item->GetEntry());
+    }
+}
+
 void PlayerBotAI::RememberCombatTarget(Unit* unit)
 {
-    // Hardening item 4 (KAP-558): renamed; remembers the live combat
-    // target (the corpse side is _lootCorpseGuid).
+    // Hardening item 4 / PORT-012 (KAP-558): remembers the live combat
+    // target in the live slot (the corpse side is a separate slot).
     if (!unit)
         return;
-    ObjectGuid const guid = unit->GetObjectGuid();
-    if (_combatTargetGuid == guid)
+    uint64_t const guid = unit->GetObjectGuid().GetRawValue();
+    if (_targets.AcquireLive(guid) != Companion::Combat::TargetSlots::Transition::LiveAcquired)
         return;
-    _combatTargetGuid = guid;
     _lootRetryCount = 0;
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot] loot target set GUID:%u target:%u entry:%u hp:%u/%u",
@@ -960,6 +1163,7 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
 void PlayerBotAI::OnPlayerLogin()
 {
     _lastLevel = me ? me->GetLevel() : 0;
+    RepairBrokenEquipment();
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
     InitQuestState();
@@ -970,6 +1174,36 @@ void PlayerBotAI::OnLevelUp()
     _lastLevel = me ? me->GetLevel() : _lastLevel;
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
+}
+
+// PORT-029 (KAP-558): repair broken equipment for owned companions
+// at login. Fixture/lab-seeded item instances (character_inventory /
+// item_instance rows written directly by tests) may carry zero
+// durability and non-1 counts. IsBroken() items are excluded from
+// Player::HasItemFitToSpellReqirements, so a "born broken" weapon or
+// shield rejects every spell with an equipment requirement
+// (SPELL_FAILED_EQUIPPED_ITEM_CLASS) and leaves the rotation on
+// ordinary attacks. Durability is restored to the prototype maximum;
+// non-stackable counts are normalized to 1. Idempotent; the next
+// autosave persists the corrected values.
+void PlayerBotAI::RepairBrokenEquipment()
+{
+    if (!me || !IsOwnedCompanion())
+        return;
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item)
+            continue;
+        ItemPrototype const* proto = item->GetProto();
+        if (!proto)
+            continue;
+        if (item->IsBroken())
+            item->SetUInt32Value(ITEM_FIELD_DURABILITY, proto->MaxDurability);
+        if (proto->Stackable <= 1 && item->GetCount() != 1)
+            item->SetCount(1);
+    }
 }
 
 void PlayerBotAI::AutoLearnSpellsForLevel()
@@ -997,9 +1231,33 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
         if (ability->racemask && !(ability->racemask & raceMask))
             continue;
 
-        // Skip tradeskills / profession gated spells
-        if (ability->req_skill_value != 0)
-            continue;
+        // PORT-028 (KAP-558): category-based filter instead of the old
+        // blanket req_skill_value skip. The 1.12 data gates most class
+        // abilities on req_skill_value (the "raises this skill line"
+        // marker, uniformly 1 in this DBC), so the old skip dropped
+        // nearly every combat spell and left the companion auto-attack
+        // only. Learn from Weapon Skills (6), Class Skills (7) and
+        // Armor Proficiencies (8); skip Professions (11), Secondary
+        // Skills (9) and Not Displayed (12). A gated entry first raises
+        // the required skill line; UpdateSkill refuses a 0-value line,
+        // so a missing line still skips the entry.
+        if (ability->skillId)
+        {
+            SkillLineEntry const* skillLine = sSkillLineStore.LookupEntry(ability->skillId);
+            int32 const category = skillLine ? skillLine->categoryId : 0;
+            if (category != 6 && category != 7 && category != 8)
+                continue;
+            uint32 const have = me->GetSkillValue((uint16)ability->skillId);
+            if (ability->req_skill_value > have)
+            {
+                if (have == 0 || !me->UpdateSkill(ability->skillId, ability->req_skill_value - have))
+                    continue;
+            }
+        }
+        else if (ability->req_skill_value != 0)
+        {
+            continue; // unknown skill line with a gate: keep the old skip
+        }
 
         SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(ability->spellId);
         if (!spellInfo)
@@ -1016,28 +1274,426 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
     }
 }
 
+// PORT-011/012 (KAP-558): the raw 1.12 SpellCastResult is mapped to
+// the module's bounded rejection class; this is the only place that
+// sees the engine enum (the vocabulary and its names live in
+// Companion/Combat.h). An attempted cast is success only when the core
+// reports SPELL_CAST_OK; every other value is a rejection in its
+// category (or Other, with the raw value still logged).
+static Companion::Combat::CastReject MapCastReject(uint32 res)
+{
+    switch (res)
+    {
+        case (uint32)SPELL_FAILED_NO_POWER:          return Companion::Combat::CastReject::InsufficientPower;
+        case (uint32)SPELL_FAILED_OUT_OF_RANGE:
+        case (uint32)SPELL_FAILED_LINE_OF_SIGHT:     return Companion::Combat::CastReject::RangeLos;
+        case (uint32)SPELL_FAILED_NOT_READY:         return Companion::Combat::CastReject::Cooldown;
+        case (uint32)SPELL_FAILED_NOT_SHAPESHIFT:
+        case (uint32)SPELL_FAILED_ONLY_SHAPESHIFT:   return Companion::Combat::CastReject::StanceForm;
+        case (uint32)SPELL_FAILED_NOT_INFRONT:
+        case (uint32)SPELL_FAILED_NOT_BEHIND:
+        case (uint32)SPELL_FAILED_UNIT_NOT_INFRONT:
+        case (uint32)SPELL_FAILED_UNIT_NOT_BEHIND:   return Companion::Combat::CastReject::Facing;
+        case (uint32)SPELL_FAILED_BAD_TARGETS:
+        case (uint32)SPELL_FAILED_TARGETS_DEAD:
+        case (uint32)SPELL_FAILED_TARGET_ENEMY:
+        case (uint32)SPELL_FAILED_TARGET_FRIENDLY:
+        case (uint32)SPELL_FAILED_TARGET_IS_PLAYER:
+        case (uint32)SPELL_FAILED_TARGET_NOT_PLAYER:
+        case (uint32)SPELL_FAILED_TARGET_NOT_DEAD:
+        case (uint32)SPELL_FAILED_TARGET_IN_COMBAT:
+        case (uint32)SPELL_FAILED_TARGET_FREEFORALL: return Companion::Combat::CastReject::InvalidTarget;
+        default:                                     return Companion::Combat::CastReject::Other;
+    }
+}
+
 // Hardening (KAP-558): one offensive evaluation step shared by the legacy
 // continue-combat path and the companion assist/defend executors. Only a
 // successful cast arms _abilityTimer; a failed cast (mana, cooldown, bad
 // target) or no usable spell falls back to melee in the same evaluation,
 // so a failed cast never leaves the companion idling unengaged.
+// PORT-011 (KAP-558): diagnostics record three distinct bounded outcomes -
+// no-eligible-ability, cast-accepted, cast-rejected (with category) - plus
+// the ordinary-attack fallback. NoEligibleAbility is never a rejected
+// cast: spell:0 plus an unknown-failure value never crosses the boundary as
+// one. Behavior is unchanged by this card.
 bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
 {
-    uint32 spellId = SelectOffensiveSpell(target);
-    SpellCastResult castRes = SPELL_FAILED_UNKNOWN;
-    if (spellId)
-        castRes = me->CastSpell(target, spellId, false);
-    // Hardening diag (KAP-558): which branch engaged (spell vs melee).
-    if (sPlayerBotMgr.IsDebugEnabled())
-        sLog.outString("[PlayerBot][Offense] cast GUID:%u t:%u spell:%u res:%u",
-                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)castRes);
-    if (spellId && castRes == SPELL_CAST_OK)
+    uint32 const spellId = SelectOffensiveSpell(target);
+    if (!spellId)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Offense] no-eligible-ability GUID:%u t:%u fallback:ordinary-attack",
+                           me->GetGUIDLow(), target->GetGUIDLow());
+        me->Attack(target, true);
+        return false;
+    }
+    SpellCastResult const castRes = me->CastSpell(target, spellId, false);
+    Companion::Combat::CastReport const report =
+        Companion::Combat::ReportCast(spellId, (uint32)castRes, MapCastReject((uint32)castRes));
+    if (report.outcome == Companion::Combat::CastOutcome::Accepted)
     {
         _abilityTimer = urand(2000, 4000);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][Offense] cast-accepted GUID:%u t:%u spell:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow(), spellId);
         return true;
     }
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Offense] cast-rejected GUID:%u t:%u spell:%u res:%u category:%s fallback:ordinary-attack",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)castRes,
+                       Companion::Combat::CastRejectName(report.reject));
     me->Attack(target, true);
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-014 (KAP-558): one legal tank threat policy for the single declared
+// build (the declared matrix is Companion/Tank.h). The policy runs only on
+// the assist source (owner-selected pulls: the tank never autonomously
+// acquires targets) and only for the declared build; every other companion
+// keeps the ordinary offense path untouched. The taunt is the single
+// declared ability; it is reported with the PORT-012 cast vocabulary and a
+// rejected cast falls back to the ordinary attack in the same evaluation -
+// never a delayed one.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::IsDeclaredTank() const
+{
+    if (!me)
+        return false;
+    return me->GetClass() == Companion::Tank::kDeclaredTankClass &&
+           me->GetLevel() >= Companion::Tank::kDeclaredTankMinLevel &&
+           me->HasSpell(Companion::Tank::kDeclaredTankTaunt);
+}
+
+Companion::Tank::Observation PlayerBotAI::FillTankObservation(Unit* target) const
+{
+    Companion::Tank::Observation o;
+    if (!me || !target)
+        return o;
+    o.tankGuid = me->GetGUIDLow();
+    o.ownerGuid = _followLeaderGuid;
+    o.targetGuid = target->GetGUIDLow();
+    if (Creature* c = target->ToCreature())
+    {
+        o.targetHasThreatList = c->CanHaveThreatList();
+        if (o.targetHasThreatList)
+        {
+            o.tankThreat = (uint32)c->GetThreatManager().getThreat(me, false);
+            if (Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, o.ownerGuid)))
+                o.ownerThreat = (uint32)c->GetThreatManager().getThreat(owner, false);
+            if (Unit* victim = c->GetVictim())
+                o.victimGuid = victim->GetGUIDLow();
+        }
+    }
+    o.tauntUsable = me->HasSpell(Companion::Tank::kDeclaredTankTaunt) &&
+                    !me->HasSpellCooldown(Companion::Tank::kDeclaredTankTaunt) &&
+                    me->IsWithinLOSInMap(target) &&
+                    me->CanReachWithMeleeAutoAttack(target);
+    return o;
+}
+
+void PlayerBotAI::TankTauntStep(Unit* target)
+{
+    uint32 const spellId = Companion::Tank::kDeclaredTankTaunt;
+    SpellCastResult const res = me->CastSpell(target, spellId, false);
+    Companion::Combat::CastReport const report =
+        Companion::Combat::ReportCast(spellId, (uint32)res, MapCastReject((uint32)res));
+    if (report.outcome == Companion::Combat::CastOutcome::Accepted)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Tank] taunt cast-accepted GUID:%u t:%u spell:%u",
+                           me->GetGUIDLow(), target->GetGUIDLow(), spellId);
+        return;
+    }
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Tank] taunt cast-rejected GUID:%u t:%u spell:%u res:%u category:%s fallback:ordinary-attack",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)res,
+                       Companion::Combat::CastRejectName(report.reject));
+    me->Attack(target, true);
+}
+
+// ---------------------------------------------------------------------------
+// PORT-015 (KAP-558): one legal healer triage policy for the single
+// declared build (the declared matrix is Companion/Healer.h). The
+// policy runs on the companion tick while the behavior gate is not a
+// hold: the card's "Hold" and "owner loss" failure cases suppress
+// healing exactly like they suppress every other behavior. Every slot
+// fact is re-resolved from the live world each tick, the decision is
+// revalidated against live state immediately before the cast, and
+// every attempt is reported through the PORT-012 cast outcome
+// vocabulary. A rejected or blocked heal creates no false success and
+// no delay: the next legal triage/follow outcome is the same
+// evaluation.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::IsDeclaredHealer() const
+{
+    if (!me)
+        return false;
+    return me->GetClass() == Companion::Healer::kDeclaredHealerClass &&
+           me->GetLevel() >= Companion::Healer::kDeclaredHealerMinLevel &&
+           me->HasSpell(Companion::Healer::kDeclaredHealerHeal);
+}
+
+Companion::Healer::Observation PlayerBotAI::FillHealerObservation() const
+{
+    Companion::Healer::Observation o;
+    if (!me || !me->GetMap())
+        return o;
+    o.mana = me->GetPower(POWER_MANA);
+    o.maxMana = me->GetMaxPower(POWER_MANA);
+    if (SpellEntry const* se = sSpellMgr.GetSpellEntry(Companion::Healer::kDeclaredHealerHeal))
+        o.healRangeYd = (uint32)Spells::GetSpellMaxRange(sSpellRangeStore.LookupEntry(se->rangeIndex));
+    // withDelayed=true: an in-flight timed heal sits in
+    // SPELL_STATE_DELAYED and this core's default form treats that as
+    // not-cast; the delayed form is the authoritative busy fact.
+    o.canCast = me->HasSpell(Companion::Healer::kDeclaredHealerHeal) &&
+                !me->HasSpellCooldown(Companion::Healer::kDeclaredHealerHeal) &&
+                !me->IsNonMeleeSpellCasted(true);
+    // Slot 0 is self: trivially alive (UpdateAI gated the dead and
+    // recovery paths), in range, and the declared priority fallback.
+    // The remaining slots are the live party members re-resolved from
+    // the group slots by GUID; no engine pointer is retained.
+    o.slots[0].guid = me->GetGUIDLow();
+    o.slots[0].hp = me->GetHealth();
+    o.slots[0].maxHp = me->GetMaxHealth();
+    o.slots[0].alive = me->IsAlive();
+    o.slots[0].inLos = true;
+    o.slots[0].distance = 0.0f;
+    o.slots[0].isSelf = true;
+    uint32 n = 1;
+    if (Group* group = me->GetGroup())
+    {
+        for (auto const& slot : group->GetMemberSlots())
+        {
+            if (n >= Companion::Healer::kMaxSlots)
+                break;
+            Player* member = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, slot.guid.GetCounter()));
+            if (!member || member == me)
+                continue;
+            o.slots[n].guid = member->GetGUIDLow();
+            o.slots[n].hp = member->GetHealth();
+            o.slots[n].maxHp = member->GetMaxHealth();
+            o.slots[n].alive = member->IsAlive() && member->IsInWorld();
+            // A member on another map (or out of line of sight) is
+            // never castable through triage: the follow goal, not a
+            // teleport, is what regains range.
+            if (member->GetMapId() != me->GetMapId())
+            {
+                o.slots[n].inLos = false;
+                o.slots[n].distance = 10000.0f;
+            }
+            else
+            {
+                o.slots[n].inLos = me->IsWithinLOSInMap(member);
+                o.slots[n].distance = me->GetDistance(member);
+            }
+            o.slots[n].isOwner = (slot.guid.GetCounter() == _followLeaderGuid);
+            ++n;
+        }
+    }
+    return o;
+}
+
+void PlayerBotAI::HealerTriageStep(Companion::Healer::Observation const& obs,
+                                   Companion::Healer::Decision const& decision)
+{
+    uint32 const spellId = Companion::Healer::kDeclaredHealerHeal;
+    Unit* target = (decision.action == Companion::Healer::Action::SelfHeal)
+                   ? me
+                   : (me->GetMap() ? me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, decision.target)) : nullptr);
+    // Revalidate the whole decision against live state immediately
+    // before the cast: a stale slot, a map flap, a range/LOS change,
+    // or a cooldown/mana flap is a bounded skip and the next tick
+    // re-triages (no false success, no delayed retry of the same
+    // decision).
+    if (!target || !target->IsAlive() || !target->IsInWorld() ||
+        target->GetMapId() != me->GetMapId() ||
+        !me->IsWithinLOSInMap(target) ||
+        me->GetDistance(target) >= Companion::Healer::kDeclaredHealRangeYd)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped target-stale GUID:%u t:%u",
+                           me->GetGUIDLow(), decision.target);
+        return;
+    }
+    uint32 const mana = me->GetPower(POWER_MANA);
+    // The withDelayed=true form is the authoritative busy fact: an
+    // in-flight timed heal sits in SPELL_STATE_DELAYED, and the default
+    // form treats that as not-cast - an unguarded re-cast would replace
+    // the in-flight cast (the re-accept storm the fixture pins against).
+    if (me->IsNonMeleeSpellCasted(true))
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped reason:busy GUID:%u t:%u",
+                           me->GetGUIDLow(), decision.target);
+        return;
+    }
+    if (me->HasSpellCooldown(spellId))
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped reason:cooldown GUID:%u t:%u",
+                           me->GetGUIDLow(), decision.target);
+        return;
+    }
+    if (mana < obs.spellCost + obs.manaReserve)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal skipped reason:mana-floor GUID:%u t:%u "
+                           "mana:%u cost:%u reserve:%u",
+                           me->GetGUIDLow(), decision.target, mana,
+                           obs.spellCost, obs.manaReserve);
+        return;
+    }
+    uint32 const manaBefore = me->GetPower(POWER_MANA);
+    SpellCastResult const res = me->CastSpell(target, spellId, false);
+    Companion::Combat::CastReport const report =
+        Companion::Combat::ReportCast(spellId, (uint32)res, MapCastReject((uint32)res));
+    if (report.outcome == Companion::Combat::CastOutcome::Accepted)
+    {
+        // The declared heal is cast-interruptible by movement
+        // (interruptFlags includes SPELL_INTERRUPT_FLAG_MOVEMENT): stop the
+        // walk in progress immediately so the spell's movement check sees a
+        // stationary caster for the whole cast window; the follow goal
+        // (gated on the in-flight cast) resumes the approach after it ends.
+        me->GetMotionMaster()->Clear(false);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Healer] heal cast-accepted GUID:%u t:%u spell:%u mana-before:%u mana:%u/%u",
+                           me->GetGUIDLow(), target->GetGUIDLow(), spellId, manaBefore,
+                           me->GetPower(POWER_MANA), me->GetMaxPower(POWER_MANA));
+        return;
+    }
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Healer] heal cast-rejected GUID:%u t:%u spell:%u res:%u category:%s",
+                       me->GetGUIDLow(), target->GetGUIDLow(), spellId, (uint32)res,
+                       Companion::Combat::CastRejectName(report.reject));
+}
+
+// ---------------------------------------------------------------------------
+// PORT-016 (KAP-558): one deterministic damage policy for the single
+// declared melee build (the declared matrix is Companion/Damage.h).
+// The damage companion engages only the declared tank's established
+// target, and only after the pull-ownership (tank threat) gate; while
+// the target holds a controlling aura it neither engages nor keeps
+// it (crowd-control preservation). The engagement runs through the
+// shared combat executor (Source::Damage), the offense step is the
+// common cast-or-attack path (the per-class table is the declared
+// damage matrix), and every cast is reported through the PORT-012
+// cast outcome vocabulary. Failure cases (missing tank, insufficient
+// threat, CC, owner loss, unreachable, unsupported class) are
+// bounded wait/follow; the policy never selects the nearest hostile.
+// ---------------------------------------------------------------------------
+bool PlayerBotAI::IsDeclaredDamage() const
+{
+    if (!me)
+        return false;
+    return me->GetClass() == Companion::Damage::kDeclaredDamageClass &&
+           me->GetLevel() >= Companion::Damage::kDeclaredDamageMinLevel;
+}
+
+Unit* PlayerBotAI::FindDeclaredTank() const
+{
+    if (!me || !me->GetMap() || !me->GetGroup())
+        return nullptr;
+    Group* group = me->GetGroup();
+    for (auto const& slot : group->GetMemberSlots())
+    {
+        Player* member = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, slot.guid.GetCounter()));
+        if (!member || member == me || !member->IsAlive() || !member->IsInWorld())
+            continue;
+        if (member->GetClass() == Companion::Tank::kDeclaredTankClass &&
+            member->GetLevel() >= Companion::Tank::kDeclaredTankMinLevel &&
+            member->HasSpell(Companion::Tank::kDeclaredTankTaunt))
+            return member;
+    }
+    return nullptr;
+}
+
+bool PlayerBotAI::TargetUnderCC(Unit* unit) const
+{
+    // PORT-016 declared preservation set (the pinned core AuraType
+    // values listed in Companion/Damage.h): any controlling aura from
+    // any source marks the target controlled; the damage source
+    // waits/follows instead of dealing damage (the conservative
+    // ambiguity resolution).
+    if (!unit)
+        return true;
+    return unit->HasAuraType(SPELL_AURA_MOD_STUN) ||
+           unit->HasAuraType(SPELL_AURA_MOD_ROOT) ||
+           unit->HasAuraType(SPELL_AURA_MOD_CHARM) ||
+           unit->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
+           unit->HasAuraType(SPELL_AURA_MOD_FEAR) ||
+           unit->HasAuraType(SPELL_AURA_MOD_PACIFY) ||
+           unit->HasAuraType(SPELL_AURA_TRANSFORM) ||
+           unit->HasAuraType(SPELL_AURA_FEIGN_DEATH);
+}
+
+Companion::Damage::Observation PlayerBotAI::FillDamageObservation() const
+{
+    Companion::Damage::Observation o;
+    if (!me || !me->GetMap())
+        return o;
+    o.damageGuid = me->GetGUIDLow();
+    o.held = _held;
+    o.ownerAvailable = IsFollowOwnerAvailable();
+    if (!o.ownerAvailable)
+        return o;
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner)
+        return o;
+    Unit* tank = FindDeclaredTank();
+    if (!tank)
+        return o; // missing tank: bounded wait/follow
+    o.tankGuid = tank->GetGUIDLow();
+    Creature* target = tank->GetVictim() ? tank->GetVictim()->ToCreature() : nullptr;
+    if (!target || !target->IsAlive() || !target->IsInWorld())
+        return o; // the tank holds no established target yet
+    o.targetGuid = target->GetGUIDLow();
+    o.targetRaw = target->GetObjectGuid().GetRawValue();
+    o.distance = me->GetDistance(target);
+    o.canAttack = me->CanAttack(target);
+    o.inLos = me->IsWithinLOSInMap(target);
+    o.targetUnderCC = TargetUnderCC(target);
+    o.targetHasThreatList = target->CanHaveThreatList();
+    if (o.targetHasThreatList)
+    {
+        o.tankThreat = (uint32)target->GetThreatManager().getThreat(tank, false);
+        o.tankIsVictim = (target->GetVictim() == tank);
+        if (!o.tankIsVictim)
+        {
+            Unit* victim = target->GetVictim();
+            if (victim)
+                o.victimThreat = (uint32)target->GetThreatManager().getThreat(victim, false);
+        }
+    }
+    return o;
+}
+
+bool PlayerBotAI::IsEstablishedTankTarget(Creature* target) const
+{
+    if (!me || !target)
+        return false;
+    Unit* tank = FindDeclaredTank();
+    if (!tank)
+        return false;
+    // Reuse the pure decision on a fresh value snapshot: the margin
+    // math lives in Companion/Damage.h (no float, no duplication).
+    Companion::Damage::Observation o;
+    o.tankGuid = tank->GetGUIDLow();
+    o.targetGuid = target->GetGUIDLow();
+    o.targetRaw = target->GetObjectGuid().GetRawValue();
+    o.targetHasThreatList = target->CanHaveThreatList();
+    if (!o.targetHasThreatList)
+        return false;
+    o.tankIsVictim = (target->GetVictim() == tank);
+    o.tankThreat = (uint32)target->GetThreatManager().getThreat(tank, false);
+    if (!o.tankIsVictim)
+    {
+        Unit* victim = target->GetVictim();
+        if (victim)
+            o.victimThreat = (uint32)target->GetThreatManager().getThreat(victim, false);
+    }
+    return Companion::Damage::PullEstablished(o);
 }
 
 uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
@@ -1052,46 +1708,6 @@ uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
         float maxRange;
         bool meleeOnly;
         bool requiresMissingAura;
-    };
-
-    auto distOk = [&](Action const& a) -> bool
-    {
-        float dist = me->GetCombatDistance(target);
-        if (a.minRange > 0.0f && dist < a.minRange)
-            return false;
-        if (a.maxRange > 0.0f && dist > a.maxRange)
-            return false;
-        if (a.meleeOnly && !me->CanReachWithMeleeAutoAttack(target))
-            return false;
-        return true;
-    };
-
-    auto canCast = [&](uint32 spellId, bool requireMissingAura) -> bool
-    {
-        if (!spellId)
-            return false;
-        if (!me->HasSpell(spellId))
-            return false;
-        if (me->HasSpellCooldown(spellId))
-            return false;
-        SpellEntry const* info = sSpellMgr.GetSpellEntry(spellId);
-        if (!info)
-            return false;
-        // Hardening (KAP-558): on-next-swing spells occupy the melee
-        // spell slot; after their trigger swing, every later auto-attack
-        // is consumed by the swing-spell path and no white damage lands
-        // for the rest of the engagement (evidence: assist lab runs
-        // 2026-09-15, threat frozen while the swing timer kept cycling).
-        // The companion keeps pure white damage instead of queueing them.
-        if (info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_1) ||
-            info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_2))
-            return false;
-        Powers powerType = static_cast<Powers>(info->powerType);
-        if (me->GetPower(powerType) < info->manaCost)
-            return false;
-        if (requireMissingAura && TargetHasAuraFromChain(target, spellId))
-            return false;
-        return true;
     };
 
     std::vector<Action> actions;
@@ -1174,17 +1790,67 @@ uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
             break;
     }
 
+    // PORT-012 (KAP-558): the known/usable split. The adapter fills
+    // each profile with current engine facts; the pure selector
+    // (Companion/Combat.h) decides what is currently executable and
+    // why a known spell is not.
+    Companion::Combat::AbilityQuery query;
+    for (int i = 0; i < Companion::Combat::AbilityQuery::kPowerSlots; ++i)
+        query.power[i] = me->GetPower(static_cast<Powers>(i));
+    query.distance = me->GetCombatDistance(target);
+    query.meleeReach = me->CanReachWithMeleeAutoAttack(target);
+
+    std::vector<Companion::Combat::AbilityProfile> profiles;
+    profiles.reserve(actions.size());
     for (auto const& act : actions)
     {
-        if (!distOk(act))
+        Companion::Combat::AbilityProfile p;
+        p.minRange = act.minRange;
+        p.maxRange = act.maxRange;
+        p.meleeOnly = act.meleeOnly;
+        uint32 const spellId = GetHighestKnownSpell(act.baseSpell);
+        if (!spellId || !me->HasSpell(spellId))
+        {
+            profiles.push_back(p); // not known: not scanned
             continue;
-        uint32 spellId = GetHighestKnownSpell(act.baseSpell);
-        if (!canCast(spellId, act.requiresMissingAura))
+        }
+        SpellEntry const* const info = sSpellMgr.GetSpellEntry(spellId);
+        if (!info)
+        {
+            profiles.push_back(p); // no entry: not scanned
             continue;
-        return spellId;
+        }
+        p.known = true;
+        p.id = spellId;
+        p.passive = info->IsPassiveSpell();
+        // obsoleteRank is structurally false here: GetHighestKnownSpell
+        // already resolves the highest known rank of the chain; the
+        // block stays in the model for fixed-rank future rotations.
+        // Hardening/PORT-012 (KAP-558): on-next-swing spells occupy the
+        // melee spell slot; after their trigger swing, every later
+        // auto-attack is consumed by the swing-spell path and no white
+        // damage lands for the rest of the engagement (evidence: assist
+        // lab runs 2026-09-15). They are explicitly unsupported (see the
+        // audit in Companion/Combat.h); the companion keeps pure white
+        // damage instead of queueing them.
+        p.onNextSwing = info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_1) ||
+                        info->HasAttribute(SPELL_ATTR_ON_NEXT_SWING_2);
+        p.powerType = static_cast<uint8_t>(info->powerType);
+        p.powerCost = info->manaCost;
+        p.onCooldown = me->HasSpellCooldown(spellId);
+        // 1.12 has no player stance state and the core does not enforce
+        // the spell Stances masks for players; the block stays in the
+        // model for future trees.
+        p.stanceOk = true;
+        p.reagentOk = true;
+        for (int i = 0; i < MAX_SPELL_REAGENTS && p.reagentOk; ++i)
+            if (info->ReagentCount[i] && me->GetItemCount(info->Reagent[i]) < info->ReagentCount[i])
+                p.reagentOk = false;
+        p.targetOk = !(act.requiresMissingAura && TargetHasAuraFromChain(target, spellId));
+        profiles.push_back(p);
     }
 
-    return 0;
+    return Companion::Combat::SelectExecutable(profiles, query).selected;
 }
 
 uint32 PlayerBotAI::GetHighestKnownSpell(uint32 spellId) const
@@ -1301,6 +1967,16 @@ namespace
 void PlayerBotAI::AutoEquipForLevel()
 {
     if (!me)
+        return;
+
+    // PORT-024 (KAP-558): owned companions progress equipment only
+    // from items they legitimately receive through the loot policy
+    // (Companion/Equipment.h + EvaluateReceivedEquipment). The free
+    // level-based refresh stays authoritative for ambient world
+    // bots. One gate here covers login, level-up, the UpdateAI
+    // level-change fallback and party leave/rejoin (a rejoin is a
+    // relogin).
+    if (IsOwnedCompanion())
         return;
 
     uint8 level = me->GetLevel();
@@ -1464,6 +2140,19 @@ void PlayerBotAI::Remove()
         return;
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot] AI removed GUID:%u", me->GetGUIDLow());
+    // PORT-018 (KAP-558): our departure is a party-session change; kill
+    // any outstanding round we tracked so a stale offer cannot cross a
+    // membership boundary.
+    if (_plannerLeaderGuid)
+        sPlayerBotMgr.PlannerTransport().InvalidateSession(_plannerLeaderGuid);
+    _plannerGroupId = 0;
+    _plannerLeaderGuid = 0;
+    _plannerLastSubmitMs = 0;
+    _plannerOfferValid = false;
+    // PORT-019 (KAP-558): personality runtime effects die with the
+    // session; the declared profile is re-applied from its source.
+    _personalityChaseDist = kOwnerFollowChaseDist;
+    _personalityLastExprMs = 0;
     me->setAI(nullptr);
     me = nullptr;
 }
@@ -1777,7 +2466,7 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
     _followReached = false;
     _held = false; // PORT-004: a new follow order cancels the hold
     _assistTargetGuid = 0; // PORT-005: a new follow order cancels an assist
-    _pursuitLeashMs = 0; // PORT-008: a new order starts a fresh pursuit budget
+    _pursuitLeash.Disarm(); // PORT-008: a new order starts a fresh pursuit budget
     _followPathAgeMs = 0; // PORT-008: a new order starts a fresh path window
     // PORT-003: do not stop an active engagement; the follow goal takes
     // effect once combat resolves (UpdateAI gate).
@@ -1795,7 +2484,7 @@ void PlayerBotAI::FollowStop()
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
-    _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+    _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
     // Invalidate the current goal immediately (TW-014 AC1).
     me->GetMotionMaster()->Clear(true);
     if (sPlayerBotMgr.IsDebugEnabled())
@@ -1812,7 +2501,7 @@ void PlayerBotAI::Hold(uint32 seq)
     _followLeaderGuid = 0;
     _followReached = false;
     _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
-    _pursuitLeashMs = 0; // PORT-008: a hold starts a fresh pursuit budget
+    _pursuitLeash.Disarm(); // PORT-008: a hold starts a fresh pursuit budget
     ClearTarget();
     me->InterruptNonMeleeSpells(false);
     if (me->GetVictim())
@@ -1843,7 +2532,7 @@ void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
     _followSeq = seq;
     _assistTargetGuid = targetGuid;
     _held = false; // a new authorized order cancels the hold
-    _pursuitLeashMs = 0; // PORT-008: a new assist starts a fresh pursuit budget
+    _pursuitLeash.Disarm(); // PORT-008: a new assist starts a fresh pursuit budget
     ClearTarget(); // the assist target is the only target; never keep an incidental one
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Assist] active GUID:%u target:%u seq:%u",
@@ -1889,7 +2578,7 @@ void PlayerBotAI::ClearDefendTarget(const char* reason)
     uint64_t const guid = _defendTargetGuid;
     _defendTargetGuid = 0;
     _defendTargetGrace = 0;
-    _pursuitLeashMs = 0; // PORT-008: the defend pursuit is over; fresh budget
+    _pursuitLeash.Disarm(); // PORT-008: the defend pursuit is over; fresh budget
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Defend] cleared GUID:%u target:%u reason:%s",
                        me->GetGUIDLow(), (uint32)ObjectGuid(guid).GetCounter(), reason);
@@ -1929,15 +2618,1040 @@ Player* PlayerBotAI::FindOwnerByAccount() const
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// PORT-018 (KAP-558): one shared planner round per party.
+//
+// Eligibility is accepted player-party membership only: an owned
+// companion in a group led by a live player (never a bot). Any party
+// signature change (group id or leader) invalidates the transport
+// session. The lowest-GUID owned companion builds and submits the
+// request (queue depth 1, newest wins); every owned companion then
+// fetches and records its own step. Transport offers are recorded,
+// not executed: the deterministic policies own behavior until
+// PORT-019 maps them.
+// ---------------------------------------------------------------------------
+void PlayerBotAI::PlannerRoundStep(uint32 diff)
+{
+    (void)diff;
+    if (!IsOwnedCompanion() || !me || !me->GetGroup())
+        return;
+    Group const* group = me->GetGroup();
+    uint32 const groupId = group->GetId();
+    uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
+    // The leader must not be an owned companion: a bot-led party has no
+    // player owner to plan for. An unowned roster entry (the lab owner
+    // fixture) is still a player for planning purposes.
+    PlayerBotEntry* leaderEntry = sPlayerBotMgr.FindBotByGuid(leaderLow);
+    if (!leaderLow || (leaderEntry && leaderEntry->ownerAccountId))
+        return; // bot-led: no player owner to plan for
+    Companion::Planner::PlannerTransport& transport =
+        sPlayerBotMgr.PlannerTransport();
+    if (groupId != _plannerGroupId || leaderLow != _plannerLeaderGuid)
+    {
+        // Any signature change (new group or new leader) is a party-
+        // session change for the tracked key: kill its round so no
+        // outstanding result can cross the membership boundary.
+        if (_plannerLeaderGuid)
+            transport.InvalidateSession(_plannerLeaderGuid);
+        _plannerGroupId = groupId;
+        _plannerLeaderGuid = leaderLow;
+        _plannerLastSubmitMs = 0; // fresh session: immediate first round
+    }
+    uint32 const nowMs = WorldTimer::getMSTime();
+    // Collect the party's owned companions; the lowest-GUID one submits.
+    uint32 submitterLow = 0;
+    uint32 botCount = 0;
+    uint32 botLows[Companion::Planner::kMaxPartyBots] = {};
+    uint8_t botCls[Companion::Planner::kMaxPartyBots] = {};
+    for (Group::MemberSlot const& slot : group->GetMemberSlots())
+    {
+        uint32 const slotLow = slot.guid.GetCounter();
+        Player* member = sObjectAccessor.FindPlayer(ObjectGuid(slotLow));
+        PlayerBotEntry* be = member ? sPlayerBotMgr.FindBotByGuid(slotLow) : nullptr;
+        if (!be || !be->ownerAccountId)
+            continue;
+        if (!submitterLow || slotLow < submitterLow)
+            submitterLow = slotLow;
+        if (botCount < Companion::Planner::kMaxPartyBots)
+        {
+            botLows[botCount] = slotLow;
+            botCls[botCount] = member->GetClass();
+            ++botCount;
+        }
+    }
+    // PORT-021 (KAP-558): consume the prior ready round BEFORE
+    // submitting the next one. A submit supersedes a recorded-but-
+    // unfetched response on the same tick; with the production tick
+    // cadence (PlayerBot.UpdateMs >= the 2 s planner pace) the old
+    // order starved every fetch and no offer was ever applied.
+    // Record-only consumption (PORT-019 maps offers to behavior): every
+    // owned companion fetches its own step from the shared round.
+    Companion::Planner::Step offer;
+    _plannerOfferValid =
+        transport.FetchOffer(leaderLow, me->GetGUIDLow(), nowMs, offer);
+    if (_plannerOfferValid)
+    {
+        _plannerOffer = offer;
+        // PORT-019 (KAP-558): Preference is the only planner
+        // action with a personality effect. It maps to bounded,
+        // profile-allowlisted outcomes and fails closed to the
+        // deterministic baseline.
+        if (_plannerOffer.action ==
+            (uint8_t)Companion::Planner::Action::Preference)
+            ApplyPlannerPreference(nowMs);
+    }
+    if (submitterLow == me->GetGUIDLow() && botCount > 0 &&
+        (_plannerLastSubmitMs == 0 ||
+         nowMs - _plannerLastSubmitMs >= Companion::Planner::kPlannerPaceMs))
+    {
+        Companion::Planner::Envelope env;
+        env.requestId = ++_plannerReqId;
+        env.ownerGuid = leaderLow;
+        env.observationVersion = Companion::kObservationVersion;
+        env.captureTimeMs = nowMs;
+        env.stepCount = 0;
+        env.totalSize = Companion::Planner::kRequestBytes;
+        Companion::Planner::RequestBody body;
+        body.generation = _followSeq;
+        body.flags = (_held ? 0x01 : 0x00) | (_following ? 0x02 : 0x00) |
+                     (IsFollowOwnerAvailable() ? 0x04 : 0x00);
+        body.botCount = botCount;
+        for (uint32 i = 0; i < botCount; ++i)
+        {
+            body.bots[i].botGuid = botLows[i];
+            body.bots[i].cls = botCls[i];
+        }
+        uint8_t req[Companion::Planner::kRequestBytes];
+        Companion::Planner::EncodeEnvelope(req, env);
+        Companion::Planner::EncodeRequestBody(req + Companion::Planner::kEnvelopeBytes, body);
+        if (transport.SubmitShared(leaderLow, req, Companion::Planner::kRequestBytes, nowMs))
+            _plannerLastSubmitMs = nowMs;
+    }
+}
+
+void PlayerBotAI::ApplyPlannerPreference(uint32_t nowMs)
+{
+    using namespace Companion::Personality;
+    // PORT-020 (KAP-558): the persisted per-companion profile
+    // (seeded from config at first login); the config value
+    // never overrides a persisted identity.
+    Profile const profile = botEntry
+        ? (Profile)botEntry->personalityProfile
+        : Profile::None;
+    if (profile == Profile::None || !me)
+        return; // baseline: no declared profile, no effect
+    PrefId id = PrefId::Invalid;
+    uint8_t value = 0;
+    if (!ParsePreference(_plannerOffer.preference, id, value))
+        return; // unknown id: deterministic baseline
+    switch (id)
+    {
+        case PrefId::FollowChase:
+        {
+            float yd = 0.0f;
+            if (!MapChaseYd(profile, value, yd))
+                return; // out-of-set value: keep the current distance
+            if (yd != _personalityChaseDist)
+            {
+                _personalityChaseDist = yd;
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[Personality] chase GUID:%u profile:%s dist:%.1f",
+                                   me->GetGUIDLow(), ProfileName(profile), yd);
+            }
+            break;
+        }
+        case PrefId::Expression:
+        {
+            // Rate excess or an out-of-set slot stays silent.
+            // Expression is cosmetic: it never moves, targets or
+            // interrupts anything, and a dead companion is silent.
+            if (!me->IsAlive() ||
+                nowMs - _personalityLastExprMs < kExprIntervalMs)
+                return;
+            char const* line = nullptr;
+            if (!MapExpressionLine(profile, value, line))
+                return;
+            _personalityLastExprMs = nowMs;
+            me->Say(line, LANG_UNIVERSAL);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[Personality] expr GUID:%u profile:%s slot:%u",
+                               me->GetGUIDLow(), ProfileName(profile), value);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void PlayerBotAI::ConversationRoundStep()
+{
+    // PORT-022 (KAP-558): one bounded conversation reply per companion.
+    // The world thread never waits: the transport already did the I/O on
+    // its worker; here we only consume a reply whose party signature still
+    // matches and whose age is within budget, then Say it. A dead
+    // companion is silent and an empty reply says nothing.
+    if (!IsOwnedCompanion() || !me)
+        return;
+    Companion::Conversation::ConversationTransport& transport =
+        sPlayerBotMgr.ConversationTransport();
+    Group* group = me->GetGroup();
+    if (!group)
+    {
+        // No party: any outstanding reply is dead (leave/exit/rejoin).
+        transport.Invalidate(me->GetGUIDLow());
+        return;
+    }
+    uint32 const groupSig = group->GetId();
+    uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
+    std::string reply;
+    if (!transport.Poll(me->GetGUIDLow(), groupSig, leaderLow,
+                        WorldTimer::getMSTime(), reply))
+        return;
+    // Final sanitize (defense in depth over the adapter's): bounded text,
+    // no leading dot, no control characters. Never reinterpreted as a command.
+    std::string safe;
+    for (unsigned char ch : reply)
+        if (ch >= 0x20 && ch <= 0x7e)
+            safe.push_back((char)ch);
+    size_t const b = safe.find_first_not_of(" ");
+    size_t const e = safe.find_last_not_of(" ");
+    if (b == std::string::npos)
+        safe.clear();
+    else
+        safe = safe.substr(b, e - b + 1);
+    while (!safe.empty() && safe[0] == '.')
+        safe.erase(0, 1);
+    if (safe.empty() || !me->IsAlive())
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Conversation] reply suppressed GUID:%u (empty or dead)",
+                           me->GetGUIDLow());
+        return;
+    }
+    me->Say(safe.c_str(), LANG_UNIVERSAL);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Conversation] reply GUID:%u profile:%s len:%u",
+                       me->GetGUIDLow(),
+                       Companion::Personality::ProfileName(
+                           botEntry
+                               ? (Companion::Personality::Profile)botEntry->personalityProfile
+                               : Companion::Personality::Profile::None),
+                       (uint32)safe.size());
+}
+
+// ---------------------------------------------------------------------------
+// PORT-027 (KAP-558): in-world status lines for the declared
+// cooperative quest. The companion says its quest state so the
+// owner does not need the server log. Only the server-maintained
+// per-objective counts (QuestStatusData) are read - no inventory
+// scan, no fabricated credit. Single kill objective: "6/15 <mob>";
+// single item objective: "3/10 <item>"; otherwise the summed
+// "9/17 objectives".
+// ---------------------------------------------------------------------------
+namespace
+{
+uint32 CoopQuestProgressHave(QuestStatusData const* qStatus)
+{
+    uint32 total = 0;
+    for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        total += qStatus->m_creatureOrGOcount[i] + qStatus->m_itemcount[i];
+    return total;
+}
+
+std::string CoopQuestProgressLine(Quest const* qInfo, QuestStatusData const* qStatus)
+{
+    uint32 totalNeed = 0, killNeed = 0, itemNeed = 0;
+    char const* killName = nullptr;
+    char const* itemName = nullptr;
+    for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+    {
+        uint32 const cNeed = qInfo->ReqCreatureOrGOCount[i];
+        uint32 const iNeed = qInfo->ReqItemCount[i];
+        totalNeed += cNeed + iNeed;
+        if (cNeed)
+        {
+            killNeed += cNeed;
+            if (!killName && qInfo->ReqCreatureOrGOId[i] > 0)
+                if (CreatureInfo const* ci = sObjectMgr.GetCreatureTemplate((uint32)qInfo->ReqCreatureOrGOId[i]))
+                    killName = ci->name.c_str();
+        }
+        if (iNeed)
+        {
+            itemNeed += iNeed;
+            if (!itemName && qInfo->ReqItemId[i])
+                if (ItemPrototype const* ip = sObjectMgr.GetItemPrototype(qInfo->ReqItemId[i]))
+                    itemName = ip->Name1.c_str();
+        }
+    }
+    uint32 const have = CoopQuestProgressHave(qStatus);
+    std::string line = std::to_string(have) + "/" + std::to_string(totalNeed) + " ";
+    if (killNeed && !itemNeed && killName)
+        line += killName;
+    else if (itemNeed && !killNeed && itemName)
+        line += itemName;
+    else
+        line += "objectives";
+    return line;
+}
+} // namespace
+
+// ---------------------------------------------------------------------------
+// PORT-030 (KAP-558): dynamic owner-quest mirror (kill objectives only).
+//
+// No per-quest configuration: the companion reads the owner's quest log
+// and mirrors any quest the owner holds and that it can itself take, but
+// only when every objective is a creature kill - objective progression
+// is normal combat participation under the engine's vanilla group-credit
+// rules (the companion fights the target mobs, both logs advance).
+// Collect, talk, game-object, source-item and spell-cast objectives are
+// skipped: the companion has no dedicated behavior for them, and
+// mirroring would leave its log stalled. Accepts and turn-ins reuse the
+// same authoritative helpers as the declared path (CanTakeQuest/
+// CanAddQuest/AddQuest; CanCompleteQuest/CompleteQuest/CanRewardQuest/
+// RewardQuest), re-validated live before acting.
+//
+// Gating matches the declared path: owned companion, owner alive and in
+// the party, hold/combat/death suppression upstream, one action per
+// tick, shared denial backoff (_coopQuestDenyTimer).
+namespace
+{
+struct CoopQuestAnchorCheck
+{
+public:
+    CoopQuestAnchorCheck(Player const* obj, uint32 questId, float dist,
+                         bool finisher)
+        : i_obj(obj), i_questId(questId), i_dist(dist), i_finisher(finisher) {}
+    WorldObject const& GetFocusObject() const { return *i_obj; }
+    bool operator()(Creature const* u)
+    {
+        if (!u->IsAlive())
+            return false;
+        // PORT-033 (KAP-558): the accept anchor must be a questrelation
+        // holder (giver); the turn-in anchor must be an involvedquest
+        // holder (finisher). The engine's complete/reward path requires
+        // HasInvolvedQuest (QuestHandler.cpp:418/460), and a quest's
+        // giver and finisher can be different creatures.
+        bool const rel = i_finisher ? u->HasInvolvedQuest(i_questId)
+                                    : u->HasQuest(i_questId);
+        if (!rel)
+            return false;
+        return i_obj->IsWithinDistInMap(u, i_dist);
+    }
+private:
+    Player const* const i_obj;
+    uint32 const i_questId;
+    float const i_dist;
+    bool const i_finisher;
+    CoopQuestAnchorCheck(CoopQuestAnchorCheck const&);
+};
+
+// Nearest live creature standing in the given quest relation within
+// i_dist of from: give = questrelation (can hand the quest out),
+// finish = involvedquest (the turn-in/reward target).
+Creature* FindCoopQuestGiver(Player* from, uint32 questId, float i_dist)
+{
+    Creature* anchor = nullptr;
+    CoopQuestAnchorCheck check(from, questId, i_dist, false);
+    MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
+    Cell::VisitGridObjects(from, searcher, i_dist);
+    return anchor;
+}
+
+Creature* FindCoopQuestFinisher(Player* from, uint32 questId, float i_dist)
+{
+    Creature* anchor = nullptr;
+    CoopQuestAnchorCheck check(from, questId, i_dist, true);
+    MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
+    Cell::VisitGridObjects(from, searcher, i_dist);
+    return anchor;
+}
+
+// A quest is mirror-eligible iff every objective is a creature kill
+// (see the block comment above).
+bool IsKillOnlyQuest(Quest const* qInfo)
+{
+    if (!qInfo)
+        return false;
+    bool anyKill = false;
+    for (uint32 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+    {
+        if (qInfo->ReqCreatureOrGOCount[i] == 0)
+            continue;
+        if (qInfo->ReqCreatureOrGOId[i] <= 0)
+            return false; // game-object objective
+        anyKill = true;
+    }
+    for (uint32 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        if (qInfo->ReqItemId[i] != 0)
+            return false; // collect objective
+    for (uint32 i = 0; i < QUEST_SOURCE_ITEM_IDS_COUNT; ++i)
+        if (qInfo->ReqSourceId[i] != 0)
+            return false; // source item required to accept
+    for (uint32 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        if (qInfo->ReqSpell[i] != 0)
+            return false; // cast objective
+    return anyKill;
+}
+} // namespace
+
+void PlayerBotAI::CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status)
+{
+    if (!qStatus)
+        return;
+    if (qStatus->m_rewarded)
+    {
+        _coopQuestAnnounce.erase(questId);
+        return;
+    }
+    int32 const progress = (status == Companion::Quest::kStatusNone)
+        ? -1 : (int32)CoopQuestProgressHave(qStatus);
+    CoopQuestAnnounceState& st = _coopQuestAnnounce[questId];
+    if (status != st.status)
+    {
+        if (status == Companion::Quest::kStatusComplete)
+            me->Say("[Quest] Complete - turning in.", LANG_UNIVERSAL);
+        st.status = status;
+        st.progress = progress;
+    }
+    else if (status == Companion::Quest::kStatusInProgress && progress != st.progress)
+    {
+        st.progress = progress;
+        std::string line = "[Quest] " + CoopQuestProgressLine(qInfo, qStatus) + ".";
+        me->Say(line.c_str(), LANG_UNIVERSAL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PORT-023 (KAP-558): one owner-driven cooperative quest action
+// per tick.
+//
+// The companion mirrors the owner for one declared supported quest
+// (PlayerBot.CooperativeQuestId). The value-only policy
+// (Companion/Quest.h) selects Accept or TurnIn from the snapshot;
+// this adapter re-validates everything live and calls the same
+// authoritative quest helpers the packet handlers use (accept:
+// CanTakeQuest/CanAddQuest/AddQuest; turn-in:
+// CanCompleteQuest/CompleteQuest/CanRewardQuest/RewardQuest).
+// Objective progression is normal combat participation - the
+// vanilla tap/group credit rules move both personal quest logs;
+// the companion never selects a quest, never leads, and never
+// fabricates credit.
+//
+// Gating: owned companions only; the owner (session account ==
+// the entry's owner account) must be a live member of the
+// companion's party; hold, combat or death suppresses the step
+// (death preempts at the lifecycle level in UpdateRecovery).
+// Leaving the party stops cooperative planning without erasing
+// the companion's persisted quest state.
+void PlayerBotAI::CooperativeQuestStep(uint32 diff)
+{
+    if (!IsOwnedCompanion() || !me || !me->IsAlive() || !me->GetMap())
+        return;
+    if (_coopQuestDenyTimer)
+    {
+        _coopQuestDenyTimer = (_coopQuestDenyTimer > diff) ? _coopQuestDenyTimer - diff : 0;
+        return;
+    }
+    Group* group = me->GetGroup();
+    if (!group)
+        return;
+    Player* owner = FindOwnerByAccount();
+    if (!owner || !group->IsMember(owner->GetObjectGuid()))
+        return; // owner loss or party loss: no cooperative planning
+
+    uint32 const questId = sPlayerBotMgr.GetCooperativeQuestId();
+    if (questId)
+    {
+        CooperativeDeclaredQuestStep(questId, owner);
+        return;
+    }
+    // PORT-030 (KAP-558): dynamic mirror mode (kill-only objectives).
+    if (sPlayerBotMgr.GetMirrorOwnerQuests())
+        MirrorOwnerQuestStep(owner);
+}
+
+void PlayerBotAI::CooperativeDeclaredQuestStep(uint32 questId, Player* owner)
+{
+    Quest const* qInfo = sObjectMgr.GetQuestTemplate(questId);
+    if (!qInfo)
+        return;
+    // The policy snapshot (value-only; Companion/Quest.h).
+    Companion::Quest::Observation observation;
+    observation.generation = _followSeq;
+    observation.myStatus = (uint8_t)Companion::Quest::MapQuestStatus((uint32)me->GetQuestStatus(questId));
+    observation.ownerStatus = (uint8_t)Companion::Quest::MapQuestStatus((uint32)owner->GetQuestStatus(questId));
+    QuestStatusData const* qStatus = me->GetQuestStatusData(questId);
+    observation.rewarded = (qStatus != nullptr && qStatus->m_rewarded);
+    observation.held = _held;
+    observation.inCombat = me->IsInCombat();
+    observation.ownerInParty = true;
+    observation.ownerAvailable = true;
+    // PORT-027: in-world status line before the action path (the
+    // accept/turn-in lines are said from those paths themselves).
+    CooperativeQuestProgressAnnounce(questId, qInfo, qStatus, observation.myStatus);
+    // Nearest live giver (questrelation) and finisher (involvedquest)
+    // within INTERACTION_DISTANCE; the declared quest's giver and
+    // finisher can be different creatures (PORT-033). Each action
+    // re-looks-up its own anchor immediately before acting.
+    observation.giverAvailable =
+        (FindCoopQuestGiver(me, questId, INTERACTION_DISTANCE) != nullptr);
+    observation.finisherAvailable =
+        (FindCoopQuestFinisher(me, questId, INTERACTION_DISTANCE) != nullptr);
+    Companion::Quest::Intent const intent = Companion::Quest::Select(observation);
+    if (intent.action == Companion::Quest::Action::None)
+        return;
+    if (intent.action == Companion::Quest::Action::Accept)
+    {
+        // PORT-033: fresh giver anchor immediately before acting.
+        Creature* anchor = FindCoopQuestGiver(me, questId, INTERACTION_DISTANCE);
+        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+            return;
+        if (me->GetQuestStatus(questId) != QUEST_STATUS_NONE)
+            return; // the log moved between snapshot and act
+        if (me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
+        {
+            me->AddQuest(qInfo, anchor);
+            if (me->GetQuestStatus(questId) != QUEST_STATUS_NONE)
+            {
+                sLog.outString("[CoopQuest] accepted GUID:%u quest:%u ownerStatus:%u anchor:%u",
+                               me->GetGUIDLow(), questId,
+                               (uint32)observation.ownerStatus, anchor->GetEntry());
+                // PORT-027: in-world accept line with the starting count.
+                QuestStatusData const* aStatus = me->GetQuestStatusData(questId);
+                if (aStatus)
+                {
+                    std::string line = "[Quest] Accepted " + qInfo->GetTitle() + " (" +
+                                       CoopQuestProgressLine(qInfo, aStatus) + ").";
+                    me->Say(line.c_str(), LANG_UNIVERSAL);
+                }
+                CoopQuestAnnounceState& st = _coopQuestAnnounce[questId];
+                st.status = Companion::Quest::kStatusInProgress;
+                st.progress = aStatus ? (int32)CoopQuestProgressHave(aStatus) : 0;
+                return;
+            }
+        }
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] accept denied GUID:%u quest:%u interact:%u take:%u add:%u",
+                           me->GetGUIDLow(), questId,
+                           me->CanInteractWithQuestGiver(anchor) ? 1 : 0,
+                           me->CanTakeQuest(qInfo, false) ? 1 : 0,
+                           me->CanAddQuest(qInfo, false) ? 1 : 0);
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+    // TurnIn (choice index 0: a socketless session cannot choose).
+    // PORT-033: fresh finisher anchor immediately before acting.
+    Creature* anchor =
+        FindCoopQuestFinisher(me, questId, INTERACTION_DISTANCE);
+    if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+        return;
+    // When the last credit lands the engine already marks the quest
+    // COMPLETE, so the handler-shaped sequence applies: CompleteQuest
+    // only while still INCOMPLETE; the reward step only needs COMPLETE.
+    if (me->CanCompleteQuest(questId))
+        me->CompleteQuest(questId);
+    if (me->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+    {
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+    if (me->CanRewardQuest(qInfo, false))
+    {
+        uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
+        me->RewardQuest(qInfo, 0, anchor, true);
+        sLog.outString("[CoopQuest] turnin GUID:%u quest:%u anchor:%u xpBefore:%u "
+                       "xpAfter:%u",
+                       me->GetGUIDLow(), questId, anchor->GetEntry(), xpBefore,
+                       me->GetUInt32Value(PLAYER_XP));
+        // PORT-027: in-world turn-in line.
+        std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
+        me->Say(line.c_str(), LANG_UNIVERSAL);
+        _coopQuestAnnounce.erase(questId);
+    }
+    else
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] reward denied GUID:%u quest:%u", me->GetGUIDLow(), questId);
+        _coopQuestDenyTimer = 5000;
+    }
+}
+
+
+void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
+{
+    // Accept: the owner holds a mirror-eligible quest the companion does
+    // not, and the quest anchor is in range. CanTakeQuest/CanAddQuest
+    // (level, class, reputation, exclusive groups) stay authoritative.
+    for (QuestStatusMap::const_iterator it = owner->getQuestStatusMap().begin();
+         it != owner->getQuestStatusMap().end(); ++it)
+    {
+        uint32 const qid = it->first;
+        if (it->second.m_status != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
+        if (!qInfo || !IsKillOnlyQuest(qInfo))
+            continue;
+        QuestStatusData const* my = me->GetQuestStatusData(qid);
+        if (my)
+        {
+            // Skip unless a stale rewarded repeatable row can be re-taken.
+            bool const staleDone = (my->m_status == QUEST_STATUS_COMPLETE &&
+                                    my->m_rewarded && qInfo->IsRepeatable());
+            if (!staleDone)
+                continue;
+        }
+        Creature* anchor = FindCoopQuestGiver(me, qid, INTERACTION_DISTANCE);
+        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+            continue;
+        if (me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
+        {
+            me->AddQuest(qInfo, anchor);
+            if (me->GetQuestStatus(qid) != QUEST_STATUS_NONE)
+            {
+                sLog.outString("[CoopQuest] mirror-accepted GUID:%u quest:%u anchor:%u",
+                               me->GetGUIDLow(), qid, anchor->GetEntry());
+                QuestStatusData const* aStatus = me->GetQuestStatusData(qid);
+                if (aStatus)
+                {
+                    std::string line = "[Quest] Accepted " + qInfo->GetTitle() + " (" +
+                                       CoopQuestProgressLine(qInfo, aStatus) + ").";
+                    me->Say(line.c_str(), LANG_UNIVERSAL);
+                }
+                CoopQuestAnnounceState& st = _coopQuestAnnounce[qid];
+                st.status = Companion::Quest::kStatusInProgress;
+                st.progress = aStatus ? (int32)CoopQuestProgressHave(aStatus) : 0;
+                return;
+            }
+        }
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] mirror accept denied GUID:%u quest:%u take:%u add:%u",
+                           me->GetGUIDLow(), qid,
+                           me->CanTakeQuest(qInfo, false) ? 1 : 0,
+                           me->CanAddQuest(qInfo, false) ? 1 : 0);
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+
+    // Progress announce for in-flight mirrored quests (the companion's
+    // log entry must also be in the owner's log).
+    for (QuestStatusMap::const_iterator it = me->getQuestStatusMap().begin();
+         it != me->getQuestStatusMap().end(); ++it)
+    {
+        if (it->second.m_status != QUEST_STATUS_INCOMPLETE &&
+            it->second.m_status != QUEST_STATUS_COMPLETE)
+            continue;
+        if (owner->GetQuestStatus(it->first) == QUEST_STATUS_NONE)
+            continue;
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(it->first);
+        if (!qInfo)
+            continue;
+        CooperativeQuestProgressAnnounce(it->first, qInfo, &it->second,
+                                         Companion::Quest::MapQuestStatus((uint32)it->second.m_status));
+    }
+
+    // Turn-in: our own COMPLETE (unrewarded) quest whose finisher is in
+    // range; the same handler-shaped sequence as the declared path.
+    for (QuestStatusMap::const_iterator it = me->getQuestStatusMap().begin();
+         it != me->getQuestStatusMap().end(); ++it)
+    {
+        uint32 const qid = it->first;
+        if (it->second.m_status != QUEST_STATUS_COMPLETE || it->second.m_rewarded)
+            continue;
+        // PORT-033 (KAP-558): mirror provenance without a persisted
+        // table - the companion's log can only hold quests the mirror or
+        // the declared path accepted, and an owner-log cross-check keeps
+        // a seeded or owner-abandoned quest from being turned in for the
+        // companion. The owner's log persists across restarts, so the
+        // rule survives them.
+        if (owner->GetQuestStatus(qid) == QUEST_STATUS_NONE)
+            continue;
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
+        if (!qInfo)
+            continue;
+        // PORT-033: the turn-in anchor is the quest's finisher
+        // (involvedquest), which can be a different creature than the
+        // giver; the authoritative checks below re-validate at the act.
+        Creature* anchor = FindCoopQuestFinisher(me, qid, INTERACTION_DISTANCE);
+        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+            continue;
+        if (me->CanCompleteQuest(qid))
+            me->CompleteQuest(qid);
+        if (me->GetQuestStatus(qid) != QUEST_STATUS_COMPLETE)
+        {
+            _coopQuestDenyTimer = 5000;
+            return;
+        }
+        if (me->CanRewardQuest(qInfo, false))
+        {
+            uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
+            me->RewardQuest(qInfo, 0, anchor, true);
+            sLog.outString("[CoopQuest] mirror-turnin GUID:%u quest:%u anchor:%u "
+                           "xpBefore:%u xpAfter:%u",
+                           me->GetGUIDLow(), qid, anchor->GetEntry(), xpBefore,
+                           me->GetUInt32Value(PLAYER_XP));
+            std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
+            me->Say(line.c_str(), LANG_UNIVERSAL);
+            _coopQuestAnnounce.erase(qid);
+            return;
+        }
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] mirror reward denied GUID:%u quest:%u", me->GetGUIDLow(), qid);
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PORT-025 (KAP-558): one bounded bag-pressure episode per owned
+// companion. The episode starts when the declared trigger fires
+// (free item slots at or below kPressureFreeSlots, or a stored-loot
+// event the inventory could not accept) and ends when pressure
+// clears. At most one status line is said per episode; the no-vendor
+// failure is reported on the first failed scan and then rate-limited.
+// The vendor discovery is a bounded same-grid scan at the declared
+// pace; the value policy (Companion/Inventory.h) classifies every
+// item before any travel or sale, and the sale mirrors the vendor
+// packet handler's guards and APIs exactly. Nothing is ever deleted
+// or sold outside the declared junk set; an ambiguous item is
+// protected.
+uint8_t PlayerBotAI::CountFreeSlots() const
+{
+    if (!me)
+        return 0;
+    uint8_t free = 0;
+    // Bag0 item slots (equipment slots are worn gear: protected).
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            ++free;
+    // Sub-bags: declared capacity minus occupied slots.
+    for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+    {
+        Item* bagItem = me->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        if (!bagItem || !bagItem->GetProto())
+            continue;
+        uint8 const cap = (uint8)bagItem->GetProto()->ContainerSlots;
+        uint8 used = 0;
+        for (uint8 slot = 0; slot < cap; ++slot)
+            if (me->GetItemByPos(bag, slot))
+                ++used;
+        if (cap > used)
+            free += (cap - used);
+    }
+    return free;
+}
+
+Companion::Inventory::ItemInfo PlayerBotAI::FillItemInfo(Item* item) const
+{
+    Companion::Inventory::ItemInfo info;
+    if (!item)
+        return info; // unknown: fail closed (protected)
+    ItemPrototype const* proto = item->GetProto();
+    if (!proto)
+        return info;
+    info.quality = proto->Quality;
+    info.itemClass = proto->Class;
+    info.bonding = proto->Bonding;
+    info.sellPrice = proto->SellPrice;
+    info.isEquipped = item->IsEquipped();
+    info.isBag = item->IsBag();
+    info.isQuest = proto->Class == ITEM_CLASS_QUEST || proto->StartQuest != 0 ||
+                   me->HasQuestForItem(item->GetEntry());
+    info.isKeyOrCurrency = proto->Class == ITEM_CLASS_KEY || proto->Class == ITEM_CLASS_MONEY;
+    info.isUnique = proto->MaxCount == 1 && proto->Stackable == 0 &&
+                    proto->Class != ITEM_CLASS_CONSUMABLE;
+    info.hasEnchant = item->GetEnchantmentId(PERM_ENCHANTMENT_SLOT) != 0 ||
+                      item->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_0) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_1) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_2) != 0 ||
+                      item->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_3) != 0;
+    // The upgrade-over-equipped verdict needs the authoritative slot
+    // check; only the junk-matrix equipment classes can need it.
+    if (info.quality == 0 &&
+        (proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR))
+    {
+        uint16 dest = 0;
+        if (me->CanEquipItem(NULL_SLOT, dest, item, true) == EQUIP_ERR_OK && dest != NULL_SLOT)
+        {
+            uint8 const eslot = dest & 0xFF;
+            if (eslot < EQUIPMENT_SLOT_END)
+            {
+                Item* equipped = me->GetItemByPos(INVENTORY_SLOT_BAG_0, eslot);
+                uint32 const equippedScore = equipped
+                    ? Companion::Equipment::Score(
+                          EquipmentStatsFromProto(equipped->GetProto(), me->GetLevel()))
+                    : 0;
+                info.upgradeOverEquipped = Companion::Equipment::Score(
+                    EquipmentStatsFromProto(proto, me->GetLevel())) > equippedScore;
+            }
+        }
+    }
+    return info;
+}
+
+bool PlayerBotAI::VendorPressureStep(uint32 diff)
+{
+    if (!IsOwnedCompanion() || !me || !me->IsAlive() || !me->GetMap())
+        return false;
+    if (_held)
+        return false; // a hold preempts the whole cleanup path
+
+    uint8_t const freeSlots = CountFreeSlots();
+    bool const pressure = Companion::Inventory::PressureActive(freeSlots, _inventoryPressure);
+    if (pressure)
+    {
+        if (!_pressureReported)
+        {
+            // One bounded status line per pressure episode.
+            _pressureReported = true;
+            Companion::Personality::Profile const profile =
+                botEntry ? (Companion::Personality::Profile)botEntry->personalityProfile
+                         : Companion::Personality::Profile::None;
+            char const* line = nullptr;
+            if (Companion::Personality::MapPressureLine(profile, line))
+                me->Say(line, LANG_UNIVERSAL);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[Inventory] pressure GUID:%u free:%u stored:%u profile:%s",
+                               me->GetGUIDLow(), freeSlots, _inventoryPressure,
+                               Companion::Personality::ProfileName(profile));
+        }
+        if (!_vendorExhausted && !_vendorTargetGuid && !me->IsInCombat())
+        {
+            _vendorScanTimer += diff;
+            if (_vendorFailReported)
+                _vendorFailTimer += diff; // pace the next failure report
+            if (_vendorScanTimer >= Companion::Inventory::kVendorScanPaceMs)
+            {
+                _vendorScanTimer = 0;
+                BotVendorSearcher probe(me);
+                Creature* found = nullptr;
+                MaNGOS::CreatureLastSearcher<BotVendorSearcher> searcher(found, probe);
+                Cell::VisitGridObjects(me, searcher, Companion::Inventory::kVendorSearchRadiusYd);
+                Creature* vendor = probe.Best();
+                if (vendor)
+                {
+                    _vendorTargetGuid = vendor->GetObjectGuid().GetRawValue();
+                    _vendorFailReported = false;
+                    _vendorFailTimer = 0;
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[Inventory] vendor found GUID:%u vendor:%u entry:%u dist:%.1f",
+                                       me->GetGUIDLow(), vendor->GetGUIDLow(), vendor->GetEntry(),
+                                       me->GetDistance(vendor));
+                }
+                else if (!_vendorFailReported ||
+                         _vendorFailTimer >= Companion::Inventory::kVendorFailReportMs)
+                {
+                    // Bounded failure report: first scan immediate, then
+                    // rate-limited. The companion waits for owner guidance
+                    // without deleting or selling anything.
+                    _vendorFailReported = true;
+                    _vendorFailTimer = 0;
+                    Companion::Personality::Profile const profile =
+                        botEntry ? (Companion::Personality::Profile)botEntry->personalityProfile
+                                 : Companion::Personality::Profile::None;
+                    char const* line = nullptr;
+                    if (Companion::Personality::MapNoVendorLine(profile, line))
+                        me->Say(line, LANG_UNIVERSAL);
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[Inventory] no vendor GUID:%u radius:%u",
+                                       me->GetGUIDLow(),
+                                       (uint32)Companion::Inventory::kVendorSearchRadiusYd);
+                }
+            }
+        }
+    }
+    else
+    {
+        if (_pressureReported || _vendorTargetGuid || _vendorExhausted)
+        {
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[Inventory] pressure cleared GUID:%u free:%u",
+                               me->GetGUIDLow(), freeSlots);
+        }
+        _pressureReported = false;
+        _vendorTargetGuid = 0;
+        _vendorExhausted = false;
+        _vendorFailReported = false;
+        _vendorFailTimer = 0;
+        _vendorScanTimer = 0;
+        _inventoryPressure = 0; // episode resolved: stored loot is acceptable again
+    }
+    return pressure;
+}
+
+void PlayerBotAI::ExecuteVendor(Companion::Intent const& intent, uint32 diff)
+{
+    if (!me || !me->IsAlive() || !me->GetMap())
+        return;
+    Creature* vendor = me->GetMap()->GetCreature(ObjectGuid(intent.target));
+    if (!vendor || !vendor->IsAlive() || !vendor->IsInWorld() || !vendor->IsVendor() ||
+        !vendor->IsWithinDistInMap(me, Companion::Inventory::kVendorSearchRadiusYd))
+    {
+        // Stale or out-of-bounds vendor: drop it; the scan re-selects
+        // at the declared pace while pressure remains.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] vendor lost GUID:%u vendor:%u reason:stale",
+                           me->GetGUIDLow(), (uint32)ObjectGuid(intent.target).GetCounter());
+        _vendorTargetGuid = 0;
+        me->GetMotionMaster()->Clear(false);
+        return;
+    }
+    float const dist = me->GetDistance(vendor);
+    if (dist > INTERACTION_DISTANCE)
+    {
+        // Bounded approach: one path per idle or moved vendor, like
+        // the follow goal; a timed cast holds position so it completes.
+        if (me->IsNonMeleeSpellCasted(true))
+        {
+            if (!me->GetMotionMaster()->empty())
+                me->GetMotionMaster()->Clear(false);
+            return;
+        }
+        float const vx = vendor->GetPositionX();
+        float const vy = vendor->GetPositionY();
+        float const vz = vendor->GetPositionZ();
+        float const dx = vx - _followPathX;
+        float const dy = vy - _followPathY;
+        bool const moved = (dx * dx + dy * dy) > (2.0f * 2.0f);
+        if (me->GetMotionMaster()->empty() || moved ||
+            _followPathAgeMs >= kFollowPathRefreshMs)
+        {
+            _followPathX = vx;
+            _followPathY = vy;
+            _followPathZ = vz;
+            _followPathAgeMs = 0;
+            me->GetMotionMaster()->MovePoint(0, vx, vy, vz, MOVE_PATHFINDING);
+        }
+        else
+            _followPathAgeMs += diff;
+        return;
+    }
+    SellJunkToVendor(vendor);
+}
+
+void PlayerBotAI::SellJunkToVendor(Creature* vendor)
+{
+    if (!me || !vendor)
+        return;
+    // The authoritative interaction check the packet handler makes:
+    // service flag, life, hostility, combat state, reputation and the
+    // 5 yd range. A failed check drops the vendor (re-scan at pace).
+    Creature* npc = me->GetNPCIfCanInteractWith(vendor->GetObjectGuid(), UNIT_NPC_FLAG_VENDOR);
+    if (!npc)
+    {
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] vendor lost GUID:%u vendor:%u reason:interact",
+                           me->GetGUIDLow(), vendor->GetGUIDLow());
+        _vendorTargetGuid = 0;
+        return;
+    }
+    uint8 sold = 0;
+    bool sawSellable = false; // an item passed the declared junk gate this pass
+    auto sellPass = [&](uint8 bag, uint8 slot)
+    {
+        Item* item = me->GetItemByPos(bag, slot);
+        if (!item)
+            return;
+        Companion::Inventory::ItemInfo const info = FillItemInfo(item);
+        if (Companion::Inventory::Classify(info) != Companion::Inventory::Verdict::Sellable)
+            return; // protected: leave it
+        sawSellable = true;
+        if (sold >= Companion::Inventory::kMaxSalesPerTick)
+            return; // pace: the rest is sold on later ticks
+        // Handler-shaped full-stack sale: re-resolve by GUID and apply
+        // the same guards the vendor packet handler applies.
+        Item* live = me->GetItemByGuid(item->GetObjectGuid());
+        if (!live || me->GetObjectGuid() != live->GetOwnerGuid() ||
+            me->IsBankPos(live->GetPos()) ||
+            me->GetLootGuid() == live->GetObjectGuid() ||
+            (live->IsBag() && !((Bag*)live)->IsEmpty()))
+            return;
+        ItemPrototype const* proto = live->GetProto();
+        if (!proto || proto->SellPrice == 0)
+            return;
+        uint32 money = proto->SellPrice * live->GetCount();
+        // Handler parity: a negative-charge spell prices the item
+        // proportionally to the charges remaining.
+        for (auto i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+        {
+            auto const &spell = proto->Spells[i];
+            if (spell.SpellId != 0 && spell.SpellCharges < 0)
+            {
+                auto const multiplier = static_cast<float>(live->GetSpellCharges(i)) /
+                                       static_cast<float>(spell.SpellCharges);
+                money *= multiplier;
+                break;
+            }
+        }
+        me->LogItem(live, LogItemAction::Sold);
+        me->ItemRemovedQuestCheck(live->GetEntry(), live->GetCount());
+        me->RemoveItem(live->GetBagSlot(), live->GetSlot(), true);
+        me->InterruptSpellsWithCastItem(live);
+        live->RemoveFromUpdateQueueOf(me);
+        me->AddItemToBuyBackSlot(live, money, npc->GetObjectGuid());
+        me->LogModifyMoney(money, "SellItem", npc->GetObjectGuid(), live->GetEntry());
+        ++sold;
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] sold GUID:%u item:%u count:%u money:%u vendor:%u",
+                           me->GetGUIDLow(), live->GetEntry(), live->GetCount(), money,
+                           npc->GetGUIDLow());
+    };
+    // Bounded pass: bag0 item slots, then sub-bags (the shape
+    // EvaluateReceivedEquipment already uses).
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        sellPass(INVENTORY_SLOT_BAG_0, slot);
+    for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+        for (uint8 slot = 0; slot < 36; ++slot)
+            sellPass(bag, slot);
+    if (!sawSellable)
+    {
+        // Every remaining item is protected: the declared junk set is
+        // empty. Stop the vendor travel for this episode; the prior
+        // owner goal resumes and the companion waits for owner
+        // guidance.
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Inventory] exhausted GUID:%u free:%u",
+                           me->GetGUIDLow(), CountFreeSlots());
+        _vendorExhausted = true;
+        _vendorTargetGuid = 0;
+        me->GetMotionMaster()->Clear(false);
+    }
+}
+
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
+    // PORT-018 (KAP-558): planner rounds key on party membership, not
+    // order state, so the round step runs before the no-order early
+    // return.
+    PlannerRoundStep(diff);
+    ConversationRoundStep(); // PORT-022: consume one bounded reply, if any
+    CooperativeQuestStep(diff); // PORT-023: at most one cooperative quest action
     if (!_following && !_held && !_assistTargetGuid)
         return false;
+    // PORT-025 (KAP-558): bag-pressure episode bookkeeping (one
+    // status line per episode) + bounded vendor discovery. Runs
+    // before the observation fill so the Vendor candidate is visible
+    // to Select; hold, combat, recovery and owner loss preempt the
+    // travel and sale at the policy and executor level.
+    bool const bagPressure = VendorPressureStep(diff);
     Companion::Observation observation;
     observation.generation = _followSeq;
     observation.following = _following;
     observation.held = _held;
     observation.ownerAvailable = IsFollowOwnerAvailable();
+    // PORT-025: the resolved vendor (re-validated live) and the
+    // declared pressure state; the executor re-resolves the vendor
+    // from its GUID and re-checks the world before any approach or
+    // sale.
+    observation.bagPressure = bagPressure;
+    if (_vendorTargetGuid)
+    {
+        Creature* vendor = me->GetMap()->GetCreature(ObjectGuid(_vendorTargetGuid));
+        if (vendor && vendor->IsAlive() && vendor->IsInWorld() && vendor->IsVendor())
+            observation.vendorTarget = vendor->GetObjectGuid().GetRawValue();
+        else
+            _vendorTargetGuid = 0;
+    }
     // PORT-005: re-resolve the assisted target from its GUID every tick; a
     // dead, vanished or unloaded target clears the assist (the companion
     // resumes its previous order) and never substitutes another enemy.
@@ -1957,17 +3671,15 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     }
     // Hardening item 4 (KAP-558): a held combat target that died becomes
     // the pending loot corpse; the Loot intent picks it up this tick.
-    if (_combatTargetGuid && me->GetMap())
+    // PORT-012: the live-slot transition is the module's named one; a
+    // LiveToCorpse promotion resets the loot retry budget exactly as
+    // before.
+    if (_targets.live && me->GetMap())
     {
-        Creature* held = me->GetMap()->GetCreature(_combatTargetGuid);
-        if (!held)
-            _combatTargetGuid = ObjectGuid();
-        else if (!held->IsAlive())
-        {
-            _lootCorpseGuid = _combatTargetGuid;
-            _combatTargetGuid = ObjectGuid();
+        Creature* held = me->GetMap()->GetCreature(ObjectGuid(_targets.live));
+        if (_targets.OnLiveResolved(held != nullptr, held != nullptr && held->IsAlive())
+            == Companion::Combat::TargetSlots::Transition::LiveToCorpse)
             _lootRetryCount = 0;
-        }
     }
     Unit* target = me->GetVictim();
     if (!target)
@@ -1978,9 +3690,9 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // loot becomes a first-class Loot target. The value is read here so the
     // policy stays pure; the executor re-resolves it from the GUID and
     // re-validates the world before acting.
-    if (_lootCorpseGuid && me->GetMap())
+    if (_targets.corpse && me->GetMap())
     {
-        Creature* loot = me->GetMap()->GetCreature(_lootCorpseGuid);
+        Creature* loot = me->GetMap()->GetCreature(ObjectGuid(_targets.corpse));
         if (loot && !loot->IsAlive() && loot->IsInWorld())
             observation.lootTarget = loot->GetObjectGuid().GetRawValue();
     }
@@ -1992,7 +3704,8 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     // Hold > Assist > ContinueCombat > Defend > Follow, so a hold always
     // wins and an active fight is never abandoned for a new defender.
     // PORT-007: defend also interrupts a Loot goal (life over loot).
-    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot) &&
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot ||
+         intent.action == Companion::Action::Vendor) &&
         botEntry && botEntry->defendEnabled)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
@@ -2078,6 +3791,69 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
         ClearDefendTarget(intent.action == Companion::Action::Hold ? "hold"
                           : intent.action == Companion::Action::Assist ? "assist"
                           : "no goal");
+    }
+    // PORT-016 (KAP-558): declared damage tank-pull assist. Fires only
+    // when the selection would otherwise be Follow or Loot (no hold,
+    // assist, live combat or defend), like the defend fill: the only
+    // candidate target is the declared tank's established victim and
+    // the tank-pull discipline (Companion/Damage.h) decides when the
+    // damage companion engages (threat gate, crowd-control
+    // preservation, reach). The Damage intent runs through the shared
+    // combat executor; once acquired, the fight persists as
+    // ContinueCombat through the live slot.
+    if ((intent.action == Companion::Action::Follow || intent.action == Companion::Action::Loot ||
+         intent.action == Companion::Action::Vendor) &&
+        IsDeclaredDamage())
+    {
+        Companion::Damage::Observation const dmgObs = FillDamageObservation();
+        if (Companion::Damage::Select(dmgObs).action == Companion::Damage::Action::Damage)
+        {
+            observation.damageTarget = dmgObs.targetGuid;
+            intent = Companion::Select(observation);
+            // The policy carries the low GUID (value contract, log
+            // fixture); the shared executor looks up packed object
+            // GUIDs (the assist contract), so the adapter hands it the
+            // packed form here, exactly like the assist branch.
+            if (dmgObs.targetRaw)
+                intent.target = dmgObs.targetRaw;
+        }
+        else
+        {
+            // [Damage] wait line (2 s cadence, debug only): why the
+            // damage companion is not engaging. established:1 with
+            // cc:1 is the crowd-control hold; established:0 is the
+            // pull gate (no tank, no established target, or
+            // insufficient tank threat).
+            _damageWaitTimer += diff;
+            if (_damageWaitTimer >= 2000)
+            {
+                _damageWaitTimer = 0;
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString(
+                        "[Damage] wait GUID:%u tank:%u target:%u established:%u cc:%u "
+                        "canAttack:%u los:%u dist:%.2f held:%u owner:%u",
+                        me->GetGUIDLow(), dmgObs.tankGuid, dmgObs.targetGuid,
+                        (uint32)Companion::Damage::PullEstablished(dmgObs),
+                        (uint32)dmgObs.targetUnderCC, (uint32)dmgObs.canAttack,
+                        (uint32)dmgObs.inLos, dmgObs.distance,
+                        (uint32)dmgObs.held, (uint32)dmgObs.ownerAvailable);
+            }
+        }
+    }
+    // PORT-015 (KAP-558): declared healer triage runs on this tick's
+    // budget, before behavior execution: a hold or an owner loss
+    // (the card's failure cases) suppresses healing exactly like it
+        // suppresses every other behavior, and an accepted heal does not
+        // cancel the selected behavior - the behavior path (follow and
+        // the rest) continues on the same tick after the cast step.
+    if (IsDeclaredHealer() &&
+        !(_held || !IsFollowOwnerAvailable() ||
+          intent.action == Companion::Action::Hold))
+    {
+        Companion::Healer::Observation const healerObs = FillHealerObservation();
+        Companion::Healer::Decision const healerDecision = Companion::Healer::Select(healerObs);
+        if (healerDecision.action != Companion::Healer::Action::None)
+            HealerTriageStep(healerObs, healerDecision);
     }
     ExecuteCompanion(intent, diff);
     return true;
@@ -2209,7 +3985,7 @@ bool PlayerBotAI::UpdateRecovery(uint32 diff)
 // ---------------------------------------------------------------------------
 // PORT-008 (KAP-558): one tick of the bounded pursuit budget. While the
 // companion cannot land a melee hit on the named target it may keep
-// chasing for at most kPursuitLeashMs; on expiry the caller abandons the
+// chasing for at most Leash::kArmedMs; on expiry the caller abandons the
 // pursuit (drops the target, stops combat, clears motion) so the prior
 // order resumes. A target within melee reach disarms the budget - an
 // actual fight has unbounded kill time.
@@ -2218,24 +3994,19 @@ bool PlayerBotAI::PursuitLeashTick(Unit* target, uint32 diff)
 {
     if (!target)
     {
-        _pursuitLeashMs = 0;
+        _pursuitLeash.Disarm();
         return false;
     }
-    if (me && me->CanReachWithMeleeAutoAttack(target))
+    Companion::Combat::Leash::Step const step =
+        _pursuitLeash.Tick(me && me->CanReachWithMeleeAutoAttack(target), diff);
+    if (step == Companion::Combat::Leash::Step::Armed)
     {
-        _pursuitLeashMs = 0;
-        return false;
-    }
-    if (_pursuitLeashMs == 0)
-    {
-        _pursuitLeashMs = kPursuitLeashMs;
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] pursuit leash armed GUID:%u target:%u",
                            me->GetGUIDLow(), target->GetGUIDLow());
         return false;
     }
-    _pursuitLeashMs = (_pursuitLeashMs > diff) ? _pursuitLeashMs - diff : 0;
-    if (_pursuitLeashMs == 0)
+    if (step == Companion::Combat::Leash::Step::Expired)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot] pursuit leash expired GUID:%u target:%u",
@@ -2290,65 +4061,87 @@ void PlayerBotAI::LogAssistProbe(Creature* target)
 
 // ---------------------------------------------------------------------------
 // Hardening item 3 (KAP-558): the single combat executor shared by the
-// Assist, ContinueCombat and Defend intents. A CombatRequest carries the
-// target GUID, the source intent and the engagement distance limit. The
-// executor re-resolves and re-validates the target against the world every
-// tick - legality differs by source (defend accepts neutral attackers the
-// CanAttack gate rejects; a continued fight must still be the current
-// victim or held target) - then applies the pursuit reach budget, the
-// 2 s combat pacing and the offensive cast-or-attack step. A failed
-// engagement is dropped with the source-specific cleanup (assist clears
-// the assist state and motion, a held fight stops combat, defend clears
-// the defend lock) so the prior order resumes. The per-source debug lines
-// are the fixture contract and are preserved verbatim.
+// Assist, ContinueCombat and Defend intents. A Companion::Combat::Request
+// carries the target GUID, the source intent and the engagement distance
+// limit. The adapter re-resolves the target against the world each tick and
+// fills a value-only TargetSnapshot; the module's Verify applies the shared
+// legality rules (defend accepts neutral attackers the CanAttack gate
+// rejects; a continued fight must still be the current victim or held
+// target and has no LOS rule). A failed engagement is dropped with the
+// source-specific cleanup (assist clears the assist state and motion, a
+// held fight stops combat, defend clears the defend lock) so the prior
+// order resumes. The per-source debug lines are the fixture contract and
+// are preserved verbatim.
 // ---------------------------------------------------------------------------
-bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
+bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 diff)
 {
     if (!me || !me->IsAlive() || !me->GetMap() || req.generation != _followSeq)
         return false;
-    Creature* target = me->GetMap()->GetCreature(ObjectGuid(req.targetGuid));
-    bool legal = false;
-    switch (req.source)
+    Creature* target = me->GetMap()->GetCreature(ObjectGuid(req.target));
+    Companion::Combat::TargetSnapshot snap;
+    if (target)
     {
-        case CombatSource::Defend:
+        if (req.source == Companion::Combat::Source::Defend)
         {
-            Unit const* owner = nullptr;
-            if (Player* p = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid)))
-                owner = p;
-            legal = target && target->IsAlive() && target->IsInWorld() &&
-                    DefendTargetLegal(me, owner, target) &&
-                    me->IsWithinLOSInMap(target) &&
-                    me->GetDistance(target) <= req.maxDistance;
-            break;
+            // One snapshot rule set for the defend scan and the executor.
+            Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+            snap = DefendSnapshot(me, owner, target);
         }
-        case CombatSource::Assist:
-            legal = target && target->IsAlive() && target->IsInWorld() &&
-                    me->CanAttack(target) && !me->IsFriendlyTo(target) &&
-                    me->IsWithinLOSInMap(target) &&
-                    me->GetDistance(target) <= req.maxDistance;
-            break;
-        case CombatSource::ContinueCombat:
-            legal = target && target->IsAlive() && target->IsInWorld() &&
-                    me->CanAttack(target) && !me->IsFriendlyTo(target) &&
-                    me->GetDistance(target) <= req.maxDistance &&
-                    (me->GetVictim() == target || GetAliveHeldTarget() == target);
-            break;
+        else
+        {
+            snap.exists = true;
+            snap.alive = target->IsAlive();
+            snap.inWorld = target->IsInWorld();
+            if (snap.alive && snap.inWorld)
+            {
+                // The assist contract is the owner's canonical gate
+                // (IsAssistLegalTarget): any non-friendly targetable
+                // creature is attackable, because quest mobs are usually
+                // passive wildlife. The non-forced CanAttack also
+                // requires faction hostility, which the real player
+                // melee path does not, so assist revalidation uses the
+                // forced form for player executors only; the
+                // ContinueCombat/Damage verdicts keep their reviewed
+                // semantics unchanged.
+                snap.canAttack = me->CanAttack(target,
+                                               me->IsPlayer() &&
+                                               req.source == Companion::Combat::Source::Assist);
+                snap.friendly = me->IsFriendlyTo(target);
+                snap.isVictim = me->GetVictim() == target;
+                snap.isHeld = GetAliveHeldTarget() == target;
+            }
+            if (req.source == Companion::Combat::Source::Damage && snap.alive && snap.inWorld)
+            {
+                // PORT-016: the pull-discipline facts, re-resolved
+                // from the live world immediately before the
+                // engagement is honored (the adapter revalidation
+                // the shared Verify consumes).
+                snap.targetUnderCC = TargetUnderCC(target);
+                snap.establishedTarget = IsEstablishedTankTarget(target->ToCreature());
+            }
+        }
+        if (snap.alive && snap.inWorld)
+        {
+            snap.inLos = me->IsWithinLOSInMap(target);
+            snap.distance = me->GetDistance(target);
+        }
     }
-    if (!legal)
+    Companion::Combat::Verdict const verdict = Companion::Combat::Verify(req, snap);
+    if (!verdict.legal)
     {
         switch (req.source)
         {
-            case CombatSource::Assist:
+            case Companion::Combat::Source::Assist:
             {
                 // The named target is no longer a legal engagement. Drop it
                 // and resume the prior order; never substitute an unrelated
                 // enemy.
                 _assistTargetGuid = 0;
-                _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+                _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
                 if (me->GetVictim())
                     me->CombatStop();
                 me->GetMotionMaster()->Clear(false);
-                ClearTarget();
+                _targets.ReleaseLive();
                 if (sPlayerBotMgr.IsDebugEnabled())
                 {
                     if (target && target->IsAlive())
@@ -2356,17 +4149,28 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
                                        me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
                     else
                         sLog.outString("[PlayerBot][Assist] target invalid GUID:%u target:%u",
-                                       me->GetGUIDLow(), (uint32)ObjectGuid(req.targetGuid).GetCounter());
+                                       me->GetGUIDLow(), (uint32)ObjectGuid(req.target).GetCounter());
                 }
                 break;
             }
-            case CombatSource::ContinueCombat:
-                _pursuitLeashMs = 0; // PORT-008: the pursuit is over; fresh budget for the next one
+            case Companion::Combat::Source::ContinueCombat:
+                _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
                 if (me->GetVictim())
                     me->CombatStop();
-                ClearTarget();
+                _targets.ReleaseLive();
                 break;
-            case CombatSource::Defend:
+            case Companion::Combat::Source::Damage:
+                _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
+                if (me->GetVictim())
+                    me->CombatStop();
+                _targets.ReleaseLive();
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[Damage] target dropped GUID:%u target:%u reject:%s",
+                                   me->GetGUIDLow(),
+                                   (uint32)ObjectGuid(req.target).GetCounter(),
+                                   Companion::Combat::RejectName(verdict.reject));
+                break;
+            case Companion::Combat::Source::Defend:
                 ClearDefendTarget("target invalid");
                 break;
         }
@@ -2379,19 +4183,24 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
     {
         switch (req.source)
         {
-            case CombatSource::Assist:
+            case Companion::Combat::Source::Assist:
                 _assistTargetGuid = 0;
                 if (me->GetVictim())
                     me->CombatStop();
                 me->GetMotionMaster()->Clear(false);
-                ClearTarget();
+                _targets.ReleaseLive();
                 break;
-            case CombatSource::ContinueCombat:
+            case Companion::Combat::Source::ContinueCombat:
                 if (me->GetVictim())
                     me->CombatStop();
-                ClearTarget();
+                _targets.ReleaseLive();
                 break;
-            case CombatSource::Defend:
+            case Companion::Combat::Source::Damage:
+                if (me->GetVictim())
+                    me->CombatStop();
+                _targets.ReleaseLive();
+                break;
+            case Companion::Combat::Source::Defend:
                 if (me->GetVictim() == target)
                     me->CombatStop();
                 ClearDefendTarget("leash");
@@ -2412,21 +4221,24 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
     RememberCombatTarget(target);
     if (sPlayerBotMgr.IsDebugEnabled())
     {
-        if (req.source == CombatSource::Assist)
+        if (req.source == Companion::Combat::Source::Assist)
             sLog.outString("[PlayerBot][Assist] fighting GUID:%u target:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-        else if (req.source == CombatSource::Defend)
+        else if (req.source == Companion::Combat::Source::Defend)
             sLog.outString("[PlayerBot][Defend] fighting GUID:%u target:%u dist:%.2f",
+                           me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
+        else if (req.source == Companion::Combat::Source::Damage)
+            sLog.outString("[Damage] fighting GUID:%u target:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
         else
             sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
                            me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
-        if (req.source == CombatSource::Assist)
+        if (req.source == Companion::Combat::Source::Assist)
             LogAssistProbe(target);
         // Hardening diag (KAP-558): the four swing-gate conditions from
         // UpdateMeleeAttackingState, sampled each offense step, so a
         // stopped swing is identified by its failing predicate.
-        if (req.source == CombatSource::Assist)
+        if (req.source == Companion::Combat::Source::Assist)
             sLog.outString(
                 "[PlayerBot][Assist] swing GUID:%u t:%u victim:%u cast:%u "
                 "ready:%u atktimer:%u facing:%u auto:%u los:%u abltimer:%u",
@@ -2444,7 +4256,34 @@ bool PlayerBotAI::ExecuteCombat(CombatRequest const& req, uint32 diff)
         me->GetMotionMaster()->MoveChase(target);
     else
         me->SetFacingToObject(target);
-    if (!_abilityTimer && me->IsWithinLOSInMap(target))
+    // PORT-016 (KAP-558): the damage companion's pull evidence line,
+    // sampled on the same 2 s combat pacing: the established-target
+    // and crowd-control facts at each offense step (the fixture
+    // contract, like the [Tank] threat line above).
+    if (IsDeclaredDamage() && sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Damage] pull GUID:%u t:%u established:%u cc:%u victim:%u",
+                       me->GetGUIDLow(), target->GetGUIDLow(),
+                       (uint32)IsEstablishedTankTarget(target->ToCreature()),
+                       (uint32)TargetUnderCC(target),
+                       target->GetVictim() ? (uint32)target->GetVictim()->GetGUIDLow() : 0);
+    // PORT-014 (KAP-558): the declared tank matrix owns the assist offense
+    // step: measured normal threat, a taunt when the protected party member
+    // holds it, and the ordinary attack otherwise. The [Tank] threat line
+    // is the fixture contract, sampled on the 2 s combat pacing above.
+    if (req.source == Companion::Combat::Source::Assist && IsDeclaredTank())
+    {
+        Companion::Tank::Observation const obs = FillTankObservation(target);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[Tank] threat GUID:%u me:%u owner:%u t:%u victim:%u",
+                           me->GetGUIDLow(), obs.tankThreat, obs.ownerThreat,
+                           target->GetGUIDLow(), obs.victimGuid);
+        Companion::Tank::Decision const decision = Companion::Tank::SelectAction(obs);
+        if (decision.action == Companion::Tank::Action::Taunt)
+            TankTauntStep(target);
+        else
+            me->Attack(target, true); // normal threat: the ordinary white swing
+    }
+    else if (!_abilityTimer && me->IsWithinLOSInMap(target))
         TryOffensiveCastOrAttack(target);
     else
         me->Attack(target, true);
@@ -2462,8 +4301,8 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         // Hardening item 3 (KAP-558): the assist engagement runs through the
         // shared executor; a vanished or out-of-reach target drops the assist
         // (state, motion and combat cleared) and the prior order resumes.
-        ExecuteCombat(CombatRequest{intent.target, CombatSource::Assist,
-                                    intent.generation, 35.0f}, diff);
+        ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Assist,
+                                                                                          intent.generation, 35.0f}, diff);
         return;
     }
     if (intent.action == Companion::Action::Defend)
@@ -2473,8 +4312,19 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
         // intent is active, and a failed engagement drops the defend lock
         // (reason logged) so the prior order resumes.
         _defendTargetGrace = (_defendTargetGrace > diff) ? _defendTargetGrace - diff : 0;
-        ExecuteCombat(CombatRequest{intent.target, CombatSource::Defend,
-                                    intent.generation, 35.0f}, diff);
+        ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Defend,
+                                                                                          intent.generation, 35.0f}, diff);
+        return;
+    }
+    if (intent.action == Companion::Action::Damage)
+    {
+        // PORT-016 (KAP-558): the damage engagement runs through the
+        // shared executor; a vanished, out-of-reach, controlled or
+        // no-longer-established target drops the engagement (combat
+        // and the live slot released) and the prior order resumes.
+        ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::Damage,
+                                                                                          intent.generation,
+                                                                                          Companion::Damage::kEngageDistance}, diff);
         return;
     }
     if (_held || !IsFollowOwnerAvailable() || intent.action == Companion::Action::Hold)
@@ -2484,6 +4334,16 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
             me->CombatStop();
         me->GetMotionMaster()->Clear(false);
         ClearTarget();
+        return;
+    }
+    if (intent.action == Companion::Action::Vendor)
+    {
+        // PORT-025 (KAP-558): the hold gate above already stopped
+        // motion for Hold / held / owner loss; the bounded vendor
+        // approach and handler-shaped sale run only when the owner
+        // goal is otherwise idle. A stale or vanished vendor drops
+        // the goal; the scan re-selects at the declared pace.
+        ExecuteVendor(intent, diff);
         return;
     }
     if (intent.action == Companion::Action::Loot)
@@ -2502,8 +4362,8 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     // Hardening item 3 (KAP-558): the held-target engagement runs through
     // the shared executor; a vanished or released target drops the fight
     // and the prior order resumes.
-    ExecuteCombat(CombatRequest{intent.target, CombatSource::ContinueCombat,
-                                intent.generation, 35.0f}, diff);
+    ExecuteCombat(Companion::Combat::Request{intent.target, Companion::Combat::Source::ContinueCombat,
+                                                                                                  intent.generation, 35.0f}, diff);
 }
 
 // PORT-007 (KAP-558): one bounded execution tick of the companion Loot
@@ -2565,6 +4425,16 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
 
     if (me->GetDistance(leader) > kFollowRange)
     {
+        // PORT-015 (KAP-558): the declared heal is cast-interruptible by
+        // movement; while a timed cast is in flight the follower holds
+        // position (and cancels a walk in progress) so the cast completes.
+        // The approach re-issues on the first tick after the cast ends.
+        if (me->IsNonMeleeSpellCasted(true))
+        {
+            if (!me->GetMotionMaster()->empty())
+                me->GetMotionMaster()->Clear(false);
+            return true;
+        }
         // PORT-007: re-arm the reached latch while out of range so the
         // "reached" line marks every out-of-range -> in-range transition
         // (a completed regroup), not just the first approach.
@@ -2580,17 +4450,25 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
             float const lx = leader->GetPositionX();
             float const ly = leader->GetPositionY();
             float const lz = leader->GetPositionZ();
-            float const dpx = lx - _followPathX;
-            float const dpy = ly - _followPathY;
+            // PORT-032 (KAP-558): natural stance. The path target is a
+            // fixed offset to the leader's right (side vector for facing
+            // (sin o, cos o) is (cos o, -sin o)); the kFollowRange stop
+            // rule still owns arrival, so the companion never overlaps
+            // the player's center.
+            float const o = leader->GetOrientation();
+            float const tx = lx + cosf(o) * kFollowSideOffsetYd;
+            float const ty = ly - sinf(o) * kFollowSideOffsetYd;
+            float const dpx = tx - _followPathX;
+            float const dpy = ty - _followPathY;
             bool const moved = (dpx * dpx + dpy * dpy) > (2.0f * 2.0f);
             if (me->GetMotionMaster()->empty() || moved ||
                 _followPathAgeMs >= kFollowPathRefreshMs)
             {
-                _followPathX = lx;
-                _followPathY = ly;
+                _followPathX = tx;
+                _followPathY = ty;
                 _followPathZ = lz;
                 _followPathAgeMs = 0;
-                me->GetMotionMaster()->MovePoint(0, lx, ly, lz, MOVE_PATHFINDING);
+                me->GetMotionMaster()->MovePoint(0, tx, ty, lz, MOVE_PATHFINDING);
             }
             else
                 _followPathAgeMs += diff;

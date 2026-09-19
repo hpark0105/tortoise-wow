@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RESERVED = 1000000000
 IMAGE = "tortoise-local:dev"
 MIGRATION = ROOT / "sql" / "database_updates" / "character" / "20260911174500_character.sql"
+PERSONALITY_MIGRATION = ROOT / "sql" / "database_updates" / "character" / "20260916120000_character.sql"
 PROVISION_MIGRATION = ROOT / "sql" / "database_updates" / "character" / "20260912120000_character.sql"
 PROVISION_NAME = "ProvisionBot"
 UNRELATED_NAME = "UnrelatedBot"
@@ -150,6 +151,7 @@ def boot_lab(project, evidence, world_env, seed_sql=None, extra_db_volumes=None)
             env=env, timeout=660)
     db_exec(base, env, MIGRATION.read_text(encoding="utf-8"))
     db_exec(base, env, PROVISION_MIGRATION.read_text(encoding="utf-8"))
+    db_exec(base, env, PERSONALITY_MIGRATION.read_text(encoding="utf-8"))
     if seed_sql:
         db_exec(base, env, seed_sql)
     return base, env

@@ -105,7 +105,11 @@ PlayerBotMgr::PlayerBotMgr()
 
 PlayerBotMgr::~PlayerBotMgr()
 {
-
+    // PORT-018 (KAP-558): bounded shutdown; the worker join cannot outlive
+    // the per-round I/O deadline.
+    m_plannerTransport.Shutdown();
+    // PORT-022 (KAP-558): same bounded shutdown for conversation.
+    m_conversationTransport.Shutdown();
 }
 
 void PlayerBotMgr::LoadConfig()
@@ -122,10 +126,19 @@ void PlayerBotMgr::LoadConfig()
     // MVP-006: one declared quest the companion progresses through the
     // normal quest APIs (accept, objective credit, turn-in).
     confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
+    confCooperativeQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.CooperativeQuestId", 0);
+    // PORT-030 (KAP-558): dynamic mirror mode - no per-quest config;
+    // the companion mirrors any kill-only quest the owner holds.
+    confMirrorOwnerQuests = sConfig.GetBoolDefault("PlayerBot.MirrorOwnerQuests", false);
     // PORT-007 (KAP-558): lab-only idle-wander clamp. Default 0 keeps
     // the legacy frand(8,20) radius; fixtures set a small value so
     // seeded bots stay geometrically stable before scripted holds land.
     confWanderRadius = sConfig.GetFloatDefault("PlayerBot.WanderRadius", 0.0f);
+    // PORT-023 (KAP-558) lab-only gate: ambient (unowned) bots may
+    // autonomously acquire nearby targets (default on; the lab
+    // owner fixture disables it so a temp-logged owner idles at
+    // spawn instead of hunting the fixture pack).
+    confAmbientAcquire = sConfig.GetBoolDefault("PlayerBot.AmbientAcquire", true);
     if (confQuestId)
         sLog.outString("Playerbot: declared quest %u enabled (MVP-006)", confQuestId);
     // TW-014 (KAP-557) lab-only deterministic follow/stop script (default
@@ -200,6 +213,54 @@ void PlayerBotMgr::LoadConfig()
         if (!m_followScript.empty() && confDebug)
             sLog.outString("[PlayerBot][FollowScript] armed events:%u (TW-014 lab script)", (uint32)m_followScript.size());
     }
+    // PORT-023 (KAP-558) lab-only deterministic owner quest script
+    // (default off). Events are semicolon-separated
+    // <delayMs>:<issuerGuid>:<questId>:<phase> with phase "accept"
+    // or "turnin"; see QuestScriptEvent in PlayerBotMgr.h.
+    m_questScript.clear();
+    m_questScriptStartMs = 0;
+    m_questScriptIdx = 0;
+    {
+        std::string scriptToken = sConfig.GetStringDefault("PlayerBot.QuestScript", "");
+        size_t pos = 0;
+        while (pos <= scriptToken.size())
+        {
+            size_t semi = scriptToken.find(';', pos);
+            if (semi == std::string::npos)
+                semi = scriptToken.size();
+            std::string ev = scriptToken.substr(pos, semi - pos);
+            pos = semi + 1;
+            if (ev.empty())
+                continue;
+            size_t c1 = ev.find(':');
+            size_t c2 = (c1 == std::string::npos) ? std::string::npos : ev.find(':', c1 + 1);
+            size_t c3 = (c2 == std::string::npos) ? std::string::npos : ev.find(':', c2 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos || c3 == std::string::npos)
+            {
+                sLog.outError("Playerbot: quest-script event malformed; skipped: %s", ev.c_str());
+                continue;
+            }
+            QuestScriptEvent qe;
+            qe.delayMs = (uint32)atoi(ev.substr(0, c1).c_str());
+            qe.issuerGuid = (uint32)atoi(ev.substr(c1 + 1, c2 - c1 - 1).c_str());
+            qe.questId = (uint32)atoi(ev.substr(c2 + 1, c3 - c2 - 1).c_str());
+            std::string phase = ev.substr(c3 + 1);
+            qe.turnin = (phase == "turnin");
+            if (!qe.turnin && phase != "accept")
+            {
+                sLog.outError("Playerbot: quest-script phase invalid; skipped: %s", ev.c_str());
+                continue;
+            }
+            if (qe.issuerGuid == 0 || qe.questId == 0)
+            {
+                sLog.outError("Playerbot: quest-script event incomplete; skipped: %s", ev.c_str());
+                continue;
+            }
+            m_questScript.push_back(qe);
+        }
+        if (!m_questScript.empty() && confDebug)
+            sLog.outString("[PlayerBot][QuestScript] armed events:%u (PORT-023 lab script)", (uint32)m_questScript.size());
+    }
     // NEXT-002 (post-MVP) lab-only deterministic party-invite script
     // (default off). Events are semicolon-separated
     // <delayMs>:<inviterGuid>:<inviteeName>; the clock starts when every
@@ -241,6 +302,25 @@ void PlayerBotMgr::LoadConfig()
         if (!m_partyInviteScript.empty() && confDebug)
             sLog.outString("[PlayerBot][PartyInviteScript] armed events:%u (NEXT-002 lab script)", (uint32)m_partyInviteScript.size());
     }
+    // PORT-018 (KAP-558): bounded nonblocking planner transport. An empty
+    // PlayerBot.PlannerServiceURL leaves it disabled: no thread, no I/O, every
+    // call a no-op (the deterministic regression path).
+    m_plannerTransport.Init(sConfig.GetStringDefault("PlayerBot.PlannerServiceURL", ""),
+                            WorldTimer::getMSTime(), confDebug);
+    // PORT-022 (KAP-558): bounded nonblocking companion-conversation
+    // transport. An empty PlayerBot.ConversationServiceURL leaves it
+    // disabled: no thread, no I/O, no reply (the deterministic path).
+    m_conversationTransport.Init(sConfig.GetStringDefault("PlayerBot.ConversationServiceURL", ""),
+                                 WorldTimer::getMSTime(), confDebug);
+    // PORT-019 (KAP-558): declared personality profile for owned
+    // companions. The profile is operator-declared (config now,
+    // per-character persistence in PORT-020); the model never
+    // chooses it and only proposes within its allowlist.
+    m_personalityProfile = Companion::Personality::ProfileFromName(
+        sConfig.GetStringDefault("PlayerBot.PersonalityProfile", "none").c_str());
+    if (confDebug)
+        sLog.outString("[PlayerBotMgr] personality profile:%s",
+                       Companion::Personality::ProfileName(m_personalityProfile));
     // MVP-002 (KAP-552) lab-only probe (default off): deterministic stale
     // login-completion delivery; never set outside the Docker lab.
     m_staleProbeGuid = 0;
@@ -323,10 +403,12 @@ void PlayerBotMgr::Load()
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
     // Roster rows without a valid bot_ownership binding are quarantined: logged and skipped.
     result = CharacterDatabase.PQuery(
-        "SELECT p.char_guid, p.chance, p.ai, b.account_id, c.account, b.owner_account_id "
+        "SELECT p.char_guid, p.chance, p.ai, b.account_id, c.account, b.owner_account_id, "
+        "per.schema_version, per.profile_id "
         "FROM playerbot p "
         "LEFT JOIN bot_ownership b ON b.char_guid = p.char_guid "
-        "LEFT JOIN characters c ON c.guid = p.char_guid");
+        "LEFT JOIN characters c ON c.guid = p.char_guid "
+        "LEFT JOIN bot_personality per ON per.char_guid = p.char_guid");
     if (!result)
         sLog.outString("Loading playerbots...");
     else
@@ -342,6 +424,24 @@ void PlayerBotMgr::Load()
             uint32 charOwner = hasCharacter ? fields[4].GetUInt32() : 0;
             // TW-014: optional human-owner binding (NULL = unowned).
             uint32 ownerAccount = !fields[5].IsNULL() ? fields[5].GetUInt32() : 0;
+            // PORT-020 (KAP-558): versioned personality identity.
+            // A missing row stays (0,0) and is seeded from the
+            // declared config profile at first login; a rejected
+            // row (unknown schema or profile id) fails closed to
+            // the baseline and is never overwritten.
+            uint8 perSchema = 0;
+            uint8 perProfile = 0;
+            if (!fields[6].IsNULL())
+            {
+                perSchema = (uint8)fields[6].GetUInt32();
+                perProfile = (uint8)fields[7].GetUInt32();
+                if (!Companion::Personality::AcceptPersisted(perSchema, perProfile, perProfile))
+                {
+                    sLog.outError("Playerbot: personality row for %u rejected (schema=%u profile=%u); deterministic baseline",
+                                   guid, perSchema, perProfile);
+                    perProfile = 0;
+                }
+            }
 
             if (!hasCharacter)
             {
@@ -362,6 +462,8 @@ void PlayerBotMgr::Load()
             entry->ai->OnBotEntryLoad(entry);
             entry->persistent = true;
             entry->ownerAccountId = ownerAccount;
+            entry->personalitySchemaVersion = perSchema;
+            entry->personalityProfile = perProfile;
             m_bots[entry->playerGUID] = entry;
             totalChance += chance;
         } while (result->NextRow());
@@ -459,6 +561,11 @@ void PlayerBotMgr::DeleteAll()
 
     m_tempBots.clear();
 
+    // PORT-018 (KAP-558): bounded transport shutdown with the world; the
+    // worker join cannot outlive one in-flight round. A disabled
+    // transport (no URL) is a no-op here.
+    m_plannerTransport.Shutdown();
+
     if (confDebug)
         sLog.outString("[PlayerBotMgr] Deleting all bots [OK]");
 }
@@ -469,6 +576,37 @@ void PlayerBotMgr::OnBotLogin(PlayerBotEntry *e)
     e->loadingSinceMs = 0;
     if (confDebug)
         sLog.outString("[PlayerBot][Login]  '%s' GUID:%u Acc:%u", e->name.c_str(), e->playerGUID, e->accountId);
+    // PORT-020 (KAP-558): stable personality identity. A missing
+    // row is seeded from the declared config profile; an existing
+    // row (any schema) always wins, so re-inviting the same bot
+    // restores the same personality. A failed write never fails the
+    // login: the deterministic baseline remains.
+    SyncPersonality(e);
+}
+
+void PlayerBotMgr::SyncPersonality(PlayerBotEntry *e)
+{
+    // Only owned companions carry a personality identity; the
+    // row is written at most once (no-row -> config seed) and a
+    // persisted or rejected row is never rewritten here.
+    if (!e || !e->ownerAccountId || e->personalitySchemaVersion != 0)
+        return;
+    uint8 const profile = (uint8)m_personalityProfile;
+    if (profile == 0)
+        return; // declared baseline: no identity row, missing = baseline
+    if (!CharacterDatabase.PExecute(
+        "INSERT INTO bot_personality (char_guid, schema_version, profile_id, assigned_at) "
+        "VALUES (%u, %u, %u, %u) "
+        "ON DUPLICATE KEY UPDATE char_guid = char_guid",
+        (uint32)e->playerGUID, (uint32)Companion::Personality::kPersonalitySchemaVersion,
+        profile, (uint32)WorldTimer::getMSTime()))
+        return; // failed write never fails the login: baseline stays
+    e->personalitySchemaVersion = (uint8)Companion::Personality::kPersonalitySchemaVersion;
+    e->personalityProfile = profile;
+    if (confDebug)
+        sLog.outString("[Personality] assigned GUID:%u profile:%s (config seed)",
+                       e->playerGUID,
+                       Companion::Personality::ProfileName(m_personalityProfile));
 }
 
 void PlayerBotMgr::OnBotLogout(PlayerBotEntry *e)
@@ -590,6 +728,9 @@ void PlayerBotMgr::Update(uint32 diff)
     // NEXT-002 (post-MVP): deterministic party-invite script (lab-only,
     // config-gated; cheap state check when disabled).
     UpdatePartyInviteScript();
+    // PORT-023 (KAP-558): deterministic owner quest script
+    // (lab-only, config-gated; cheap state check when disabled).
+    UpdateQuestScript();
     if (!((m_elapsedTime - m_lastUpdate) > confUpdateDiff))
         return; //Pas besoin d'update
 
@@ -1454,6 +1595,12 @@ PlayerBotEntry* PlayerBotMgr::FindBotByName(const std::string& name) const
     return nullptr;
 }
 
+PlayerBotEntry* PlayerBotMgr::FindBotByGuid(uint32 guid) const
+{
+    std::map<uint32, PlayerBotEntry*>::const_iterator const it = m_bots.find(guid);
+    return (it != m_bots.end()) ? it->second : nullptr;
+}
+
 bool PlayerBotMgr::BotFollow(Player* issuer, const std::string& botName)
 {
     if (!issuer || !issuer->GetSession() || botName.empty())
@@ -1568,15 +1715,23 @@ namespace
 // Search radius for the .botassist name lookup, centered on the companion.
 float const kBotAssistSearchRange = 30.0f;
 
-// PORT-005 (KAP-558): an explicitly named assist target is legal when the
-// bot can attack it in the ordinary sense, or when the neutral-faction
-// evidence rule from defend applies (the target is actively fighting the
-// issuer or the bot; the player melee path and Unit::Attack permit such
-// fights, so an owner order naming that target must not be rejected).
+// PORT-005/PORT-023 (KAP-558): an explicitly named assist target is legal
+// when the bot can attack it the way the core attack path allows, or when
+// the neutral-faction evidence rule from defend applies (the target is
+// actively fighting the issuer or the bot). The core player melee path
+// (Unit::Attack) performs no faction hostility check: this client's player
+// faction templates carry no hostile masks for "attacker"-style creatures
+// (Westfall Nightsabers/Thistle Boars, faction templates 7/189), so the
+// non-forced CanAttack is effectively always false for a player and would
+// reject every pre-combat assist; the player gate mirrors Unit::Attack.
 static bool IsAssistLegalTarget(Unit const* me, Unit const* issuer, Unit const* u)
 {
     if (u->IsPlayer() || me->IsFriendlyTo(u))
         return false;
+    if (u->IsCreature() && ((Creature const*)u)->IsInEvadeMode())
+        return false;
+    if (me->IsPlayer())
+        return u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself());
     if (me->CanAttack(u))
         return true;
     if (!u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
@@ -1740,6 +1895,68 @@ bool PlayerBotMgr::BotAssist(Player* issuer, const std::string& botName, const s
                       botName.c_str(), targetName.c_str(), issuer->GetGUIDLow());
         return false;
     }
+    // PORT-014 (KAP-558): bounded pull for the declared tank matrix only
+    // (see Companion/Tank.h). The engaged count is derived from the world
+    // at command time, with no bookkeeping: the live hostile victim, the
+    // live hostile attackers of the bot, and nearby live hostiles that
+    // still tie the bot in - as their victim or through stored threat in
+    // their threat list (a threat entry survives a victim switch until the
+    // fight ends, which is exactly the "the tank still owns this target"
+    // evidence). At or above the cap a new assist is refused: the tank
+    // does not pull an unrelated creature while it already holds two.
+    if (bot->GetClass() == Companion::Tank::kDeclaredTankClass &&
+        bot->GetLevel() >= Companion::Tank::kDeclaredTankMinLevel &&
+        bot->HasSpell(Companion::Tank::kDeclaredTankTaunt))
+    {
+        class BotPullCapCheck
+        {
+        public:
+            explicit BotPullCapCheck(Player* bot) : bot(bot) { }
+            void AddDirect(Unit const* u)
+            {
+                if (u && u->IsAlive() && u->IsCreature() && !bot->IsFriendlyTo(u))
+                    counted.insert(u->GetGUIDLow());
+            }
+            bool operator()(Unit* u)
+            {
+                if (!u || !u->IsCreature() || !u->IsAlive() || bot->IsFriendlyTo(u))
+                    return true;
+                Creature* c = u->ToCreature();
+                bool tied = c->GetVictim() == bot;
+                if (!tied && c->CanHaveThreatList())
+                    tied = c->GetThreatManager().getThreat(bot, false) > 0.0f;
+                if (tied)
+                    counted.insert(u->GetGUIDLow());
+                return true;
+            }
+            uint32 Count() const { return (uint32)counted.size(); }
+        private:
+            Player* bot;
+            std::set<uint32> counted;
+        };
+        BotPullCapCheck cap(bot);
+        cap.AddDirect(bot->GetVictim());
+        for (Unit const* u : bot->GetAttackers())
+            cap.AddDirect(u);
+        {
+            CellPair const p(MaNGOS::ComputeCellPair(bot->GetPositionX(), bot->GetPositionY()));
+            Cell cell(p);
+            cell.SetNoCreate();
+            Unit* capIgnored = nullptr; // the searcher result is unused; the check counts
+            MaNGOS::UnitLastSearcher<BotPullCapCheck> searcher(capIgnored, cap);
+            TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotPullCapCheck>, WorldTypeMapContainer> world_searcher(searcher);
+            TypeContainerVisitor<MaNGOS::UnitLastSearcher<BotPullCapCheck>, GridTypeMapContainer> grid_searcher(searcher);
+            cell.Visit(p, world_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+            cell.Visit(p, grid_searcher, *bot->GetMap(), *bot, kBotAssistSearchRange);
+        }
+        if (cap.Count() >= Companion::Tank::kDeclaredTankPullCap)
+        {
+            sLog.outError("assist rejected pull-cap bot:%s target:%s engaged:%u cap:%u issuer:%u",
+                          botName.c_str(), targetName.c_str(), cap.Count(),
+                          Companion::Tank::kDeclaredTankPullCap, issuer->GetGUIDLow());
+            return false;
+        }
+    }
     e->ai->AssistTarget(target->GetObjectGuid().GetRawValue(), ++e->followSeq);
     sLog.outString("assist accepted bot:%s target:%s guid:%u seq:%u",
                    e->name.c_str(), targetName.c_str(), target->GetGUIDLow(), e->followSeq);
@@ -1785,6 +2002,87 @@ bool PlayerBotMgr::BotDefend(Player* issuer, const std::string& botName, bool en
                    enable ? "enabled" : "disabled", botName.c_str(), e->playerGUID,
                    issuer->GetGUIDLow(), issuerAcc);
     return true;
+}
+
+// PORT-022 (KAP-558): bounded conversational party chat.
+namespace
+{
+// Single-line, bounded, printable-ASCII-only: strips control characters
+// (including newlines), trims, and caps the length. Matches the adapter's
+// outbound sanitizer so a request is never reinterpreted as a command and
+// never exceeds the transport byte budget.
+std::string SanitizeConverseText(std::string const& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char ch : in)
+        if (ch >= 0x20 && ch <= 0x7e)
+            out.push_back((char)ch);
+    size_t b = out.find_first_not_of(" ");
+    size_t e = out.find_last_not_of(" ");
+    if (b == std::string::npos)
+        return std::string();
+    out = out.substr(b, e - b + 1);
+    if (out.size() > Companion::Conversation::kMaxTextBytes)
+        out = out.substr(0, Companion::Conversation::kMaxTextBytes);
+    return out;
+}
+} // namespace
+
+bool PlayerBotMgr::BotPartyMessage(Player* issuer, const std::string& rawText)
+{
+    if (!issuer || !issuer->GetSession() || rawText.empty())
+        return false;
+    std::string const text = SanitizeConverseText(rawText);
+    if (text.empty())
+    {
+        sLog.outError("conversation rejected empty issuer:%u", issuer->GetGUIDLow());
+        return false;
+    }
+    // Addressing: the first token must exactly (case-insensitive) name a bot.
+    size_t const sp = text.find_first_of(" ");
+    std::string const first = (sp == std::string::npos) ? text : text.substr(0, sp);
+    PlayerBotEntry* e = FindBotByName(first);
+    if (!e)
+    {
+        if (confDebug)
+            sLog.outString("conversation unaddressed issuer:%u first:%s",
+                           issuer->GetGUIDLow(), first.c_str());
+        return false; // not clearly addressed to a companion
+    }
+    if (!ValidatePartyOwner(issuer, e, "converse"))
+        return false;
+    Group* group = issuer->GetGroup();
+    if (!group || group->isBGGroup() ||
+        !group->IsMember(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID))))
+    {
+        sLog.outError("conversation rejected not-in-party bot:%s issuer:%u",
+                      e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (e->state != PB_STATE_ONLINE)
+    {
+        sLog.outError("conversation rejected offline bot:%s issuer:%u",
+                      e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    uint32 const leaderLow = group->GetLeaderGuid().GetCounter();
+    uint32 const groupSig = group->GetId();
+    uint32 const profileCode = (uint32)e->personalityProfile;
+    // The companion hears the full addressed message; the dispatcher has
+    // already confirmed it is clearly addressed to this companion.
+    if (m_conversationTransport.Submit(uint32(e->playerGUID), groupSig, leaderLow,
+                                       profileCode, text, WorldTimer::getMSTime()))
+    {
+        if (confDebug)
+            sLog.outString("[Conversation] addressed bot:%s issuer:%u group:%u leader:%u profile:%u len:%u",
+                           e->name.c_str(), issuer->GetGUIDLow(), groupSig, leaderLow,
+                           profileCode, (uint32)text.size());
+        return true;
+    }
+    sLog.outError("conversation submit refused bot:%s issuer:%u (busy or table full)",
+                  e->name.c_str(), issuer->GetGUIDLow());
+    return false;
 }
 
 bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const char* action) const
@@ -2198,5 +2496,144 @@ void PlayerBotMgr::UpdatePartyInviteScript()
                                ev.delayMs, ev.inviterGuid, ev.inviteeName.c_str());
         }
         ++m_partyInviteScriptIdx;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PORT-023 (KAP-558): lab-only deterministic owner quest script.
+//
+// The fixture owner is a temp-logged bot session and cannot drive the
+// normal CMSG_QUESTGIVER_* packet flow on its own. Each event
+// resolves the issuer and the nearest live quest creature (HasQuest)
+// within 30 yd and runs the same authoritative helpers the packet
+// handlers use:
+//   accept: CanInteractWithQuestGiver + CanTakeQuest + CanAddQuest
+//           -> AddQuest(qInfo, creature)
+//   turnin: CanCompleteQuest -> CompleteQuest -> CanRewardQuest ->
+//           RewardQuest(qInfo, 0, creature, true)
+// Lab-only and config-gated (default off); a real owner accepts and
+// turns in through the client UI unchanged.
+void PlayerBotMgr::UpdateQuestScript()
+{
+    if (m_questScript.empty() || m_questScriptIdx >= m_questScript.size())
+        return;
+
+    if (m_questScriptStartMs == 0)
+    {
+        // The clock starts only once every issuer is online; earlier,
+        // their sessions do not exist yet.
+        for (size_t i = 0; i < m_questScript.size(); ++i)
+        {
+            std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(m_questScript[i].issuerGuid);
+            if (it == m_bots.end() || it->second->state != PB_STATE_ONLINE)
+                return;
+        }
+        m_questScriptStartMs = WorldTimer::getMSTime();
+        if (confDebug)
+            sLog.outString("[PlayerBot][QuestScript] started events:%u", (uint32)m_questScript.size());
+        return;
+    }
+
+    uint32 const now = WorldTimer::getMSTime() - m_questScriptStartMs;
+    while (m_questScriptIdx < m_questScript.size() &&
+           m_questScript[m_questScriptIdx].delayMs <= now)
+    {
+        QuestScriptEvent const& ev = m_questScript[m_questScriptIdx];
+        std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.find(ev.issuerGuid);
+        WorldSession* sess = (it != m_bots.end()) ? it->second->session : nullptr;
+        Player* issuer = sess ? sess->GetPlayer() : nullptr;
+        if (!issuer || !issuer->IsAlive() || !issuer->GetMap())
+        {
+            sLog.outError("[PlayerBot][QuestScript] issuer %u unavailable; event skipped", ev.issuerGuid);
+            ++m_questScriptIdx;
+            continue;
+        }
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(ev.questId);
+        if (!qInfo)
+        {
+            sLog.outError("[PlayerBot][QuestScript] quest %u unknown; event skipped", ev.questId);
+            ++m_questScriptIdx;
+            continue;
+        }
+        // Nearest live creature with the declared quest within 30 yd
+        // (the same search discipline as MVP-006's FindQuestGiver).
+        Creature* questNpc = nullptr;
+        {
+            class QuestScriptNpcCheck
+            {
+            public:
+                QuestScriptNpcCheck(Player const* obj, uint32 questId)
+                    : i_obj(obj), i_questId(questId) {}
+                WorldObject const& GetFocusObject() const { return *i_obj; }
+                bool operator()(Creature const* u)
+                {
+                    if (!u->IsAlive() || !u->HasQuest(i_questId))
+                        return false;
+                    return i_obj->IsWithinDistInMap(u, 30.0f);
+                }
+            private:
+                Player const* const i_obj;
+                uint32 i_questId;
+                QuestScriptNpcCheck(QuestScriptNpcCheck const&);
+            };
+            QuestScriptNpcCheck check(issuer, ev.questId);
+            MaNGOS::CreatureLastSearcher<QuestScriptNpcCheck> searcher(questNpc, check);
+            Cell::VisitGridObjects(issuer, searcher, 30.0f);
+        }
+        if (!questNpc)
+        {
+            sLog.outError("[PlayerBot][QuestScript] no quest npc for quest %u near issuer %u; event skipped",
+                          ev.questId, issuer->GetGUIDLow());
+            ++m_questScriptIdx;
+            continue;
+        }
+        if (!ev.turnin)
+        {
+            // The authoritative accept path (HandleQuestGiverAcceptQuest).
+            if (issuer->CanInteractWithQuestGiver(questNpc) &&
+                issuer->CanTakeQuest(qInfo, false) &&
+                issuer->CanAddQuest(qInfo, false))
+            {
+                issuer->AddQuest(qInfo, questNpc);
+                bool const ok = issuer->GetQuestStatus(ev.questId) != QUEST_STATUS_NONE;
+                sLog.outString("[PlayerBot][QuestScript] accept issuer:%u quest:%u giver:%u ok:%u",
+                               issuer->GetGUIDLow(), ev.questId, questNpc->GetEntry(), ok ? 1 : 0);
+            }
+            else
+            {
+                sLog.outString("[PlayerBot][QuestScript] accept denied issuer:%u quest:%u interact:%u take:%u add:%u",
+                               issuer->GetGUIDLow(), ev.questId,
+                               issuer->CanInteractWithQuestGiver(questNpc) ? 1 : 0,
+                               issuer->CanTakeQuest(qInfo, false) ? 1 : 0,
+                               issuer->CanAddQuest(qInfo, false) ? 1 : 0);
+            }
+        }
+        else
+        {
+            // The authoritative turn-in path (CMSG_QUESTGIVER_REQUEST_REWARD
+            // + CMSG_QUESTGIVER_CHOOSE_REWARD, choice index 0). When the
+            // last credit lands the engine already marks the quest
+            // COMPLETE, so CompleteQuest only runs while still
+            // INCOMPLETE, exactly as the handler does; the reward step
+            // only needs COMPLETE plus CanRewardQuest.
+            uint32 xpBefore = issuer->GetUInt32Value(PLAYER_XP);
+            if (issuer->CanCompleteQuest(ev.questId))
+                issuer->CompleteQuest(ev.questId);
+            if (issuer->GetQuestStatus(ev.questId) == QUEST_STATUS_COMPLETE &&
+                issuer->CanRewardQuest(qInfo, false))
+            {
+                issuer->RewardQuest(qInfo, 0, questNpc, true);
+                sLog.outString("[PlayerBot][QuestScript] turnin issuer:%u quest:%u xpBefore:%u xpAfter:%u",
+                               issuer->GetGUIDLow(), ev.questId, xpBefore,
+                               issuer->GetUInt32Value(PLAYER_XP));
+            }
+            else
+            {
+                sLog.outString("[PlayerBot][QuestScript] turnin not-complete issuer:%u quest:%u status:%u",
+                               issuer->GetGUIDLow(), ev.questId,
+                               (uint32)issuer->GetQuestStatus(ev.questId));
+            }
+        }
+        ++m_questScriptIdx;
     }
 }
