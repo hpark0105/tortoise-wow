@@ -106,6 +106,19 @@ class PlayerBotAI: public PlayerAI
         // denial backoff (ms); a persistent denial re-checks the
         // world at a bounded pace instead of every tick.
         uint32 _coopQuestDenyTimer = 0;
+        // PORT-034 (KAP-558): throttled debug log for the mirror
+        // turn-in anchor skip (Lab D never fired the turn-in; the
+        // skip-reason log pins the failing condition).
+        uint32 _coopTurninDebugUntilMs = 0;
+        // PORT-034 (KAP-558): raw guid of a bounded turn-in walk
+        // target (the finisher to reach for a mirrored quest whose
+        // credit completed out of interaction range); consumed by
+        // UpdateFollow at follow-motion level only.
+        uint64_t _coopTurninWalkGuid = 0;
+        // PORT-034 (KAP-558): throttle for the turn-in walk arm
+        // log (the arm branch re-runs every quest tick while the
+        // finisher stays out of interaction range).
+        uint32 _coopTurninWalkLogUntilMs = 0;
         // PORT-027 (KAP-558): in-world announcements for
         // cooperative quests. Progress is said only on change;
         // the complete line is said once per
@@ -168,6 +181,11 @@ class PlayerBotAI: public PlayerAI
         void CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status); // PORT-027: in-world quest status line (progress/complete)
         void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;
+        // PORT-034 (KAP-558): true when the companion is not actively
+        // moving. The MotionMaster keeps the static idle generator at
+        // the stack bottom, so empty() alone never observes the
+        // no-motion state; idle-top is the effective check.
+        bool MotionIdle() const;
         // KAP-558 hardening: an owned companion without an active order
         // follows its owner instead of running the legacy auto-hunt
         // (autonomous acquisition + wander stay for ambient bots only).
@@ -187,6 +205,10 @@ class PlayerBotAI: public PlayerAI
         void SellJunkToVendor(Creature* vendor);
         Player* FindOwnerByAccount() const;
         static constexpr float kOwnerFollowChaseDist = 25.0f;
+        // PORT-034 (KAP-558): search radius for the turn-in
+        // finisher when the quest credit completed without the
+        // finisher in interaction range.
+        static constexpr float kCoopTurninWalkSearchRange = 100.0f;
         void ExecuteCompanion(Companion::Intent const& intent, uint32 diff);
         // PORT-006 (KAP-558): reactive defend (owner-enabled via
         // .botdefend). SelectDefendTarget scans for a creature actually
