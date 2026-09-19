@@ -199,6 +199,12 @@ class PlayerBotAI: public PlayerAI
         Creature* FindQuestGiver() const;
         Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
+        // PORT-029 (KAP-558): fixture-seeded item instances may carry
+        // zero durability (born broken) and non-1 counts; the engine
+        // excludes broken items from spell equipment requirements,
+        // which silently strips every weapon/armor-requiring ability.
+        // Repair owned-companion equipment in memory at login.
+        void RepairBrokenEquipment();
         uint32 SelectOffensiveSpell(Unit* target) const;
         // Hardening (KAP-558): cast-or-attack step; arms _abilityTimer only
         // on a successful cast (see TryOffensiveCastOrAttack).
