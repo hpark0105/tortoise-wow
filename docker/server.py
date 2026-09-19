@@ -73,6 +73,7 @@ def main():
             "PlayerBot.PlannerServiceURL": '"%s"' % os.environ.get("PLAYERBOT_PLANNER_SERVICE_URL", ""),
             "PlayerBot.ConversationServiceURL": '"%s"' % os.environ.get("PLAYERBOT_CONVERSATION_SERVICE_URL", ""),
             "PlayerBot.CooperativeQuestId": os.environ.get("PLAYERBOT_COOPERATIVE_QUEST_ID", "0"),
+            "PlayerBot.MirrorOwnerQuests": os.environ.get("PLAYERBOT_MIRROR_OWNER_QUESTS", "0"),
             "PlayerBot.QuestScript": '"%s"' % os.environ.get("PLAYERBOT_QUEST_SCRIPT", ""),
     "PlayerBot.PersonalityProfile": os.environ.get("PLAYERBOT_PERSONALITY_PROFILE", "none"),
             "Perf.ProcessingTelemetry": os.environ.get("PERF_PROCESSING_TELEMETRY", "0"),

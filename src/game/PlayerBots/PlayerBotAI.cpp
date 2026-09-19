@@ -32,6 +32,7 @@ namespace
 {
 // TW-014 (KAP-557): the companion holds this range around its owner.
 const float kFollowRange = 2.0f;
+const float kFollowSideOffsetYd = 1.5f; // PORT-032: stand beside, not on the leader
 
 // PORT-007 (KAP-558): a corpse loot attempt is bounded by this window (ms) so
 // a denied or unreachable corpse cannot trap the companion; on expiry the
@@ -2894,29 +2895,106 @@ std::string CoopQuestProgressLine(Quest const* qInfo, QuestStatusData const* qSt
 }
 } // namespace
 
+// ---------------------------------------------------------------------------
+// PORT-030 (KAP-558): dynamic owner-quest mirror (kill objectives only).
+//
+// No per-quest configuration: the companion reads the owner's quest log
+// and mirrors any quest the owner holds and that it can itself take, but
+// only when every objective is a creature kill - objective progression
+// is normal combat participation under the engine's vanilla group-credit
+// rules (the companion fights the target mobs, both logs advance).
+// Collect, talk, game-object, source-item and spell-cast objectives are
+// skipped: the companion has no dedicated behavior for them, and
+// mirroring would leave its log stalled. Accepts and turn-ins reuse the
+// same authoritative helpers as the declared path (CanTakeQuest/
+// CanAddQuest/AddQuest; CanCompleteQuest/CompleteQuest/CanRewardQuest/
+// RewardQuest), re-validated live before acting.
+//
+// Gating matches the declared path: owned companion, owner alive and in
+// the party, hold/combat/death suppression upstream, one action per
+// tick, shared denial backoff (_coopQuestDenyTimer).
+namespace
+{
+struct CoopQuestAnchorCheck
+{
+public:
+    CoopQuestAnchorCheck(Player const* obj, uint32 questId, float dist)
+        : i_obj(obj), i_questId(questId), i_dist(dist) {}
+    WorldObject const& GetFocusObject() const { return *i_obj; }
+    bool operator()(Creature const* u)
+    {
+        if (!u->IsAlive() || !u->HasQuest(i_questId))
+            return false;
+        return i_obj->IsWithinDistInMap(u, i_dist);
+    }
+private:
+    Player const* const i_obj;
+    uint32 const i_questId;
+    float const i_dist;
+    CoopQuestAnchorCheck(CoopQuestAnchorCheck const&);
+};
+
+// Nearest live quest creature within i_dist of from (the accept anchor
+// and the turn-in anchor share the one quest relation).
+Creature* FindCoopQuestAnchor(Player* from, uint32 questId, float i_dist)
+{
+    Creature* anchor = nullptr;
+    CoopQuestAnchorCheck check(from, questId, i_dist);
+    MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
+    Cell::VisitGridObjects(from, searcher, i_dist);
+    return anchor;
+}
+
+// A quest is mirror-eligible iff every objective is a creature kill
+// (see the block comment above).
+bool IsKillOnlyQuest(Quest const* qInfo)
+{
+    if (!qInfo)
+        return false;
+    bool anyKill = false;
+    for (uint32 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+    {
+        if (qInfo->ReqCreatureOrGOCount[i] == 0)
+            continue;
+        if (qInfo->ReqCreatureOrGOId[i] <= 0)
+            return false; // game-object objective
+        anyKill = true;
+    }
+    for (uint32 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        if (qInfo->ReqItemId[i] != 0)
+            return false; // collect objective
+    for (uint32 i = 0; i < QUEST_SOURCE_ITEM_IDS_COUNT; ++i)
+        if (qInfo->ReqSourceId[i] != 0)
+            return false; // source item required to accept
+    for (uint32 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        if (qInfo->ReqSpell[i] != 0)
+            return false; // cast objective
+    return anyKill;
+}
+} // namespace
+
 void PlayerBotAI::CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status)
 {
-    (void)questId;
     if (!qStatus)
         return;
     if (qStatus->m_rewarded)
     {
-        _coopQuestAnnouncedProgress = -1;
-        _coopQuestAnnouncedStatus = 0;
+        _coopQuestAnnounce.erase(questId);
         return;
     }
     int32 const progress = (status == Companion::Quest::kStatusNone)
         ? -1 : (int32)CoopQuestProgressHave(qStatus);
-    if (status != _coopQuestAnnouncedStatus)
+    CoopQuestAnnounceState& st = _coopQuestAnnounce[questId];
+    if (status != st.status)
     {
         if (status == Companion::Quest::kStatusComplete)
             me->Say("[Quest] Complete - turning in.", LANG_UNIVERSAL);
-        _coopQuestAnnouncedStatus = status;
-        _coopQuestAnnouncedProgress = progress;
+        st.status = status;
+        st.progress = progress;
     }
-    else if (status == Companion::Quest::kStatusInProgress && progress != _coopQuestAnnouncedProgress)
+    else if (status == Companion::Quest::kStatusInProgress && progress != st.progress)
     {
-        _coopQuestAnnouncedProgress = progress;
+        st.progress = progress;
         std::string line = "[Quest] " + CoopQuestProgressLine(qInfo, qStatus) + ".";
         me->Say(line.c_str(), LANG_UNIVERSAL);
     }
@@ -2946,8 +3024,7 @@ void PlayerBotAI::CooperativeQuestProgressAnnounce(uint32 questId, Quest const* 
 // the companion's persisted quest state.
 void PlayerBotAI::CooperativeQuestStep(uint32 diff)
 {
-    uint32 const questId = sPlayerBotMgr.GetCooperativeQuestId();
-    if (!questId || !IsOwnedCompanion() || !me || !me->IsAlive() || !me->GetMap())
+    if (!IsOwnedCompanion() || !me || !me->IsAlive() || !me->GetMap())
         return;
     if (_coopQuestDenyTimer)
     {
@@ -2960,6 +3037,20 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
     Player* owner = FindOwnerByAccount();
     if (!owner || !group->IsMember(owner->GetObjectGuid()))
         return; // owner loss or party loss: no cooperative planning
+
+    uint32 const questId = sPlayerBotMgr.GetCooperativeQuestId();
+    if (questId)
+    {
+        CooperativeDeclaredQuestStep(questId, owner);
+        return;
+    }
+    // PORT-030 (KAP-558): dynamic mirror mode (kill-only objectives).
+    if (sPlayerBotMgr.GetMirrorOwnerQuests())
+        MirrorOwnerQuestStep(owner);
+}
+
+void PlayerBotAI::CooperativeDeclaredQuestStep(uint32 questId, Player* owner)
+{
     Quest const* qInfo = sObjectMgr.GetQuestTemplate(questId);
     if (!qInfo)
         return;
@@ -2981,29 +3072,7 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
     // accept and the turn-in anchor; the declared quest's giver and
     // finisher share the one quest relation). The authoritative
     // checks below re-validate before acting.
-    Creature* anchor = nullptr;
-    {
-        class CoopQuestAnchorCheck
-        {
-        public:
-            CoopQuestAnchorCheck(Player const* obj, uint32 questId)
-                : i_obj(obj), i_questId(questId) {}
-            WorldObject const& GetFocusObject() const { return *i_obj; }
-            bool operator()(Creature const* u)
-            {
-                if (!u->IsAlive() || !u->HasQuest(i_questId))
-                    return false;
-                return i_obj->IsWithinDistInMap(u, INTERACTION_DISTANCE);
-            }
-        private:
-            Player const* const i_obj;
-            uint32 i_questId;
-            CoopQuestAnchorCheck(CoopQuestAnchorCheck const&);
-        };
-        CoopQuestAnchorCheck check(me, questId);
-        MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
-        Cell::VisitGridObjects(me, searcher, INTERACTION_DISTANCE);
-    }
+    Creature* anchor = FindCoopQuestAnchor(me, questId, INTERACTION_DISTANCE);
     observation.giverAvailable = (anchor != nullptr);
     observation.finisherAvailable = (anchor != nullptr);
     Companion::Quest::Intent const intent = Companion::Quest::Select(observation);
@@ -3025,18 +3094,16 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
                                me->GetGUIDLow(), questId,
                                (uint32)observation.ownerStatus, anchor->GetEntry());
                 // PORT-027: in-world accept line with the starting count.
-                if (QuestStatusData const* aStatus = me->GetQuestStatusData(questId))
+                QuestStatusData const* aStatus = me->GetQuestStatusData(questId);
+                if (aStatus)
                 {
                     std::string line = "[Quest] Accepted " + qInfo->GetTitle() + " (" +
                                        CoopQuestProgressLine(qInfo, aStatus) + ").";
                     me->Say(line.c_str(), LANG_UNIVERSAL);
-                    _coopQuestAnnouncedProgress = (int32)CoopQuestProgressHave(aStatus);
                 }
-                else
-                {
-                    _coopQuestAnnouncedProgress = 0;
-                }
-                _coopQuestAnnouncedStatus = Companion::Quest::kStatusInProgress;
+                CoopQuestAnnounceState& st = _coopQuestAnnounce[questId];
+                st.status = Companion::Quest::kStatusInProgress;
+                st.progress = aStatus ? (int32)CoopQuestProgressHave(aStatus) : 0;
                 return;
             }
         }
@@ -3069,14 +3136,125 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
         // PORT-027: in-world turn-in line.
         std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
         me->Say(line.c_str(), LANG_UNIVERSAL);
-        _coopQuestAnnouncedStatus = 0;
-        _coopQuestAnnouncedProgress = -1;
+        _coopQuestAnnounce.erase(questId);
     }
     else
     {
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[CoopQuest] reward denied GUID:%u quest:%u", me->GetGUIDLow(), questId);
         _coopQuestDenyTimer = 5000;
+    }
+}
+
+
+void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
+{
+    // Accept: the owner holds a mirror-eligible quest the companion does
+    // not, and the quest anchor is in range. CanTakeQuest/CanAddQuest
+    // (level, class, reputation, exclusive groups) stay authoritative.
+    for (QuestStatusMap::const_iterator it = owner->getQuestStatusMap().begin();
+         it != owner->getQuestStatusMap().end(); ++it)
+    {
+        uint32 const qid = it->first;
+        if (it->second.m_status != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
+        if (!qInfo || !IsKillOnlyQuest(qInfo))
+            continue;
+        QuestStatusData const* my = me->GetQuestStatusData(qid);
+        if (my)
+        {
+            // Skip unless a stale rewarded repeatable row can be re-taken.
+            bool const staleDone = (my->m_status == QUEST_STATUS_COMPLETE &&
+                                    my->m_rewarded && qInfo->IsRepeatable());
+            if (!staleDone)
+                continue;
+        }
+        Creature* anchor = FindCoopQuestAnchor(me, qid, INTERACTION_DISTANCE);
+        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+            continue;
+        if (me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
+        {
+            me->AddQuest(qInfo, anchor);
+            if (me->GetQuestStatus(qid) != QUEST_STATUS_NONE)
+            {
+                sLog.outString("[CoopQuest] mirror-accepted GUID:%u quest:%u anchor:%u",
+                               me->GetGUIDLow(), qid, anchor->GetEntry());
+                QuestStatusData const* aStatus = me->GetQuestStatusData(qid);
+                if (aStatus)
+                {
+                    std::string line = "[Quest] Accepted " + qInfo->GetTitle() + " (" +
+                                       CoopQuestProgressLine(qInfo, aStatus) + ").";
+                    me->Say(line.c_str(), LANG_UNIVERSAL);
+                }
+                CoopQuestAnnounceState& st = _coopQuestAnnounce[qid];
+                st.status = Companion::Quest::kStatusInProgress;
+                st.progress = aStatus ? (int32)CoopQuestProgressHave(aStatus) : 0;
+                return;
+            }
+        }
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] mirror accept denied GUID:%u quest:%u take:%u add:%u",
+                           me->GetGUIDLow(), qid,
+                           me->CanTakeQuest(qInfo, false) ? 1 : 0,
+                           me->CanAddQuest(qInfo, false) ? 1 : 0);
+        _coopQuestDenyTimer = 5000;
+        return;
+    }
+
+    // Progress announce for in-flight mirrored quests (the companion's
+    // log entry must also be in the owner's log).
+    for (QuestStatusMap::const_iterator it = me->getQuestStatusMap().begin();
+         it != me->getQuestStatusMap().end(); ++it)
+    {
+        if (it->second.m_status != QUEST_STATUS_INCOMPLETE &&
+            it->second.m_status != QUEST_STATUS_COMPLETE)
+            continue;
+        if (owner->GetQuestStatus(it->first) == QUEST_STATUS_NONE)
+            continue;
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(it->first);
+        if (!qInfo)
+            continue;
+        CooperativeQuestProgressAnnounce(it->first, qInfo, &it->second,
+                                         Companion::Quest::MapQuestStatus((uint32)it->second.m_status));
+    }
+
+    // Turn-in: our own COMPLETE (unrewarded) quest whose finisher is in
+    // range; the same handler-shaped sequence as the declared path.
+    for (QuestStatusMap::const_iterator it = me->getQuestStatusMap().begin();
+         it != me->getQuestStatusMap().end(); ++it)
+    {
+        uint32 const qid = it->first;
+        if (it->second.m_status != QUEST_STATUS_COMPLETE || it->second.m_rewarded)
+            continue;
+        Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
+        if (!qInfo)
+            continue;
+        Creature* anchor = FindCoopQuestAnchor(me, qid, INTERACTION_DISTANCE);
+        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+            continue;
+        if (me->CanCompleteQuest(qid))
+            me->CompleteQuest(qid);
+        if (me->GetQuestStatus(qid) != QUEST_STATUS_COMPLETE)
+        {
+            _coopQuestDenyTimer = 5000;
+            return;
+        }
+        if (me->CanRewardQuest(qInfo, false))
+        {
+            uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
+            me->RewardQuest(qInfo, 0, anchor, true);
+            sLog.outString("[CoopQuest] mirror-turnin GUID:%u quest:%u xpBefore:%u xpAfter:%u",
+                           me->GetGUIDLow(), qid, xpBefore, me->GetUInt32Value(PLAYER_XP));
+            std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
+            me->Say(line.c_str(), LANG_UNIVERSAL);
+            _coopQuestAnnounce.erase(qid);
+            return;
+        }
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[CoopQuest] mirror reward denied GUID:%u quest:%u", me->GetGUIDLow(), qid);
+        _coopQuestDenyTimer = 5000;
+        return;
     }
 }
 
@@ -4229,17 +4407,25 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
             float const lx = leader->GetPositionX();
             float const ly = leader->GetPositionY();
             float const lz = leader->GetPositionZ();
-            float const dpx = lx - _followPathX;
-            float const dpy = ly - _followPathY;
+            // PORT-032 (KAP-558): natural stance. The path target is a
+            // fixed offset to the leader's right (side vector for facing
+            // (sin o, cos o) is (cos o, -sin o)); the kFollowRange stop
+            // rule still owns arrival, so the companion never overlaps
+            // the player's center.
+            float const o = leader->GetOrientation();
+            float const tx = lx + cosf(o) * kFollowSideOffsetYd;
+            float const ty = ly - sinf(o) * kFollowSideOffsetYd;
+            float const dpx = tx - _followPathX;
+            float const dpy = ty - _followPathY;
             bool const moved = (dpx * dpx + dpy * dpy) > (2.0f * 2.0f);
             if (me->GetMotionMaster()->empty() || moved ||
                 _followPathAgeMs >= kFollowPathRefreshMs)
             {
-                _followPathX = lx;
-                _followPathY = ly;
+                _followPathX = tx;
+                _followPathY = ty;
                 _followPathZ = lz;
                 _followPathAgeMs = 0;
-                me->GetMotionMaster()->MovePoint(0, lx, ly, lz, MOVE_PATHFINDING);
+                me->GetMotionMaster()->MovePoint(0, tx, ty, lz, MOVE_PATHFINDING);
             }
             else
                 _followPathAgeMs += diff;

@@ -127,6 +127,9 @@ void PlayerBotMgr::LoadConfig()
     // normal quest APIs (accept, objective credit, turn-in).
     confQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.QuestId", 0);
     confCooperativeQuestId = (uint32)sConfig.GetIntDefault("PlayerBot.CooperativeQuestId", 0);
+    // PORT-030 (KAP-558): dynamic mirror mode - no per-quest config;
+    // the companion mirrors any kill-only quest the owner holds.
+    confMirrorOwnerQuests = sConfig.GetBoolDefault("PlayerBot.MirrorOwnerQuests", false);
     // PORT-007 (KAP-558): lab-only idle-wander clamp. Default 0 keeps
     // the legacy frand(8,20) radius; fixtures set a small value so
     // seeded bots stay geometrically stable before scripted holds land.
