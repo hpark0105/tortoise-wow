@@ -34,6 +34,15 @@ Labs (disposable Compose projects, unique, port-free):
     unkillable Minion of Sethir (6911, 2000 HP, base damage), runs the one
     normal corpse-reclaim recovery, and its INCOMPLETE quest row persists
     through death and resurrection (no erasure, no turn-in, no crash).
+  D (PORT-033, mirror mode): giver/finisher split - the owner accepts
+    456 from the giver (2079), the companion mirrors the accept at the
+    giver and turns in at the finisher (6911, a different creature with
+    the QUESTGIVER npcflag) where the kill pack stands; the logged anchor
+    entry proves the split; restart persistence with the owner
+    cross-check in force.
+  E (PORT-033, negative): a seeded COMPLETE + unrewarded quest row (457)
+    the owner does not hold stays untouched while the companion stands at
+    a legitimate 457 finisher - the mirror turn-in owner cross-check.
 
 No human play data, no personal-world restart, no personal containers.
 """
@@ -53,11 +62,11 @@ GIVER_ENTRY = 2079
 REWARD_ITEM = 5394
 
 
-def _quest_row(base, env, guid):
+def _quest_row(base, env, guid, quest=QUEST_ID):
     out = p.db_exec(base, env,
                     "SELECT status, rewarded, mobcount1, mobcount2 "
                     "FROM character_queststatus WHERE guid=%d AND quest=%s"
-                    % (guid, QUEST_ID))
+                    % (guid, quest))
     out = out.strip()
     if not out:
         return "-"
@@ -412,7 +421,7 @@ class BotQuestCoopEligibleTests(unittest.TestCase):
         self.assertEqual(snap[self.O]["quest"], "1:1:7:4")
 
     def test_companion_turnin_rewarded(self):
-        m = re.search(r"\[CoopQuest\] turnin GUID:%d quest:%s xpBefore:(\d+) xpAfter:(\d+)"
+        m = re.search(r"\[CoopQuest\] turnin GUID:%d quest:%s anchor:\d+ xpBefore:(\d+) xpAfter:(\d+)"
                       % (self.C, QUEST_ID), self.logs)
         self.assertIsNotNone(m, "companion turn-in marker with xp delta missing")
         self.assertGreater(int(m.group(2)), int(m.group(1)))
@@ -725,6 +734,462 @@ class BotQuestCoopDeathTests(unittest.TestCase):
         self.assertNotIn("[PlayerBot][QuestScript] turnin", self.logs)
         self.assertEqual(_inv_reward(self.base, self.env, self.C), 0)
         self.assertEqual(_inv_reward(self.base, self.env, self.O), 0)
+
+    def test_world_healthy(self):
+        self.assertNotIn("[CRASH]", self.logs)
+
+    def test_personal_state_untouched(self):
+        self.assertEqual(self.before, f.BotFollowTests._personal_state())
+
+
+
+# ---------------------------------------------------------------------------
+# Lab D: PORT-033 (KAP-558) - mirror mode with the giver/finisher split.
+# The owner accepts 456 from the giver (2079); the companion mirrors the
+# accept at the giver, completes the 11-kill pack standing at the finisher
+# (6911, a different creature with the QUESTGIVER npcflag), and turns in
+# there. The giver is 24+ yd from the pack, so only a finisher anchor can
+# fire the turn-in; the logged anchor entry is the direct proof of the
+# split. The restart phase checks that the owner cross-check plus the
+# rewarded row suppress any re-action on re-login.
+# ---------------------------------------------------------------------------
+class BotQuestCoopFinisherTests(unittest.TestCase):
+    O = 610620
+    C = 610621
+    ONAME = "Fcowner"
+    CNAME = "Fccomp"
+    GIVER_GUID = 2500080
+    FINISHER_GUID = 2500081
+    SABER_GUIDS = [2500082, 2500083, 2500084, 2500085, 2500086, 2500087, 2500088]
+    BOAR_GUIDS = [2500089, 2500090, 2500091, 2500092]
+    FINISHER_ENTRY = 6911
+
+    base = env = project = evidence = None
+    logs = logs_restart = ""
+    snap_before_stop = snap_after_restart = None
+    before = None
+
+    @classmethod
+    def _seed(cls):
+        # Every mob sits within 4 yd of the finisher and within 27 yd of
+        # the owner (30 yd assist radius). The finisher is 23.2 yd from
+        # the owner and 24.5 yd from the giver, so when the last credit
+        # lands the companion stands at the pack and only the finisher is
+        # inside the 5 yd interaction distance.
+        sabers = [(-8959.0, -148.5), (-8959.5, -151.0), (-8960.0, -153.5),
+                  (-8961.5, -148.0), (-8962.5, -149.0), (-8963.5, -152.5),
+                  (-8961.0, -150.0)]
+        boars = [(-8964.0, -149.0), (-8964.5, -151.5), (-8963.5, -154.0),
+                 (-8962.0, -155.0)]
+        rows = []
+        for i, (x, y) in enumerate(sabers):
+            rows.append("(%d,2031,0,%.2f,%.2f,83.5312,0,600,600,0,100,100,0,1)"
+                        % (cls.SABER_GUIDS[i], x, y))
+        for i, (x, y) in enumerate(boars):
+            rows.append("(%d,1984,0,%.2f,%.2f,83.5312,0,600,600,0,100,100,0,1)"
+                        % (cls.BOAR_GUIDS[i], x, y))
+        return (
+            "INSERT INTO tw_char.characters\n"
+            " (guid,account,name,race,class,gender,level,money,position_x,position_y,position_z,map,\n"
+            "  orientation,zone,health,power1,power2,power3,power4,power5,xp,xp_gain)\n"
+            "VALUES\n"
+            " (%d,1000%d,'%s',1,1,0,3,100000,-8947.95,-132.493,83.5312,0,\n"
+            "  0,12,100,0,0,0,0,0,0,1),\n"
+            " (%d,1000%d,'%s',1,1,0,3,100000,-8949.95,-200.493,83.5312,0,\n"
+            "  0,12,100,0,0,0,0,0,0,1);\n"
+            "INSERT INTO tw_char.playerbot (char_guid,chance,ai)\n"
+            " VALUES (%d,100,'Default'),(%d,100,'Default');\n"
+            "INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)\n"
+            " VALUES (%d,1000%d,1,2,NULL),\n"
+            "        (%d,1000%d,1,2,1000%d);\n"
+            "UPDATE tw_world.creature_template SET dmg_min=0, dmg_max=0, health_min=8, health_max=8 "
+            "WHERE entry IN (2031,1984);\n"
+            # PORT-033 fixture: split the one 456 relation - the giver
+            # keeps the questrelation, the finisher takes the
+            # involvedrelation and the QUESTGIVER npcflag (fork: 0x2) so
+            # CanInteractWithQuestGiver passes for it.
+            "DELETE FROM tw_world.creature_questrelation WHERE quest=456;\n"
+            "DELETE FROM tw_world.creature_involvedrelation WHERE quest=456;\n"
+            "INSERT INTO tw_world.creature_questrelation (id, quest) VALUES (2079, 456);\n"
+            "INSERT INTO tw_world.creature_involvedrelation (id, quest) VALUES (6911, 456);\n"
+            "UPDATE tw_world.creature_template SET npc_flags = npc_flags | 2 WHERE entry=6911;\n"
+            "INSERT INTO tw_world.creature\n"
+            " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
+            "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
+            "VALUES\n"
+            " (%d,%d,0,-8945.95,-132.493,83.5312,0,600,600,0,100,100,0,1),\n"
+            " (%d,%d,0,-8962.0,-151.0,83.5312,0,600,600,0,100,100,0,1),\n"
+            % (cls.O, cls.O, cls.ONAME, cls.C, cls.C, cls.CNAME,
+               cls.O, cls.C, cls.O, cls.O, cls.C, cls.C, cls.O,
+               cls.GIVER_GUID, GIVER_ENTRY, cls.FINISHER_GUID, cls.FINISHER_ENTRY)
+            + ",\n".join(rows) + ";\n"
+            "DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910\n"
+            " AND position_y BETWEEN -230 AND -100 AND guid NOT IN (%s);\n"
+            % ",".join(str(g) for g in
+                       [cls.GIVER_GUID, cls.FINISHER_GUID] + cls.SABER_GUIDS + cls.BOAR_GUIDS)
+        )
+
+    @classmethod
+    def _script(cls):
+        ev = [
+            "0:%d:bothold %s" % (cls.O, cls.ONAME),
+            "4000:%d:bothold %s" % (cls.O, cls.CNAME),
+            "8000:%d:botrecruit %s" % (cls.O, cls.CNAME),
+            "12000:%d:botfollow %s" % (cls.O, cls.CNAME),
+            # Companion arrived at the owner (giver area); HOLD re-pins.
+            # The mirror path has no hold gate (PORT-030): the mirror
+            # accept fires on the tick after the owner's accept below.
+            "60000:%d:bothold %s" % (cls.O, cls.CNAME),
+            "85000:%d:botfollow %s" % (cls.O, cls.CNAME),
+            # Party loss: the companion (INCOMPLETE, at the giver) leaves
+            # the party; its persisted quest row must survive, and no
+            # cooperative action may fire while it is out.
+            "95000:%d:botdismiss %s" % (cls.O, cls.CNAME),
+            # Re-join; the kill phase steers the companion through the
+            # zero-damage pack (name lookup picks any live match).
+            "115000:%d:botrecruit %s" % (cls.O, cls.CNAME),
+        ]
+        t = 130000
+        for i in range(7):
+            ev.append("%d:%d:botassist %s Young Nightsaber" % (t, cls.O, cls.CNAME))
+            t += 20000
+        for i in range(4):
+            ev.append("%d:%d:botassist %s Young Thistle Boar" % (t, cls.O, cls.CNAME))
+            t += 20000
+        # Companion returns to the owner (giver area); the turn-in has
+        # already fired at the finisher. The owner turns in via the lab
+        # quest script.
+        ev.append("%d:%d:botfollow %s" % (t, cls.O, cls.CNAME))
+        ev.append("%d:%d:bothold %s" % (t + 20000, cls.O, cls.ONAME))
+        ev.append("%d:%d:bothold %s" % (t + 21000, cls.O, cls.CNAME))
+        return ";".join(ev)
+
+    @classmethod
+    def setUpClass(cls):
+        p.IMAGE = os.environ.get("PORT023_LAB_IMAGE", "tortoise-local:dev")
+        try:
+            p.command(["docker", "image", "inspect", p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest("%s image not present; build it first" % p.IMAGE)
+        cls.before = f.BotFollowTests._personal_state()
+        cls.project = "tortoise-bot-questcoope-" + uuid.uuid4().hex[:12]
+        cls.evidence = p.ROOT / "local" / (cls.project + "-"
+                                           + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+        cls.evidence.mkdir(parents=True)
+        world = p.world_env_for("")
+        world.update(PLAYERBOT_ENABLE="1", PLAYERBOT_MIN_BOTS="0", PLAYERBOT_MAX_BOTS="0",
+                     PLAYERBOT_REFRESH="600000", PLAYERBOT_UPDATE_MS="1000", PLAYERBOT_DEBUG="1",
+                     PLAYERBOT_PROVISION="", PLAYERBOT_TEST_LOGIN="%d,%d" % (cls.O, cls.C),
+                     PLAYERBOT_AMBIENT_ACQUIRE="0", PLAYERBOT_WANDER_RADIUS="1",
+                     PLAYERBOT_QUEST_ID="0",
+                     PLAYERBOT_COOPERATIVE_QUEST_ID="0",
+                     PLAYERBOT_MIRROR_OWNER_QUESTS="1",
+                     PLAYER_SAVE_INTERVAL="5000",
+                     PLAYERBOT_FOLLOW_SCRIPT=cls._script(),
+                     PLAYERBOT_QUEST_SCRIPT="65000:%d:%s:accept;400000:%d:%s:turnin"
+                                           % (cls.O, QUEST_ID, cls.O, QUEST_ID))
+        cls.base = cls.env = None
+        poller = None
+        try:
+            cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
+            p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            poller = _Poller(cls.base, cls.env, (cls.O, cls.C),
+                             str(cls.evidence / "questtimeline.txt"))
+            poller.start()
+            cls.logs = p.wait_for(cls.base, cls.env,
+                                  lambda text: "[PlayerBot][QuestScript] turnin issuer:%d quest:%s"
+                                               % (cls.O, QUEST_ID) in text,
+                                  deadline=900)
+        except BaseException:
+            if poller is not None:
+                poller.stop()
+            if cls.base is not None:
+                try:
+                    failure_logs = p.command(["docker", "compose"] + cls.base
+                                             + ["logs", "--no-color", "world"],
+                                             env=cls.env, timeout=60)
+                    (cls.evidence / "world-failure.log").write_text(failure_logs, encoding="utf-8")
+                except Exception:
+                    pass
+                p.force_down(cls.base, cls.env)
+            raise
+        # Let the post-turn-in state reach the periodic save, then snapshot.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if (_quest_row(cls.base, cls.env, cls.O) == "1:1:7:4"
+                    and _quest_row(cls.base, cls.env, cls.C) == "1:1:7:4"):
+                break
+            time.sleep(5)
+        if poller is not None:
+            poller.stop()
+        cls.snap_before_stop = _full_state(cls.base, cls.env, (cls.O, cls.C))
+        (cls.evidence / "state_before_stop.txt").write_text(
+            repr(cls.snap_before_stop), encoding="utf-8")
+        # Clean stop (logout save), then the isolated world restart.
+        # Compose logs accumulate across container generations of one
+        # service, so scope the restart evidence to the tail after the
+        # new generation's ready marker: the stale phase-1 tail already
+        # contains the legitimate phase-1 login and turn-in lines.
+        boot_marker = "World server is up and running!"
+        boot_count = cls.logs.count(boot_marker)
+        p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
+        p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+        login_marker = "[PlayerBot][Login]  '%s' GUID:%d" % (cls.CNAME, cls.C)
+        full = p.wait_for(cls.base, cls.env,
+                          lambda text: (text.count(boot_marker) > boot_count
+                                        and login_marker in
+                                        text.rsplit(boot_marker, 1)[-1]),
+                          deadline=480)
+        cls.logs_restart = full.rsplit(boot_marker, 1)[-1]
+        time.sleep(10)
+        cls.snap_after_restart = _full_state(cls.base, cls.env, (cls.O, cls.C))
+        (cls.evidence / "state_after_restart.txt").write_text(
+            repr(cls.snap_after_restart), encoding="utf-8")
+        (cls.evidence / "world.log").write_text(cls.logs, encoding="utf-8")
+        (cls.evidence / "world-restart.log").write_text(cls.logs_restart, encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.base is not None:
+            p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
+
+    def test_scripts_armed(self):
+        self.assertIn("[PlayerBot][FollowScript] started events:", self.logs)
+        self.assertIn("[PlayerBot][QuestScript] started events:", self.logs)
+
+    def test_owner_accepted_via_authoritative_path(self):
+        self.assertIn("[PlayerBot][QuestScript] accept issuer:%d quest:%s giver:%d ok:1"
+                      % (self.O, QUEST_ID, GIVER_ENTRY), self.logs)
+
+    def test_mirror_accepted_at_giver(self):
+        # The mirror path has no hold gate (the declared policy does):
+        # the accept follows the owner's accept directly, and the logged
+        # anchor is the giver entry.
+        i_owner = self.logs.find("[PlayerBot][QuestScript] accept issuer:%d" % self.O)
+        i_accept = self.logs.find("[CoopQuest] mirror-accepted GUID:%d quest:%s anchor:%d"
+                                  % (self.C, QUEST_ID, GIVER_ENTRY))
+        self.assertNotEqual(i_owner, -1)
+        self.assertNotEqual(i_accept, -1)
+        self.assertLess(i_owner, i_accept)
+        self.assertEqual(self.logs.count("[CoopQuest] mirror-accepted GUID:%d" % self.C), 1)
+
+    def test_party_loss_suppressed_and_row_survived(self):
+        i_accept = self.logs.find("[CoopQuest] mirror-accepted GUID:%d" % self.C)
+        i_dismiss = self.logs.find("party dismiss accepted bot:%s guid:%d"
+                                   % (self.CNAME, self.C))
+        i_rejoin = self.logs.find("party recruit accepted bot:%s guid:%d leader:%d seq:3"
+                                  % (self.CNAME, self.C, self.O))
+        i_turnin = self.logs.find("[CoopQuest] mirror-turnin GUID:%d quest:%s"
+                                  % (self.C, QUEST_ID))
+        for label, idx in (("accept", i_accept), ("dismiss", i_dismiss),
+                           ("rejoin", i_rejoin), ("turnin", i_turnin)):
+            self.assertNotEqual(idx, -1, label + " marker missing")
+        self.assertLess(i_accept, i_dismiss)
+        self.assertLess(i_dismiss, i_rejoin)
+        # The turn-in fired only after the re-join (party membership gate).
+        self.assertLess(i_rejoin, i_turnin)
+        # The persisted row survived the party loss (INCOMPLETE ->
+        # complete -> rewarded, never erased): the timeline must contain
+        # the companion INCOMPLETE before the turn-in sample.
+        timeline = (self.evidence / "questtimeline.txt").read_text(encoding="utf-8")
+        self.assertIn("%d=3:0:0:0" % self.C, timeline)
+        self.assertIn("%d=1:1:7:4" % self.C, timeline)
+
+    def test_kill_credit_on_both_logs(self):
+        # The companion earned its personal 7/4 (tapped/participated
+        # kills); the owner never attacked - its full 7/4 is pure
+        # tap/group credit.
+        snap = self.snap_before_stop
+        self.assertEqual(snap[self.C]["quest"], "1:1:7:4")
+        self.assertEqual(snap[self.O]["quest"], "1:1:7:4")
+
+    def test_mirror_turnin_at_finisher(self):
+        # The turn-in fired with the finisher entry as the anchor, not
+        # the giver: at completion the companion stood at the pack,
+        # 20+ yd from the giver, so the finisher lookup is what let it
+        # reward (the PORT-033 split).
+        m = re.search(r"\[CoopQuest\] mirror-turnin GUID:%d quest:%s anchor:(\d+) "
+                      r"xpBefore:(\d+) xpAfter:(\d+)" % (self.C, QUEST_ID), self.logs)
+        self.assertIsNotNone(m, "mirror turn-in marker with anchor missing")
+        self.assertEqual(int(m.group(1)), self.FINISHER_ENTRY)
+        self.assertGreater(int(m.group(3)), int(m.group(2)))
+        self.assertNotIn("[CoopQuest] mirror-turnin GUID:%d quest:%s anchor:%d"
+                         % (self.C, QUEST_ID, GIVER_ENTRY), self.logs)
+
+    def test_companion_turnin_rewarded(self):
+        snap = self.snap_before_stop
+        self.assertTrue(snap[self.C]["state"][0] > 0)
+        self.assertGreaterEqual(snap[self.C]["state"][1], 100000)
+        self.assertEqual(snap[self.C]["inv"], 1, "companion choice item 5394")
+
+    def test_owner_turnin_rewarded(self):
+        m = re.search(r"\[PlayerBot\]\[QuestScript\] turnin issuer:%d quest:%s xpBefore:(\d+) xpAfter:(\d+)"
+                      % (self.O, QUEST_ID), self.logs)
+        self.assertIsNotNone(m, "owner turn-in marker with xp delta missing")
+        self.assertGreater(int(m.group(2)), int(m.group(1)))
+        self.assertTrue(self.snap_before_stop[self.O]["state"][0] > 0)
+        self.assertEqual(self.snap_before_stop[self.O]["inv"], 1)
+
+    def test_restart_persistence(self):
+        self.assertIsNotNone(self.snap_before_stop)
+        self.assertIsNotNone(self.snap_after_restart)
+        for g in (self.O, self.C):
+            self.assertEqual(self.snap_before_stop[g], self.snap_after_restart[g],
+                             "state for guid %d changed across the restart" % g)
+        # The companion re-logs in with the rewarded row while the owner
+        # still holds (rewarded) 456: the cross-check plus the rewarded
+        # flag suppress any re-accept/re-turn-in on the restart tail.
+        for marker in ("[CoopQuest] mirror-accepted GUID:%d" % self.C,
+                       "[CoopQuest] mirror-turnin GUID:%d" % self.C,
+                       "[CoopQuest] accepted GUID:%d" % self.C,
+                       "[CoopQuest] turnin GUID:%d" % self.C):
+            self.assertNotIn(marker, self.logs_restart)
+
+    def test_world_healthy(self):
+        self.assertNotIn("[CRASH]", self.logs)
+        self.assertNotIn("[CRASH]", self.logs_restart)
+
+    def test_personal_state_untouched(self):
+        self.assertEqual(self.before, f.BotFollowTests._personal_state())
+
+
+# ---------------------------------------------------------------------------
+# Lab E: PORT-033 (KAP-558) - the mirror turn-in owner cross-check,
+# negative case. The companion's log carries a seeded COMPLETE +
+# unrewarded row for quest 457 that the owner does not hold, and the
+# companion stands at a legitimate 457 finisher (6911, QUESTGIVER
+# flagged, inside the interaction distance). Without the cross-check the
+# turn-in loop would find this anchor and reward; with it, the row stays
+# untouched for the whole quiet window.
+# ---------------------------------------------------------------------------
+class BotQuestCoopUnrelatedTests(unittest.TestCase):
+    O = 610630
+    C = 610631
+    ONAME = "Ucowner"
+    CNAME = "Uccomp"
+    FINISHER_GUID = 2500095
+    UNRELATED_QUEST = "457"
+
+    base = env = project = evidence = None
+    logs = ""
+    before = None
+
+    @classmethod
+    def _seed(cls):
+        return (
+            "INSERT INTO tw_char.characters\n"
+            " (guid,account,name,race,class,gender,level,money,position_x,position_y,position_z,map,\n"
+            "  orientation,zone,health,power1,power2,power3,power4,power5,xp,xp_gain)\n"
+            "VALUES\n"
+            " (%d,1000%d,'%s',1,1,0,3,100000,-8947.95,-132.493,83.5312,0,\n"
+            "  0,12,100,0,0,0,0,0,0,1),\n"
+            " (%d,1000%d,'%s',1,1,0,3,100000,-8949.95,-200.493,83.5312,0,\n"
+            "  0,12,100,0,0,0,0,0,0,1);\n"
+            "INSERT INTO tw_char.playerbot (char_guid,chance,ai)\n"
+            " VALUES (%d,100,'Default'),(%d,100,'Default');\n"
+            "INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)\n"
+            " VALUES (%d,1000%d,1,2,NULL),\n"
+            "        (%d,1000%d,1,2,1000%d);\n"
+            # PORT-033 fixture: 457's finisher becomes the pinned 6911
+            # standing 2 yd from the owner, so the companion (following
+            # the owner) ends up inside its interaction distance; the
+            # owner holds no 457 row, so only the cross-check can keep
+            # the seeded companion row from turning in.
+            "DELETE FROM tw_world.creature_involvedrelation WHERE quest=457;\n"
+            "INSERT INTO tw_world.creature_involvedrelation (id, quest) VALUES (6911, 457);\n"
+            "UPDATE tw_world.creature_template SET npc_flags = npc_flags | 2 WHERE entry=6911;\n"
+            # The companion's log carries 457 COMPLETE + unrewarded (fork
+            # enum: status 1) with zero objective progress: a row the
+            # mirror path never accepted.
+            "INSERT INTO tw_char.character_queststatus (guid, quest, status, rewarded)\n"
+            " VALUES (%d, 457, 1, 0);\n"
+            "INSERT INTO tw_world.creature\n"
+            " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
+            "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
+            "VALUES\n"
+            " (%d,6911,0,-8945.95,-132.493,83.5312,0,600,600,0,100,100,0,1);\n"
+            "DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910\n"
+            " AND position_y BETWEEN -230 AND -100 AND guid NOT IN (%d);\n"
+            % (cls.O, cls.O, cls.ONAME, cls.C, cls.C, cls.CNAME,
+               cls.O, cls.C, cls.O, cls.O, cls.C, cls.C, cls.O,
+               cls.C, cls.FINISHER_GUID, cls.FINISHER_GUID)
+        )
+
+    @classmethod
+    def setUpClass(cls):
+        p.IMAGE = os.environ.get("PORT023_LAB_IMAGE", "tortoise-local:dev")
+        try:
+            p.command(["docker", "image", "inspect", p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest("%s image not present; build it first" % p.IMAGE)
+        cls.before = f.BotFollowTests._personal_state()
+        cls.project = "tortoise-bot-questcoopu-" + uuid.uuid4().hex[:12]
+        cls.evidence = p.ROOT / "local" / (cls.project + "-"
+                                           + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+        cls.evidence.mkdir(parents=True)
+        world = p.world_env_for("")
+        world.update(PLAYERBOT_ENABLE="1", PLAYERBOT_MIN_BOTS="0", PLAYERBOT_MAX_BOTS="0",
+                     PLAYERBOT_REFRESH="600000", PLAYERBOT_UPDATE_MS="1000", PLAYERBOT_DEBUG="1",
+                     PLAYERBOT_PROVISION="", PLAYERBOT_TEST_LOGIN="%d,%d" % (cls.O, cls.C),
+                     PLAYERBOT_AMBIENT_ACQUIRE="0", PLAYERBOT_WANDER_RADIUS="1",
+                     PLAYERBOT_QUEST_ID="0",
+                     PLAYERBOT_COOPERATIVE_QUEST_ID="0",
+                     PLAYERBOT_MIRROR_OWNER_QUESTS="1",
+                     PLAYER_SAVE_INTERVAL="5000",
+                     PLAYERBOT_FOLLOW_SCRIPT=";".join([
+                         "0:%d:bothold %s" % (cls.O, cls.ONAME),
+                         "4000:%d:bothold %s" % (cls.O, cls.CNAME),
+                         "8000:%d:botrecruit %s" % (cls.O, cls.CNAME),
+                         "12000:%d:botfollow %s" % (cls.O, cls.CNAME),
+                         "60000:%d:bothold %s" % (cls.O, cls.CNAME)]))
+        cls.base = cls.env = None
+        try:
+            cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
+            p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            cls.logs = p.wait_for(cls.base, cls.env,
+                                  lambda text: "hold accepted bot:%s guid:%d"
+                                               % (cls.CNAME, cls.C) in text,
+                                  deadline=600)
+            # Quiet observation window at the finisher (the owner never
+            # holds the companion's seeded quest).
+            time.sleep(90)
+            cls.logs = p.command(["docker", "compose"] + cls.base
+                                 + ["logs", "--no-color", "world"], env=cls.env, timeout=60)
+            (cls.evidence / "world.log").write_text(cls.logs, encoding="utf-8")
+        except BaseException:
+            if cls.base is not None:
+                try:
+                    failure_logs = p.command(["docker", "compose"] + cls.base
+                                             + ["logs", "--no-color", "world"],
+                                             env=cls.env, timeout=60)
+                    (cls.evidence / "world-failure.log").write_text(failure_logs, encoding="utf-8")
+                except Exception:
+                    pass
+                p.force_down(cls.base, cls.env)
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.base is not None:
+            p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
+
+    def test_companion_recruited_and_arrived(self):
+        self.assertIn("party recruit accepted bot:%s guid:%d" % (self.CNAME, self.C), self.logs)
+        self.assertIn("[PlayerBot][Follow] active GUID:%d leader:%d" % (self.C, self.O), self.logs)
+
+    def test_no_mirror_action(self):
+        # No accept line, no turn-in attempt, no denial, no announce for
+        # the quest: the cross-check skipped it before any other step.
+        self.assertNotIn("[CoopQuest]", self.logs)
+        self.assertNotIn("quest:%s" % self.UNRELATED_QUEST, self.logs)
+
+    def test_unrelated_row_untouched(self):
+        self.assertEqual(_quest_row(self.base, self.env, self.C, self.UNRELATED_QUEST),
+                         "1:0:0:0")
+        self.assertEqual(_quest_row(self.base, self.env, self.O, self.UNRELATED_QUEST), "-")
+
+    def test_no_reward(self):
+        self.assertEqual(_inv_reward(self.base, self.env, self.C), 0)
 
     def test_world_healthy(self):
         self.assertNotIn("[CRASH]", self.logs)

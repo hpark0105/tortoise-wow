@@ -2918,12 +2918,22 @@ namespace
 struct CoopQuestAnchorCheck
 {
 public:
-    CoopQuestAnchorCheck(Player const* obj, uint32 questId, float dist)
-        : i_obj(obj), i_questId(questId), i_dist(dist) {}
+    CoopQuestAnchorCheck(Player const* obj, uint32 questId, float dist,
+                         bool finisher)
+        : i_obj(obj), i_questId(questId), i_dist(dist), i_finisher(finisher) {}
     WorldObject const& GetFocusObject() const { return *i_obj; }
     bool operator()(Creature const* u)
     {
-        if (!u->IsAlive() || !u->HasQuest(i_questId))
+        if (!u->IsAlive())
+            return false;
+        // PORT-033 (KAP-558): the accept anchor must be a questrelation
+        // holder (giver); the turn-in anchor must be an involvedquest
+        // holder (finisher). The engine's complete/reward path requires
+        // HasInvolvedQuest (QuestHandler.cpp:418/460), and a quest's
+        // giver and finisher can be different creatures.
+        bool const rel = i_finisher ? u->HasInvolvedQuest(i_questId)
+                                    : u->HasQuest(i_questId);
+        if (!rel)
             return false;
         return i_obj->IsWithinDistInMap(u, i_dist);
     }
@@ -2931,15 +2941,26 @@ private:
     Player const* const i_obj;
     uint32 const i_questId;
     float const i_dist;
+    bool const i_finisher;
     CoopQuestAnchorCheck(CoopQuestAnchorCheck const&);
 };
 
-// Nearest live quest creature within i_dist of from (the accept anchor
-// and the turn-in anchor share the one quest relation).
-Creature* FindCoopQuestAnchor(Player* from, uint32 questId, float i_dist)
+// Nearest live creature standing in the given quest relation within
+// i_dist of from: give = questrelation (can hand the quest out),
+// finish = involvedquest (the turn-in/reward target).
+Creature* FindCoopQuestGiver(Player* from, uint32 questId, float i_dist)
 {
     Creature* anchor = nullptr;
-    CoopQuestAnchorCheck check(from, questId, i_dist);
+    CoopQuestAnchorCheck check(from, questId, i_dist, false);
+    MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
+    Cell::VisitGridObjects(from, searcher, i_dist);
+    return anchor;
+}
+
+Creature* FindCoopQuestFinisher(Player* from, uint32 questId, float i_dist)
+{
+    Creature* anchor = nullptr;
+    CoopQuestAnchorCheck check(from, questId, i_dist, true);
     MaNGOS::CreatureLastSearcher<CoopQuestAnchorCheck> searcher(anchor, check);
     Cell::VisitGridObjects(from, searcher, i_dist);
     return anchor;
@@ -3068,21 +3089,23 @@ void PlayerBotAI::CooperativeDeclaredQuestStep(uint32 questId, Player* owner)
     // PORT-027: in-world status line before the action path (the
     // accept/turn-in lines are said from those paths themselves).
     CooperativeQuestProgressAnnounce(questId, qInfo, qStatus, observation.myStatus);
-    // Nearest live quest creature within INTERACTION_DISTANCE (the
-    // accept and the turn-in anchor; the declared quest's giver and
-    // finisher share the one quest relation). The authoritative
-    // checks below re-validate before acting.
-    Creature* anchor = FindCoopQuestAnchor(me, questId, INTERACTION_DISTANCE);
-    observation.giverAvailable = (anchor != nullptr);
-    observation.finisherAvailable = (anchor != nullptr);
+    // Nearest live giver (questrelation) and finisher (involvedquest)
+    // within INTERACTION_DISTANCE; the declared quest's giver and
+    // finisher can be different creatures (PORT-033). Each action
+    // re-looks-up its own anchor immediately before acting.
+    observation.giverAvailable =
+        (FindCoopQuestGiver(me, questId, INTERACTION_DISTANCE) != nullptr);
+    observation.finisherAvailable =
+        (FindCoopQuestFinisher(me, questId, INTERACTION_DISTANCE) != nullptr);
     Companion::Quest::Intent const intent = Companion::Quest::Select(observation);
     if (intent.action == Companion::Quest::Action::None)
         return;
-    // Re-validate against live state immediately before acting.
-    if (!anchor || !me->CanInteractWithQuestGiver(anchor))
-        return;
     if (intent.action == Companion::Quest::Action::Accept)
     {
+        // PORT-033: fresh giver anchor immediately before acting.
+        Creature* anchor = FindCoopQuestGiver(me, questId, INTERACTION_DISTANCE);
+        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+            return;
         if (me->GetQuestStatus(questId) != QUEST_STATUS_NONE)
             return; // the log moved between snapshot and act
         if (me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
@@ -3116,8 +3139,13 @@ void PlayerBotAI::CooperativeDeclaredQuestStep(uint32 questId, Player* owner)
         _coopQuestDenyTimer = 5000;
         return;
     }
-    // TurnIn (choice index 0: a socketless session cannot choose). When
-    // the last credit lands the engine already marks the quest
+    // TurnIn (choice index 0: a socketless session cannot choose).
+    // PORT-033: fresh finisher anchor immediately before acting.
+    Creature* anchor =
+        FindCoopQuestFinisher(me, questId, INTERACTION_DISTANCE);
+    if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+        return;
+    // When the last credit lands the engine already marks the quest
     // COMPLETE, so the handler-shaped sequence applies: CompleteQuest
     // only while still INCOMPLETE; the reward step only needs COMPLETE.
     if (me->CanCompleteQuest(questId))
@@ -3131,8 +3159,10 @@ void PlayerBotAI::CooperativeDeclaredQuestStep(uint32 questId, Player* owner)
     {
         uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
         me->RewardQuest(qInfo, 0, anchor, true);
-        sLog.outString("[CoopQuest] turnin GUID:%u quest:%u xpBefore:%u xpAfter:%u",
-                       me->GetGUIDLow(), questId, xpBefore, me->GetUInt32Value(PLAYER_XP));
+        sLog.outString("[CoopQuest] turnin GUID:%u quest:%u anchor:%u xpBefore:%u "
+                       "xpAfter:%u",
+                       me->GetGUIDLow(), questId, anchor->GetEntry(), xpBefore,
+                       me->GetUInt32Value(PLAYER_XP));
         // PORT-027: in-world turn-in line.
         std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
         me->Say(line.c_str(), LANG_UNIVERSAL);
@@ -3170,7 +3200,7 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
             if (!staleDone)
                 continue;
         }
-        Creature* anchor = FindCoopQuestAnchor(me, qid, INTERACTION_DISTANCE);
+        Creature* anchor = FindCoopQuestGiver(me, qid, INTERACTION_DISTANCE);
         if (!anchor || !me->CanInteractWithQuestGiver(anchor))
             continue;
         if (me->CanTakeQuest(qInfo, false) && me->CanAddQuest(qInfo, false))
@@ -3227,10 +3257,21 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
         uint32 const qid = it->first;
         if (it->second.m_status != QUEST_STATUS_COMPLETE || it->second.m_rewarded)
             continue;
+        // PORT-033 (KAP-558): mirror provenance without a persisted
+        // table - the companion's log can only hold quests the mirror or
+        // the declared path accepted, and an owner-log cross-check keeps
+        // a seeded or owner-abandoned quest from being turned in for the
+        // companion. The owner's log persists across restarts, so the
+        // rule survives them.
+        if (owner->GetQuestStatus(qid) == QUEST_STATUS_NONE)
+            continue;
         Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
         if (!qInfo)
             continue;
-        Creature* anchor = FindCoopQuestAnchor(me, qid, INTERACTION_DISTANCE);
+        // PORT-033: the turn-in anchor is the quest's finisher
+        // (involvedquest), which can be a different creature than the
+        // giver; the authoritative checks below re-validate at the act.
+        Creature* anchor = FindCoopQuestFinisher(me, qid, INTERACTION_DISTANCE);
         if (!anchor || !me->CanInteractWithQuestGiver(anchor))
             continue;
         if (me->CanCompleteQuest(qid))
@@ -3244,8 +3285,10 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
         {
             uint32 xpBefore = me->GetUInt32Value(PLAYER_XP);
             me->RewardQuest(qInfo, 0, anchor, true);
-            sLog.outString("[CoopQuest] mirror-turnin GUID:%u quest:%u xpBefore:%u xpAfter:%u",
-                           me->GetGUIDLow(), qid, xpBefore, me->GetUInt32Value(PLAYER_XP));
+            sLog.outString("[CoopQuest] mirror-turnin GUID:%u quest:%u anchor:%u "
+                           "xpBefore:%u xpAfter:%u",
+                           me->GetGUIDLow(), qid, anchor->GetEntry(), xpBefore,
+                           me->GetUInt32Value(PLAYER_XP));
             std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
             me->Say(line.c_str(), LANG_UNIVERSAL);
             _coopQuestAnnounce.erase(qid);
