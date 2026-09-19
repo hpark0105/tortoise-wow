@@ -186,6 +186,7 @@ class ConversationTransport
         {
             bool inUse = false;
             ConvRound round;
+            uint8_t attempt = 0; // PORT-031: 1 = first service, 2 = bounded retry
         };
         static Slot* FindSlot(Slot* slots, uint32_t botLow);
         void WorkerLoop();

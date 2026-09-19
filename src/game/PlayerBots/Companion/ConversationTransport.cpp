@@ -179,6 +179,7 @@ bool ConversationTransport::Submit(uint32_t botLow, uint32_t partyGroup,
         return false;
     }
     ++m_submits;
+    s->attempt = 1; // PORT-031: fresh round: first service
     if (m_debug)
         sLog.outString("[Conversation] submit bot:%u group:%u leader:%u profile:%u len:%u",
                        botLow, partyGroup, partyLeader, profileCode, (uint32)text.size());
@@ -287,9 +288,27 @@ void ConversationTransport::WorkerLoop()
         }
         if (r == ConvRound::Result::Failed)
         {
-            ++m_fails;
-            if (m_debug)
-                sLog.outString("[Conversation] fail bot:%u (no reply)", botLow);
+            if (s->attempt < 2)
+            {
+                // PORT-031 (KAP-558): one bounded retry. A single lost
+                // race (service busy, model timeout) must not silence an
+                // addressed player message; the second failure stays
+                // silent by design (no reply is never fabricated). The
+                // party signature is re-validated on consumption (Poll).
+                ++s->attempt;
+                s->round.state = ConvState::InFlight;
+                s->round.submitStamp = m_nextStamp++;
+                s->round.submitClockMs = WorldTimer::getMSTime();
+                if (m_debug)
+                    sLog.outString("[Conversation] retry bot:%u attempt:2", botLow);
+                m_cv.notify_all();
+            }
+            else
+            {
+                ++m_fails;
+                if (m_debug)
+                    sLog.outString("[Conversation] fail bot:%u (no reply)", botLow);
+            }
         }
     }
 }
