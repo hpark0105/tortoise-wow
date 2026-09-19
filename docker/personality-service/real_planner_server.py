@@ -54,6 +54,17 @@ CFG = {
     "model_url": os.environ.get("REAL_PLANNER_MODEL_URL", mc.DEFAULT_BASE_URL),
     "key_file": os.environ.get("REAL_PLANNER_KEY_FILE", ""),
     "timeout_ms": int(os.environ.get("REAL_PLANNER_TIMEOUT_MS", "4000")),
+    # PORT-031 (KAP-558): per-path model budgets. The world's converse
+    # round has a hard 4000 ms I/O deadline, so converse worst case
+    # (lock wait + model call) must stay under it. The plan path only
+    # enriches (Hold is the deterministic fallback) and is rate-gated to
+    # one model call per tick window so it stops pinning the shared
+    # model and starving /converse.
+    "plan_timeout_ms": int(os.environ.get("REAL_PLANNER_PLAN_TIMEOUT_MS", "1500")),
+    "converse_lock_wait_ms": int(
+        os.environ.get("REAL_PLANNER_CONVERSE_LOCK_WAIT_MS", "1000")),
+    "converse_timeout_ms": int(os.environ.get(
+        "REAL_PLANNER_CONVERSE_TIMEOUT_MS", "2500")),
     "tick_ms": int(os.environ.get("REAL_PLANNER_TICK_MS", "10000")),
     "max_tokens": int(os.environ.get("REAL_PLANNER_MAX_TOKENS", "64")),
     "chat_template_kwargs": _chat_template_kwargs(),
@@ -62,6 +73,10 @@ CFG = {
 # Single flight: one model request at a time (shared-model policy); a
 # concurrent round gets the Hold fallback instead of a queue.
 MODEL_LOCK = threading.Lock()
+
+# PORT-031 (KAP-558): plan model-call rate gate (monotonic seconds of the
+# last started plan model call); gated rounds answer Hold immediately.
+LAST_PLAN_CALL = {"t": 0.0}
 MODEL_ID = {"id": None}
 PRIMER = None  # (text, sha256) loaded at startup
 
@@ -113,17 +128,30 @@ class Handler(BaseHTTPRequestHandler):
         steps = None
         reason = None
         meta = None
+        if time.monotonic() - LAST_PLAN_CALL["t"] < CFG["tick_ms"] / 1000.0:
+            # PORT-031: rate-gated - the shared model answers the
+            # player-facing converse rounds; plan enrichment re-runs in
+            # the next window. Hold is the deterministic fallback.
+            gate_ms = int((time.monotonic() - t0) * 1000)
+            payload = rp.build_wire_response(
+                raw, rp.fallback_steps(body), gate_ms, CFG["tick_ms"])
+            print("[real-planner] plan gated reqid:%x ms:%d" % (
+                env["request_id"], gate_ms), flush=True)
+            self._send(200, payload)
+            return
         if not MODEL_LOCK.acquire(blocking=False):
             reason = "busy"
         else:
             try:
+                LAST_PLAN_CALL["t"] = time.monotonic()
                 key = mc.read_api_key(CFG["key_file"] or None)
                 if MODEL_ID["id"] is None:
                     MODEL_ID["id"] = mc.fetch_model_id(CFG["model_url"], key)
                 text, meta = mc.chat(
                     CFG["model_url"], key, MODEL_ID["id"],
                     rp.build_messages(raw, PRIMER[0]),
-                    CFG["timeout_ms"] / 1000.0, max_tokens=CFG["max_tokens"],
+                    CFG["plan_timeout_ms"] / 1000.0,
+                    max_tokens=CFG["max_tokens"],
                     extra={"chat_template_kwargs": CFG["chat_template_kwargs"]}
                     if CFG["chat_template_kwargs"] else None)
                 steps = rp.parse_model_text(text, body["bot_count"])
@@ -181,7 +209,12 @@ class Handler(BaseHTTPRequestHandler):
         reason = None
         reply = None
         meta = None
-        if not MODEL_LOCK.acquire(blocking=False):
+        # PORT-031: converse is the player-facing path - wait briefly for
+        # a plan call in flight (plan calls are capped at
+        # plan_timeout_ms), then take the model. Worst case stays under
+        # the world's 4000 ms round deadline.
+        if not MODEL_LOCK.acquire(
+                blocking=True, timeout=CFG["converse_lock_wait_ms"] / 1000.0):
             reason = "busy"
         else:
             try:
@@ -191,7 +224,8 @@ class Handler(BaseHTTPRequestHandler):
                 text2, meta = mc.chat(
                     CFG["model_url"], key, MODEL_ID["id"],
                     cv.build_converse_messages(profile, text),
-                    CFG["timeout_ms"] / 1000.0, max_tokens=CFG["max_tokens"],
+                    CFG["converse_timeout_ms"] / 1000.0,
+                    max_tokens=CFG["max_tokens"],
                     extra={"chat_template_kwargs": CFG["chat_template_kwargs"]}
                     if CFG["chat_template_kwargs"] else None)
                 reply = cv.parse_converse_text(text2)
@@ -223,9 +257,12 @@ def main():
     server = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), Handler)
     server.daemon_threads = True
     print("[real-planner] listening port:%d model_url:%s primer:%s "
-          "sha256:%s timeout_ms:%d tick_ms:%d" % (
+          "sha256:%s timeout_ms:%d tick_ms:%d plan_timeout_ms:%d "
+          "converse_lock_wait_ms:%d converse_timeout_ms:%d" % (
               CFG["port"], CFG["model_url"], rp.PRIMER_NAME, PRIMER[1],
-              CFG["timeout_ms"], CFG["tick_ms"]), flush=True)
+              CFG["timeout_ms"], CFG["tick_ms"], CFG["plan_timeout_ms"],
+              CFG["converse_lock_wait_ms"], CFG["converse_timeout_ms"]),
+          flush=True)
     server.serve_forever()
 
 
