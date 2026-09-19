@@ -5,6 +5,8 @@
 - [Phase 1: deterministic companion and current checkpoint](phase-1-handoff.md)
 - [Phase 2: personality and model integration](phase-2-handoff.md)
 - [Phase 3: populated world and recruitment](phase-3-handoff.md)
+- [PORT-033 draft: provision a bounded owned companion party](port-033.md)
+- [PORT-034: companion cohort provisioning and level-appropriate skills](port-034.md)
 - [Phase 4: learning, progression and social behavior](phase-4-handoff.md)
 
 Each handoff records code entry points, invariants, acceptance gates, evidence,

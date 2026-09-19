@@ -45,7 +45,10 @@ bool ParseBotIdentitySpec(std::string const& value, BotIdentitySpec& spec)
         fields.push_back(value.substr(pos, comma - pos));
         pos = comma + 1;
     }
-    if (fields.size() != 1 && fields.size() != 9)
+    // PORT-034 (KAP-558): the short form Name,race,class,gender is valid;
+    // appearance fields keep their BotIdentitySpec defaults (all zero),
+    // the same defaults the bare-name spec already relies on.
+    if (fields.size() != 1 && fields.size() != 4 && fields.size() != 9)
         return false;
     spec.name = fields[0];
     if (fields.size() == 1)
@@ -396,8 +399,27 @@ void PlayerBotMgr::Load()
 
     // 3b- Runtime provisioning (TW-010, contract C6 / section 5a): idempotent and
     // resumable; runs before the roster load so a newly provisioned bot is picked up.
+    // PORT-034 (KAP-558): the setting may hold a ';'-separated list of
+    // identity specs so a whole companion cohort provisions from one
+    // value. Each spec is independent and idempotent; a bad spec logs
+    // and is skipped without aborting the remaining specs.
     if (!confProvisionName.empty())
-        ProvisionPersistentBot(confProvisionName);
+    {
+        size_t from = 0;
+        while (from <= confProvisionName.size())
+        {
+            size_t sep = confProvisionName.find(';', from);
+            size_t to = (sep == std::string::npos) ? confProvisionName.size() : sep;
+            std::string spec = confProvisionName.substr(from, to - from);
+            size_t begin = spec.find_first_not_of(" \t");
+            if (begin != std::string::npos)
+            {
+                size_t end = spec.find_last_not_of(" \t");
+                ProvisionPersistentBot(spec.substr(begin, end - begin + 1));
+            }
+            from = (sep == std::string::npos) ? confProvisionName.size() + 1 : sep + 1;
+        }
+    }
 
 
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
@@ -1268,7 +1290,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     BotIdentitySpec spec;
     if (!ParseBotIdentitySpec(name, spec))
     {
-        sLog.outError("Playerbot provisioning: invalid identity spec; expected Name or Name,race,class,gender,skin,face,hairStyle,hairColor,facialHair");
+        sLog.outError("Playerbot provisioning: invalid identity spec; expected Name, Name,race,class,gender, or Name,race,class,gender,skin,face,hairStyle,hairColor,facialHair");
         return;
     }
     std::string const& characterName = spec.name;
@@ -2616,6 +2638,17 @@ void PlayerBotMgr::UpdateQuestScript()
             // COMPLETE, so CompleteQuest only runs while still
             // INCOMPLETE, exactly as the handler does; the reward step
             // only needs COMPLETE plus CanRewardQuest.
+            // PORT-034 (KAP-558): idempotent turn-in - the retry
+            // events (Lab D timeline race) must not double-reward.
+            QuestStatusData const* qsd = issuer->GetQuestStatusData(ev.questId);
+            if (qsd != nullptr && qsd->m_rewarded)
+            {
+                sLog.outString("[PlayerBot][QuestScript] turnin "
+                               "already-rewarded issuer:%u quest:%u; skipped",
+                               issuer->GetGUIDLow(), ev.questId);
+                ++m_questScriptIdx;
+                continue;
+            }
             uint32 xpBefore = issuer->GetUInt32Value(PLAYER_XP);
             if (issuer->CanCompleteQuest(ev.questId))
                 issuer->CompleteQuest(ev.questId);

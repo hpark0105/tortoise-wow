@@ -117,6 +117,44 @@ def _full_state(base, env, guids):
     return snap
 
 
+# PORT-034 (KAP-558): post-seed fixture self-assert. Lab D flakiness was
+# silent fixture drift: the zero-damage UPDATE covered only the melee
+# columns, but ranged damage lives in separate columns
+# (ranged_dmg_min/max). The boar kept shooting 3.85-5.3 per 2 s at 30 yd,
+# and the Conservator (2079, faction 80) resolved its NPC->player reaction
+# through the Darnassus reputation list (faction_template row 80 ->
+# reputation_list_id 21) and came back Hated, chipping the test
+# characters. This helper queries, right after boot, exactly the
+# tw_world.creature_template rows the fixture touched and asserts the
+# neutralization each lab's assertions depend on, so future drift fails
+# in seconds instead of at the 15-minute mark of a lab run.
+GIVER_NEUTRAL = {"dmg_min": 0, "dmg_max": 0, "ranged_dmg_min": 0,
+                 "ranged_dmg_max": 0, "detection_range": 0, "faction": 1}
+PACK_ZERO = {"dmg_min": 0, "dmg_max": 0, "ranged_dmg_min": 0,
+             "ranged_dmg_max": 0, "health_min": 8, "health_max": 8}
+
+
+def _assert_fixture_templates(base, env, expected):
+    """expected: entry -> {column: exact expected value}."""
+    for entry in sorted(expected):
+        cols = sorted(expected[entry])
+        out = p.db_exec(
+            base, env,
+            "SELECT %s FROM tw_world.creature_template WHERE entry=%d"
+            % (", ".join(cols), entry))
+        got = out.strip().split("\t")
+        if len(got) != len(cols):
+            raise AssertionError(
+                "fixture self-check: bad row for entry %d: %r" % (entry, out))
+        for col, val in zip(cols, got):
+            want = float(expected[entry][col])
+            have = float(val)
+            if have != want:
+                raise AssertionError(
+                    "fixture self-check: entry %d %s is %s, want %s"
+                    % (entry, col, val, expected[entry][col]))
+
+
 class _Poller:
     """5s quest/state sampler into questtimeline.txt (reconstructs the
     pre-reward progress and the persisted rows for the evidence)."""
@@ -184,6 +222,7 @@ class BotQuestCoopEligibleTests(unittest.TestCase):
     GIVER_GUID = 2500020
     SABER_GUIDS = [2500021, 2500022, 2500023, 2500024, 2500025, 2500026, 2500027]
     BOAR_GUIDS = [2500028, 2500029, 2500030, 2500031]
+    FIXTURE_EXPECT = {2079: GIVER_NEUTRAL, 2031: PACK_ZERO, 1984: PACK_ZERO}
 
     base = env = project = evidence = None
     logs = logs_restart = ""
@@ -225,9 +264,20 @@ class BotQuestCoopEligibleTests(unittest.TestCase):
             "        (%d,1000%d,1,2,1000%d);\n"
             # Lab-only: the declared quest's creatures deal no damage, so
             # the level-3 companion cannot die in the kill sequence; the
-            # death path is Lab C's job. Kills are one-shot (HP 8).
-            "UPDATE tw_world.creature_template SET dmg_min=0, dmg_max=0, health_min=8, health_max=8 "
-            "WHERE entry IN (2031,1984);\n"
+            # death path is Lab C's job. Kills are one-shot (HP 8). Ranged
+            # damage lives in separate columns (ranged_dmg_min/max): the
+            # boar shoots 3.85-5.3 per 2 s at 30 yd in base data, so the
+            # ranged columns are zeroed too (Lab D flakiness root cause).
+            "UPDATE tw_world.creature_template SET dmg_min=0, dmg_max=0, ranged_dmg_min=0, "
+            "ranged_dmg_max=0, health_min=8, health_max=8 WHERE entry IN (2031,1984);\n"
+            # The Conservator (faction 80) resolves NPC->player reaction
+            # through its faction_template row's Darnassus reputation list
+            # (reputation_list_id 21); the lab bot came back Hated and was
+            # chipped at the giver (Lab D flakiness root cause #2).
+            # Neutralize: neutral faction, zero melee + ranged damage,
+            # zero detection. questrelation and npc_flags are untouched.
+            "UPDATE tw_world.creature_template SET faction=1, dmg_min=0, dmg_max=0, "
+            "ranged_dmg_min=0, ranged_dmg_max=0, detection_range=0 WHERE entry=2079;\n"
             "INSERT INTO tw_world.creature\n"
             " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
             "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
@@ -307,6 +357,7 @@ class BotQuestCoopEligibleTests(unittest.TestCase):
         try:
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            _assert_fixture_templates(cls.base, cls.env, cls.FIXTURE_EXPECT)
             poller = _Poller(cls.base, cls.env, (cls.O, cls.C),
                              str(cls.evidence / "questtimeline.txt"))
             poller.start()
@@ -470,6 +521,7 @@ class BotQuestCoopIneligibleTests(unittest.TestCase):
     ONAME = "Cqownrb"
     CNAME = "Cqcompb"
     GIVER_GUID = 2500040
+    FIXTURE_EXPECT = {2079: GIVER_NEUTRAL}
 
     base = env = project = evidence = None
     logs = ""
@@ -491,6 +543,10 @@ class BotQuestCoopIneligibleTests(unittest.TestCase):
             "INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)\n"
             " VALUES (%d,1000%d,1,2,NULL),\n"
             "        (%d,1000%d,1,2,1000%d);\n"
+            # Giver neutralization (see Lab A): the faction-80 reputation
+            # reaction made the Conservator hostile to the lab bots.
+            "UPDATE tw_world.creature_template SET faction=1, dmg_min=0, dmg_max=0, "
+            "ranged_dmg_min=0, ranged_dmg_max=0, detection_range=0 WHERE entry=2079;\n"
             "INSERT INTO tw_world.creature\n"
             " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
             "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
@@ -531,6 +587,7 @@ class BotQuestCoopIneligibleTests(unittest.TestCase):
         try:
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            _assert_fixture_templates(cls.base, cls.env, cls.FIXTURE_EXPECT)
             cls.logs = p.wait_for(cls.base, cls.env,
                                   lambda text: "hold accepted bot:%s guid:%d"
                                                % (cls.CNAME, cls.C) in text,
@@ -594,6 +651,14 @@ class BotQuestCoopDeathTests(unittest.TestCase):
     GIVER_GUID = 2500060
     KILLER = 2500300
     KILLER_NAME = "Minion of Sethir"
+    FIXTURE_EXPECT = {
+        2079: GIVER_NEUTRAL,
+        # Designated killer: the fixture pins 2000 HP; the base melee
+        # damage is load-bearing for the death assertion (it must still
+        # retaliate).
+        6911: {"dmg_min": 28.6, "dmg_max": 31.9, "health_min": 2000,
+               "health_max": 2000},
+    }
 
     base = env = project = evidence = None
     logs = ""
@@ -622,6 +687,10 @@ class BotQuestCoopDeathTests(unittest.TestCase):
             "UPDATE tw_world.creature_template SET loot_id=0 WHERE entry=6911;\n"
             "UPDATE tw_world.creature_template SET health_min=2000, health_max=2000, regeneration=0 "
             "WHERE entry=6911;\n"
+            # Giver neutralization (see Lab A); the killer 6911 keeps its
+            # base damage on purpose.
+            "UPDATE tw_world.creature_template SET faction=1, dmg_min=0, dmg_max=0, "
+            "ranged_dmg_min=0, ranged_dmg_max=0, detection_range=0 WHERE entry=2079;\n"
             "INSERT INTO tw_world.creature\n"
             " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
             "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
@@ -679,6 +748,7 @@ class BotQuestCoopDeathTests(unittest.TestCase):
         try:
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            _assert_fixture_templates(cls.base, cls.env, cls.FIXTURE_EXPECT)
             cls.logs = p.wait_for(cls.base, cls.env,
                                   lambda text: "[PlayerBot][Hold] active GUID:%d seq:8" % cls.C in text,
                                   deadline=720)
@@ -763,6 +833,14 @@ class BotQuestCoopFinisherTests(unittest.TestCase):
     SABER_GUIDS = [2500082, 2500083, 2500084, 2500085, 2500086, 2500087, 2500088]
     BOAR_GUIDS = [2500089, 2500090, 2500091, 2500092]
     FINISHER_ENTRY = 6911
+    FIXTURE_EXPECT = {
+        2079: GIVER_NEUTRAL,
+        2031: PACK_ZERO,
+        1984: PACK_ZERO,
+        6911: {"dmg_min": 0, "dmg_max": 0, "ranged_dmg_min": 0,
+               "ranged_dmg_max": 0, "detection_range": 0,
+               "health_min": 99999, "health_max": 99999},
+    }
 
     base = env = project = evidence = None
     logs = logs_restart = ""
@@ -800,10 +878,27 @@ class BotQuestCoopFinisherTests(unittest.TestCase):
             "INSERT INTO tw_char.playerbot (char_guid,chance,ai)\n"
             " VALUES (%d,100,'Default'),(%d,100,'Default');\n"
             "INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)\n"
-            " VALUES (%d,1000%d,1,2,NULL),\n"
+            # Owner self-binds (owner_account_id = its own lab
+            # account): a NULL owner rejects the bothold below
+            # ("hold rejected unowned bot") and lets the owner's
+            # own bot AI random-walk away from spawn, pulling the
+            # companion past the 30 yd assist range (run #3 boar
+            # stall root cause).
+            " VALUES (%d,1000%d,1,2,1000%d),\n"
             "        (%d,1000%d,1,2,1000%d);\n"
-            "UPDATE tw_world.creature_template SET dmg_min=0, dmg_max=0, health_min=8, health_max=8 "
-            "WHERE entry IN (2031,1984);\n"
+            # Ranged damage lives in separate columns (ranged_dmg_min/max):
+            # the boar shoots 3.85-5.3 per 2 s at 30 yd in base data, so
+            # the ranged columns are zeroed too (Lab D flakiness root
+            # cause - the finisher-position HP drain was boar ranged fire).
+            "UPDATE tw_world.creature_template SET dmg_min=0, dmg_max=0, ranged_dmg_min=0, "
+            "ranged_dmg_max=0, health_min=8, health_max=8 WHERE entry IN (2031,1984);\n"
+            # Giver neutralization (see Lab A). The finisher also takes
+            # faction 1: base faction 14 (Monster) is hostile to players
+            # via the faction_template mask fallback (hostile_mask 1 &
+            # player our_mask 3), and CanInteractWithNPC rejects hostile
+            # targets even at 0 yd - a real quest finisher is friendly.
+            "UPDATE tw_world.creature_template SET faction=1, dmg_min=0, dmg_max=0, "
+            "ranged_dmg_min=0, ranged_dmg_max=0, detection_range=0 WHERE entry=2079;\n"
             # PORT-033 fixture: split the one 456 relation - the giver
             # keeps the questrelation, the finisher takes the
             # involvedrelation and the QUESTGIVER npcflag (fork: 0x2) so
@@ -813,6 +908,16 @@ class BotQuestCoopFinisherTests(unittest.TestCase):
             "INSERT INTO tw_world.creature_questrelation (id, quest) VALUES (2079, 456);\n"
             "INSERT INTO tw_world.creature_involvedrelation (id, quest) VALUES (6911, 456);\n"
             "UPDATE tw_world.creature_template SET npc_flags = npc_flags | 2 WHERE entry=6911;\n"
+            # The finisher must be a non-threat during the kill
+            # phase: it stands 3-4 yd inside the pack and would
+            # otherwise aggro the companion (Minion of Sethir deals
+            # real melee damage and shoots 18.3-25.2 per ~2 s at
+            # range). Zero melee + ranged damage, zero detection and
+            # tanky HP keep it alive and harmless; nothing targets
+            # it, so it never dies.
+            "UPDATE tw_world.creature_template SET faction=1, dmg_min=0, dmg_max=0, "
+            "ranged_dmg_min=0, ranged_dmg_max=0, detection_range=0, "
+            "health_min=99999, health_max=99999 WHERE entry=6911;\n"
             "INSERT INTO tw_world.creature\n"
             " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
             "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
@@ -820,7 +925,7 @@ class BotQuestCoopFinisherTests(unittest.TestCase):
             " (%d,%d,0,-8945.95,-132.493,83.5312,0,600,600,0,100,100,0,1),\n"
             " (%d,%d,0,-8962.0,-151.0,83.5312,0,600,600,0,100,100,0,1),\n"
             % (cls.O, cls.O, cls.ONAME, cls.C, cls.C, cls.CNAME,
-               cls.O, cls.C, cls.O, cls.O, cls.C, cls.C, cls.O,
+               cls.O, cls.C, cls.O, cls.O, cls.O, cls.C, cls.C, cls.O,
                cls.GIVER_GUID, GIVER_ENTRY, cls.FINISHER_GUID, cls.FINISHER_ENTRY)
             + ",\n".join(rows) + ";\n"
             "DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910\n"
@@ -886,20 +991,21 @@ class BotQuestCoopFinisherTests(unittest.TestCase):
                      PLAYERBOT_MIRROR_OWNER_QUESTS="1",
                      PLAYER_SAVE_INTERVAL="5000",
                      PLAYERBOT_FOLLOW_SCRIPT=cls._script(),
-                     PLAYERBOT_QUEST_SCRIPT="65000:%d:%s:accept;400000:%d:%s:turnin"
-                                           % (cls.O, QUEST_ID, cls.O, QUEST_ID))
+                     PLAYERBOT_QUEST_SCRIPT="65000:%d:%s:accept;400000:%d:%s:turnin;480000:%d:%s:turnin;560000:%d:%s:turnin;640000:%d:%s:turnin"
+                                           % (cls.O, QUEST_ID, cls.O, QUEST_ID, cls.O, QUEST_ID, cls.O, QUEST_ID, cls.O, QUEST_ID))
         cls.base = cls.env = None
         poller = None
         try:
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            _assert_fixture_templates(cls.base, cls.env, cls.FIXTURE_EXPECT)
             poller = _Poller(cls.base, cls.env, (cls.O, cls.C),
                              str(cls.evidence / "questtimeline.txt"))
             poller.start()
             cls.logs = p.wait_for(cls.base, cls.env,
                                   lambda text: "[PlayerBot][QuestScript] turnin issuer:%d quest:%s"
                                                % (cls.O, QUEST_ID) in text,
-                                  deadline=900)
+                                  deadline=1200)
         except BaseException:
             if poller is not None:
                 poller.stop()
@@ -1069,6 +1175,10 @@ class BotQuestCoopUnrelatedTests(unittest.TestCase):
     CNAME = "Uccomp"
     FINISHER_GUID = 2500095
     UNRELATED_QUEST = "457"
+    FIXTURE_EXPECT = {
+        6911: {"dmg_min": 0, "dmg_max": 0, "ranged_dmg_min": 0,
+               "ranged_dmg_max": 0, "detection_range": 0},
+    }
 
     base = env = project = evidence = None
     logs = ""
@@ -1098,6 +1208,13 @@ class BotQuestCoopUnrelatedTests(unittest.TestCase):
             "DELETE FROM tw_world.creature_involvedrelation WHERE quest=457;\n"
             "INSERT INTO tw_world.creature_involvedrelation (id, quest) VALUES (6911, 457);\n"
             "UPDATE tw_world.creature_template SET npc_flags = npc_flags | 2 WHERE entry=6911;\n"
+            # The base 6911 deals 28.6-31.9 melee plus 18.3-25.2 ranged
+            # per ~2 s; standing 2 yd from the owner it killed both test
+            # bots in Lab E runs. Zero all damage + detection; only the
+            # QUESTGIVER flag and the 457 involvedrelation are
+            # load-bearing here.
+            "UPDATE tw_world.creature_template SET dmg_min=0, dmg_max=0, ranged_dmg_min=0, "
+            "ranged_dmg_max=0, detection_range=0 WHERE entry=6911;\n"
             # The companion's log carries 457 COMPLETE + unrewarded (fork
             # enum: status 1) with zero objective progress: a row the
             # mirror path never accepted.
@@ -1146,6 +1263,7 @@ class BotQuestCoopUnrelatedTests(unittest.TestCase):
         try:
             cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            _assert_fixture_templates(cls.base, cls.env, cls.FIXTURE_EXPECT)
             cls.logs = p.wait_for(cls.base, cls.env,
                                   lambda text: "hold accepted bot:%s guid:%d"
                                                % (cls.CNAME, cls.C) in text,

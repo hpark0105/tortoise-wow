@@ -2598,6 +2598,14 @@ bool PlayerBotAI::IsFollowOwnerAvailable() const
     return true;
 }
 
+bool PlayerBotAI::MotionIdle() const
+{
+    if (!me)
+        return true;
+    return me->GetMotionMaster()->empty() ||
+        me->GetMotionMaster()->GetCurrentMovementGeneratorType() == IDLE_MOTION_TYPE;
+}
+
 bool PlayerBotAI::IsOwnedCompanion() const
 {
     return botEntry && botEntry->ownerAccountId != 0;
@@ -3050,18 +3058,26 @@ void PlayerBotAI::CooperativeQuestStep(uint32 diff)
     if (_coopQuestDenyTimer)
     {
         _coopQuestDenyTimer = (_coopQuestDenyTimer > diff) ? _coopQuestDenyTimer - diff : 0;
+        _coopTurninWalkGuid = 0; // PORT-034: no planning this tick
         return;
     }
     Group* group = me->GetGroup();
     if (!group)
+    {
+        _coopTurninWalkGuid = 0; // PORT-034
         return;
+    }
     Player* owner = FindOwnerByAccount();
     if (!owner || !group->IsMember(owner->GetObjectGuid()))
+    {
+        _coopTurninWalkGuid = 0; // PORT-034
         return; // owner loss or party loss: no cooperative planning
+    }
 
     uint32 const questId = sPlayerBotMgr.GetCooperativeQuestId();
     if (questId)
     {
+        _coopTurninWalkGuid = 0; // PORT-034: declared mode owns the plan
         CooperativeDeclaredQuestStep(questId, owner);
         return;
     }
@@ -3255,6 +3271,7 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
          it != me->getQuestStatusMap().end(); ++it)
     {
         uint32 const qid = it->first;
+        _coopTurninWalkGuid = 0; // PORT-034: fresh per quest
         if (it->second.m_status != QUEST_STATUS_COMPLETE || it->second.m_rewarded)
             continue;
         // PORT-033 (KAP-558): mirror provenance without a persisted
@@ -3264,7 +3281,10 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
         // companion. The owner's log persists across restarts, so the
         // rule survives them.
         if (owner->GetQuestStatus(qid) == QUEST_STATUS_NONE)
+        {
+            _coopTurninWalkGuid = 0; // PORT-034: provenance gone
             continue;
+        }
         Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
         if (!qInfo)
             continue;
@@ -3272,8 +3292,93 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
         // (involvedquest), which can be a different creature than the
         // giver; the authoritative checks below re-validate at the act.
         Creature* anchor = FindCoopQuestFinisher(me, qid, INTERACTION_DISTANCE);
-        if (!anchor || !me->CanInteractWithQuestGiver(anchor))
+        if (!anchor)
+        {
+            // PORT-034 (KAP-558): group credit can complete the
+            // quest while the finisher stands out of interaction
+            // range (the party, not this companion, landed the
+            // kills). Arm a bounded walk to the finisher when one
+            // is findable and the companion can move; UpdateFollow
+            // steers there at follow-motion level and the next
+            // quest tick acts on arrival.
+            Creature* walkTarget =
+                FindCoopQuestFinisher(me, qid, kCoopTurninWalkSearchRange);
+            if (walkTarget && !_held && !me->IsInCombat() &&
+                !me->HasUnitState(UNIT_STAT_CAN_NOT_REACT_OR_LOST_CONTROL))
+            {
+                _coopTurninWalkGuid = walkTarget->GetObjectGuid().GetRawValue();
+                // PORT-034 (KAP-558): issue the walk here, not only
+                // from UpdateFollow - a companion without an active
+                // follow order never runs the follow path, and its
+                // group credit can still complete out of interaction
+                // range. Hold and combat preempt it: the Hold executor
+                // clears motion after this step, and the combat
+                // executor re-issues its own motion. MotionIdle (not
+                // empty): the MotionMaster keeps the static idle
+                // generator at the stack bottom, so empty() never
+                // observed the no-motion state and the walk was armed
+                // but never issued (cohort run #7).
+                if (MotionIdle())
+                    me->GetMotionMaster()->MovePoint(
+                        0, walkTarget->GetPositionX(), walkTarget->GetPositionY(),
+                        walkTarget->GetPositionZ(), MOVE_PATHFINDING);
+                if (sPlayerBotMgr.IsDebugEnabled() &&
+                    WorldTimer::getMSTime() > _coopTurninWalkLogUntilMs)
+                {
+                    _coopTurninWalkLogUntilMs = WorldTimer::getMSTime() + 5000;
+                    sLog.outString(
+                        "[CoopQuest] turnin-walk GUID:%u quest:%u finisher:%u "
+                        "dist:%.1f",
+                        me->GetGUIDLow(), qid,
+                        walkTarget->GetGUIDLow(), me->GetDistance(walkTarget));
+                }
+            }
             continue;
+        }
+        if (!me->CanInteractWithQuestGiver(anchor))
+        {
+            // PORT-034 (KAP-558): the silent skip that blocked Lab D;
+            // log the decision context (5 s throttle) when debug is on.
+            if (sPlayerBotMgr.IsDebugEnabled() &&
+                WorldTimer::getMSTime() > _coopTurninDebugUntilMs)
+            {
+                _coopTurninDebugUntilMs = WorldTimer::getMSTime() + 5000;
+                // Replicate CanInteractWithNPC's gates so the skip
+                // line names the failing check (bit = gate passed).
+                uint32 gates = 0;
+                if (anchor)
+                {
+                    if (me->IsInWorld() && !me->IsTaxiFlying())
+                        gates |= 0x1;
+                    if (!me->HasUnitState(UNIT_STAT_CAN_NOT_REACT_OR_LOST_CONTROL))
+                        gates |= 0x2;
+                    if (anchor->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER))
+                        gates |= 0x4;
+                    if (anchor->IsAlive())
+                        gates |= 0x8;
+                    if (!(me->IsAlive() && anchor->IsInvisibleForAlive()))
+                        gates |= 0x10;
+                    if (!anchor->GetCharmerGuid())
+                        gates |= 0x20;
+                    if (!anchor->IsHostileTo(me))
+                        gates |= 0x40;
+                    if (!anchor->IsInCombat())
+                        gates |= 0x80;
+                    if (!anchor->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE))
+                        gates |= 0x100;
+                    if (anchor->IsWithinDistInMap(me, INTERACTION_DISTANCE))
+                        gates |= 0x200;
+                }
+                sLog.outString(
+                    "[CoopQuest] mirror turnin skip GUID:%u quest:%u "
+                    "anchor:%u interact:%u dist:%.1f gates:%x",
+                    me->GetGUIDLow(), qid,
+                    anchor ? (uint32)anchor->GetGUIDLow() : 0,
+                    (anchor && me->CanInteractWithQuestGiver(anchor)) ? 1 : 0,
+                    anchor ? me->GetDistance(anchor) : -1.0f, gates);
+            }
+            continue;
+        }
         if (me->CanCompleteQuest(qid))
             me->CompleteQuest(qid);
         if (me->GetQuestStatus(qid) != QUEST_STATUS_COMPLETE)
@@ -3289,6 +3394,7 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
                            "xpBefore:%u xpAfter:%u",
                            me->GetGUIDLow(), qid, anchor->GetEntry(), xpBefore,
                            me->GetUInt32Value(PLAYER_XP));
+            _coopTurninWalkGuid = 0; // PORT-034: goal complete
             std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
             me->Say(line.c_str(), LANG_UNIVERSAL);
             _coopQuestAnnounce.erase(qid);
@@ -3958,10 +4064,12 @@ bool PlayerBotAI::UpdateRecovery(uint32 diff)
         return true;
     }
     // Out of range: walk to the corpse. The path is re-issued only when
-    // the motion is empty and the retry window has elapsed, so a failed
-    // path is retried at a bounded pace and the companion is never
-    // trapped by an unreachable corpse.
-    if (me->GetMotionMaster()->empty() && _recoveryWalkMs <= diff)
+    // the companion is not actively moving (MotionIdle - empty() alone
+    // is never true: the idle generator sits at the stack bottom) and
+    // the retry window has elapsed, so a failed path is retried at a
+    // bounded pace and the companion is never trapped by an
+    // unreachable corpse.
+    if (MotionIdle() && _recoveryWalkMs <= diff)
     {
         _recoveryWalkMs = kRecoveryWalkRetryMs;
         me->GetMotionMaster()->MovePoint(0, corpse->GetPositionX(),
@@ -4404,6 +4512,28 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
 {
     if (!_following || !me || !me->IsAlive() || !me->IsInWorld() || !me->GetMap())
         return false;
+
+    // PORT-034 (KAP-558): bounded turn-in walk. CooperativeQuestStep
+    // armed a finisher target when a mirrored quest completed with
+    // the finisher out of interaction range; steer to it at
+    // follow-motion level until in range, then let the next quest
+    // tick act. A gone or unreachable target drops the goal and
+    // normal follow resumes.
+    if (_coopTurninWalkGuid)
+    {
+        Creature* finisher =
+            me->GetMap()->GetCreature(ObjectGuid(_coopTurninWalkGuid));
+        if (finisher && finisher->IsInWorld() && finisher->IsAlive() &&
+            !finisher->IsWithinDistInMap(me, INTERACTION_DISTANCE))
+        {
+            if (MotionIdle())
+                me->GetMotionMaster()->MovePoint(
+                    0, finisher->GetPositionX(), finisher->GetPositionY(),
+                    finisher->GetPositionZ(), MOVE_PATHFINDING);
+            return true;
+        }
+        _coopTurninWalkGuid = 0; // reached or lost: normal follow resumes
+    }
 
     // Same-map lookup: a leader on another map (or not in world yet) is
     // temporarily unavailable; the goal stays active and the bot holds
