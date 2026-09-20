@@ -1,6 +1,6 @@
 # PORT-033: Provision a bounded owned companion party
 
-- Status: draft; no implementation or runtime acceptance
+- Status: implemented; cohort lab 17/17 (port034-cohort11) + personal deploy live (2026-09-19/20); awaiting operator review
 - Phase: 3, bounded owned-party scale before ambient population scale
 - Depends on: Phase 2 quest turn-in and mirror-scope repairs, PORT-026 acceptance
 - Scope: one human owner and up to four owned companions in a normal five-member party
@@ -38,6 +38,38 @@ The names above are examples only. Keep the existing `PLAYERBOT_PROVISION` path 
 ## Safety and rollout
 
 Use a separate Compose project and synthetic characters for creation, failure and restore tests. Do not run provisioning experiments against the personal character database. Back up the personal database before any eventual live migration or first multi-companion rollout; check for an online player before maintenance. Keep character/account data and raw logs out of tracked evidence. This port does not authorize deployment, raid expansion, ambient bot population growth or autonomous quest selection.
+
+## Personal deployment notes (2026-09-19/20)
+
+The implemented shape is the `PLAYERBOT_PROVISION` semicolon list with short
+`Name,race,class,gender` specs (PORT-034 provision-list change), not the
+`PLAYERBOT_COMPANION_SPECS` sketch above. Live cohort on the personal server:
+
+- Bram - Human Warrior (race 1, class 1), guid 2, reserved account 1000000000.
+  Renamed from "Companion" by migration 20260919090000_character so the
+  provision finds the existing character and is an idempotent no-op.
+- Rowan - Human Hunter (race 1, class 3), guid 5, account 1000000001.
+- Elowen - High Elf Mage (race 10, class 8), guid 6, account 1000000002.
+- Clem - Dwarf Priest (race 3, class 5), guid 7, account 1000000003.
+
+All four are owned by account 4 (bot_ownership) and start at level 8.
+
+Faction: this fork's ChrRaces.dbc carries ten races and
+`Player::TeamForRace` (Player.cpp:7761) derives the team from
+`baseLanguage` (LANG_COMMON 7 = ALLIANCE, LANG_ORCISH 1 = HORDE). In this
+fork High Elf (10) is Alliance and race 3 is Dwarf, so the whole cohort is
+Alliance - matching Candra (Human Warlock). Note the fork race table differs
+from stock TBC numbering (race 9 Goblin, race 10 High Elf), which is why
+identities must be read from data/dbc/ChrRaces.dbc, not from expansion
+assumptions.
+
+Level 8 was applied as a personal DB change (characters.level = 8, xp = 0)
+while the bots were offline. The engine re-derives everything at login:
+`InitStatsForLevel` fills stats from player_levelstats /
+player_classlevelstats by (race, class, level), `UpdateSkillsForLevel`
+reconciles skill ranks, and the companion's `AutoLearnSpellsForLevel`
+re-learns the full legal spell set for the level (no persisted
+character_spell rows existed for the new bots).
 
 ## Review assignment
 
