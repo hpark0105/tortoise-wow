@@ -43,12 +43,13 @@ struct PlayerBotEntry
     uint32 partySeq; // CMP-010: invalidates pending recruit/recall work
     uint32 pendingPartySeq; // sequence captured by an asynchronous recall
     uint32 pendingPartyLeaderGuid; // human leader to revalidate after login
+    uint32 botInitLeaderGuid; // PORT-035: leader for deferred .botinit setup (0 = none)
     uint8 personalitySchemaVersion; // PORT-020: 0 = no row yet; 1 = current; >1 = unknown (fail-closed)
     uint8 personalityProfile; // PORT-020: 0 = none/baseline, 1 = reckless, 2 = cautious
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
     {}
 };
 
@@ -176,6 +177,14 @@ class PlayerBotMgr
         bool BotRecruit(Player* issuer, const std::string& botName);
         bool BotDismiss(Player* issuer, const std::string& botName);
         bool BotRecall(Player* issuer, const std::string& botName);
+        // PORT-035 (KAP-558): one-shot owner convenience: recall every owned
+        // persistent companion into the issuer's party, enable reactive
+        // defend, and arm owner-follow. Online companions are set up
+        // immediately; offline ones queue their login (BotRecall) and finish
+        // the setup in OnPlayerInWorld via botInitLeaderGuid. Outcome counts
+        // are out params so the chat handler reports them without re-walking
+        // the roster.
+        bool BotInit(Player* issuer, uint32& readyCount, uint32& deferredCount, uint32& skippedCount);
 
         uint32 GenBotAccountId() { return ++_maxAccountId; }
         PlayerBotStats& GetStats(){ return m_stats; }

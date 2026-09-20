@@ -19512,6 +19512,36 @@ bool ChatHandler::HandleBotRecallCommand(char* args)
     return HandleBotPartyCommand(args, 2);
 }
 
+// ---------------------------------------------------------------------------
+// PORT-035 (KAP-558): one-shot companion setup.
+// .botinit: recall every owned companion into the issuer's party, enable
+// reactive defend, and arm owner-follow - the single-command replacement
+// for the .botrecall/.botdefend/.botfollow sequence. Offline companions
+// queue their login and finish the setup when they come in-world.
+// ---------------------------------------------------------------------------
+bool ChatHandler::HandleBotInitCommand(char* args)
+{
+    (void)args;
+    Player* p = GetPlayer();
+    if (!p)
+    {
+        SendSysMessage("This command can only be used in the world.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+    uint32 ready = 0, deferred = 0, skipped = 0;
+    bool const ok = sPlayerBotMgr.BotInit(p, ready, deferred, skipped);
+    if (!ok)
+    {
+        SendSysMessage("No owned companions found.");
+        SetSentErrorMessage(true);
+    }
+    else
+        PSendSysMessage("botinit complete: %u set, %u queued, %u skipped",
+                        ready, deferred, skipped);
+    return ok;
+}
+
 bool ChatHandler::HandleBotPartyCommand(char* args, uint8 action)
 {
     Player* p = GetPlayer();

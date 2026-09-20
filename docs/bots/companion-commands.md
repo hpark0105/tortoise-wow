@@ -18,6 +18,7 @@ printed in chat (`Bot ... rejected.`) and logged server-side
 | `.bothold <botname>` | (alias `.bothyld`) Freezes the bot in place: stops movement and offense, clears follow. Highest priority -- a delayed older follow/assist cannot cancel a hold. Any new order releases it. |
 | `.botassist <botname> <targetname>` | Orders the bot to fight the named creature (target name may contain spaces; it is the rest of the line). The bot must be in your party and the target a legal hostile creature. If the target dies, despawns, or unloads, the assist clears and the bot resumes its previous order. |
 | `.botdefend <botname> on\|off` | Toggles reactive defend. While enabled, a following bot engages a creature that is actively attacking you or the bot, and stands down (`cleared reason:owner safe`) when no attacker remains. It never pulls bystanders. Session-scoped: a world restart clears it. |
+| `.botinit` | One-shot setup for **every** companion you own: recalls each (logging in the offline ones), puts them in your party, enables reactive defend, and arms follow. Online companions are set up immediately; offline ones finish defend+follow the moment their login completes. Safe to re-run - a companion already in your party is a recruit no-op. Reports per-outcome counts in chat (`N set, N queued, N skipped`). No arguments. |
 
 ## Order priority
 
@@ -58,7 +59,8 @@ When several orders are live, selection is deterministic:
 
 ## Typical session flow
 
-    .botrecall Companion          # bring it online (after restart)
+    .botinit                      # one-shot: recall + party + defend + follow (all owned companions)
+    .botrecall Companion          # (manual) bring it online (after restart)
     .botrecruit Companion         # party up
     .botfollow Companion          # it walks to you and follows
     .botdefend Companion on       # fight back when something hits you
