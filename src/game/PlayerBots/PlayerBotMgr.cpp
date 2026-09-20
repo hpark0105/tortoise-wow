@@ -2242,6 +2242,20 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
     // rules transfer leadership to the bot when the owner logs out, and
     // the owner must stay able to re-recruit while the bot leads.
     // Group::AddMember performs no authority check (chat handlers do).
+    // PORT-035: a group persisted across a world restart can outlive the
+    // owner's logout: classic rules keep the group alive while a bot
+    // member stays online (leadership drifts to a bot), the owner's
+    // membership row is deleted on its own logout, and the shutdown save
+    // persists the bot-only group. Such a group is stale for the owner,
+    // so the bot leaves it before joining (disbanding when it is the
+    // last member) instead of being rejected already-grouped.
+    Group* botGroup = bot->GetGroup();
+    if (botGroup && botGroup != group)
+    {
+        sLog.outString("bot left stale group bot:%s guid:%u group:%u leader:%u",
+                       e->name.c_str(), e->playerGUID, botGroup->GetId(), issuer->GetGUIDLow());
+        botGroup->RemoveMember(bot->GetObjectGuid(), GROUP_LEAVE);
+    }
     if (bot->GetGroup())
     {
         if (bot->GetGroup() == group)
