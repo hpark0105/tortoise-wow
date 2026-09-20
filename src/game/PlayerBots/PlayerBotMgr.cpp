@@ -125,6 +125,11 @@ void PlayerBotMgr::LoadConfig()
     confUpdateDiff = sConfig.GetIntDefault("PlayerBot.UpdateMs", 10000);
     forceLogoutDelay = sConfig.GetBoolDefault("PlayerBot.ForceLogoutDelay", true);
     confProvisionName = sConfig.GetStringDefault("PlayerBot.Provision", "");
+    // KAP-558 review (finding 1): the human account bound to every new
+    // provision at publish time (0 = unowned legacy behavior); and the
+    // one-shot legacy mirror-marker backfill at bot login.
+    confOwnerAccount = (uint32)sConfig.GetIntDefault("PlayerBot.OwnerAccountId", 0);
+    confMirrorMarkerBackfill = sConfig.GetBoolDefault("PlayerBot.MirrorMarkerBackfill", true);
     confTestLoginGuids = sConfig.GetStringDefault("PlayerBot.TestLogin", "");
     // MVP-006: one declared quest the companion progresses through the
     // normal quest APIs (accept, objective credit, turn-in).
@@ -1285,6 +1290,42 @@ uint32 PlayerBotMgr::AllocateReservedBotAccount()
     return candidate;
 }
 
+// KAP-558 review (finding 1): publish the roster ownership row with the
+// configured owner binding included, so a fresh cohort is commandable in
+// the same boot that provisions it (no manual SQL update). Conflict rule:
+// an owner binding that already exists for this guid wins over the
+// configured value - an operator's manual binding is reported, never
+// silently replaced.
+bool PlayerBotMgr::PublishBotOwnership(uint32 guid, uint32 account)
+{
+    QueryResult *existing = CharacterDatabase.PQuery(
+        "SELECT owner_account_id FROM bot_ownership WHERE char_guid = %u", guid);
+    if (existing)
+    {
+        Field *f = existing->Fetch();
+        uint32 bound = (f && !f->IsNULL()) ? f->GetUInt32() : 0;
+        delete existing;
+        if (bound && bound != confOwnerAccount)
+        {
+            sLog.outError("Playerbot provisioning: guid %u already bound to owner account %u; keeping the existing binding (configured owner %u not applied)",
+                          guid, bound, confOwnerAccount);
+        }
+        return true; // the binding row already exists and is settled
+    }
+    if (confOwnerAccount)
+    {
+        if (!CharacterDatabase.DirectPExecute(
+                "INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version, owner_account_id) VALUES (%u, %u, 1, 2, %u)",
+                guid, account, confOwnerAccount))
+            return false;
+        sLog.outString("Playerbot provisioning: guid %u owner-bound to account %u at provision", guid, confOwnerAccount);
+        return true;
+    }
+    return CharacterDatabase.DirectPExecute(
+        "INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)",
+        guid, account);
+}
+
 void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
 {
     BotIdentitySpec spec;
@@ -1558,9 +1599,10 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
             return;
         }
 
-        // Publish ownership only after native state is complete. MyISAM means
+        // Publish ownership only after native state is complete (the
+        // configured owner is bound here, KAP-558 review). MyISAM means
         // this remains resumable rather than cross-table atomic.
-        if (!CharacterDatabase.DirectPExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account) ||
+        if (!PublishBotOwnership(guid, account) ||
             !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid))
         {
             sLog.outError("Playerbot provisioning: native character '%s' saved but roster publication failed; retry will resume", characterName.c_str());
@@ -1568,12 +1610,12 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         }
         sObjectMgr.InsertPlayerInCache(&nativePlayer);
         sObjectMgr.UpdatePlayerCachedPosition(&nativePlayer);
-        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u); bound (provision_version=2)", characterName.c_str(), guid, account);
+        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u owner %u); bound (provision_version=2)", characterName.c_str(), guid, account, confOwnerAccount);
         return;
     }
 
     // Native-ready orphan resume: complete it in place (same identity).
-    if (!CharacterDatabase.DirectPExecute("INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version) VALUES (%u, %u, 1, 2)", guid, account) ||
+    if (!PublishBotOwnership(guid, account) ||
         (!hasRoster && !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid)))
     {
         sLog.outError("Playerbot provisioning: native-ready orphan completion failed for '%s' (guid %u); retryable", characterName.c_str(), guid);
@@ -1581,7 +1623,7 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
     }
     if (!sObjectMgr.GetPlayerDataByGUID(guid))
         sObjectMgr.LoadPlayerCacheData(guid);
-    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) completed (native-ready character); bound (provision_version=2)", characterName.c_str(), guid, account);
+    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u owner %u) completed (native-ready character); bound (provision_version=2)", characterName.c_str(), guid, account, confOwnerAccount);
 }
 
 // ---------------------------------------------------------------------------

@@ -54,6 +54,7 @@ Retrieval sync not performed (embedding paused per operator instruction);
 direct-read fallback only.
 """
 import os
+import re
 import time
 import unittest
 import uuid
@@ -137,6 +138,7 @@ class BotCompanionCohortTests(unittest.TestCase):
     log2 = ""            # phase-2 world log (accumulated across generations)
     guids = {}           # name -> guid (discovered in phase 1)
     chars = {}           # name -> _char_info snapshot (phase 1)
+    owner_at_provision = {}  # name -> owner_account_id as of the provisioning boot
     spells_pre = {}      # name -> frozenset (after phase-2 login)
     spells_post = {}     # name -> frozenset (after the run)
     before = None
@@ -197,10 +199,6 @@ class BotCompanionCohortTests(unittest.TestCase):
             " AND position_y BETWEEN -230 AND -100 AND guid NOT IN (%s);\n"
             % ",".join(str(g) for g in [GIVER_GUID, FINISHER_GUID]
                        + SABER_GUIDS + BOAR_GUIDS)
-            # Party commands reject unowned bots; provisioning leaves the
-            # cohort ownerless, so bind the three to the lab owner account.
-            + "UPDATE tw_char.bot_ownership SET owner_account_id=1000%d "
-              "WHERE char_guid IN (%d,%d,%d);\n" % (O, r, e, c)
         )
 
     @classmethod
@@ -283,7 +281,11 @@ class BotCompanionCohortTests(unittest.TestCase):
         world = p.world_env_for("")
         world.update(PLAYERBOT_ENABLE="1", PLAYERBOT_MIN_BOTS="0", PLAYERBOT_MAX_BOTS="0",
                      PLAYERBOT_REFRESH="600000", PLAYERBOT_UPDATE_MS="1000", PLAYERBOT_DEBUG="1",
-                     PLAYERBOT_PROVISION=PROVISION, PLAYERBOT_TEST_LOGIN="",
+                     PLAYERBOT_PROVISION=PROVISION,
+                                           # Lab owner account id follows the "1000"+guid
+                      # pattern (see _phase2_seed), not 1000*guid.
+                      PLAYERBOT_OWNER_ACCOUNT_ID="1000" + str(O),
+                     PLAYERBOT_TEST_LOGIN="",
                      PLAYERBOT_AMBIENT_ACQUIRE="0", PLAYERBOT_WANDER_RADIUS="1",
                      PLAYERBOT_QUEST_ID="0", PLAYERBOT_COOPERATIVE_QUEST_ID="0",
                      PLAYERBOT_MIRROR_OWNER_QUESTS="0",
@@ -306,6 +308,16 @@ class BotCompanionCohortTests(unittest.TestCase):
             for name in BOTS:
                 cls.chars[name] = _char_info(cls.base, cls.env, name)
                 cls.guids[name] = cls.chars[name]["guid"]
+            # KAP-558 review (finding 1): capture the ownership
+            # binding as of the provisioning boot; the phase-2
+            # run must not need a manual SQL bind (the
+            # configured owner is bound at provision time).
+            cls.owner_at_provision = {}
+            for name in BOTS:
+                out = p.db_exec(cls.base, cls.env,
+                                "SELECT owner_account_id FROM bot_ownership "
+                                "WHERE char_guid=%d" % cls.guids[name])
+                cls.owner_at_provision[name] = out.strip()
             cls.log1 = p.command(["docker", "compose"] + cls.base
                                  + ["logs", "--no-color", "world"], env=cls.env, timeout=60)
             (cls.evidence / "phase1.log").write_text(cls.log1, encoding="utf-8")
@@ -455,6 +467,13 @@ class BotCompanionCohortTests(unittest.TestCase):
             self.assertEqual((phase, int(race), int(cls_), int(gender)),
                              ("2", r, c, g), name)
 
+    def test_phase1_owner_binding_at_provision(self):
+        # KAP-558 review (finding 1): the provisioning boot binds the
+        # configured owner (PLAYERBOT_OWNER_ACCOUNT_ID) itself; a
+        # fresh cohort is commandable without a post-hoc SQL update.
+        for name in BOTS:
+            self.assertEqual(self.owner_at_provision[name], "1000" + str(O), name)
+
     def test_phase1_ownership_and_roster(self):
         out = p.db_exec(self.base, self.env,
                         "SELECT b.char_guid, b.account_id, b.provision_version, "
@@ -476,12 +495,16 @@ class BotCompanionCohortTests(unittest.TestCase):
                 continue
             self.assertEqual(int(guid), self.guids[name])
             self.assertEqual(int(account), self.chars[name]["account"])
-            self.assertEqual((version, roster), ("2", "1"), name)
+            # KAP-558 review (finding 1): companions carry the
+            # configured owner from the provisioning boot.
+            self.assertEqual((version, owner, roster),
+                             ("2", "1000" + str(O), "1"), name)
 
     def test_phase1_created_lines(self):
         for name in BOTS:
-            self.assertIn("Playerbot provisioning: created native character '%s' (guid %d account %d)"
-                          % (name, self.guids[name], self.chars[name]["account"]),
+            self.assertIn("Playerbot provisioning: created native character '%s' (guid %d account %d owner %d)"
+                          % (name, self.guids[name], self.chars[name]["account"],
+                             int("1000" + str(O))),
                           self.log1)
 
     # --- Phase 2 assertions -------------------------------------------
@@ -514,6 +537,21 @@ class BotCompanionCohortTests(unittest.TestCase):
             prefix = "[CoopQuest] mirror-turnin GUID:%d quest:%s anchor:%d " % (
                 self.guids[n], QUEST_ID, FINISHER_ENTRY)
             self.assertEqual(self.log2.count(prefix), 1, n)
+
+    def test_phase2_follow_slots_fanned(self):
+        # KAP-558 review (finding 4): each companion paths its own party
+        # slot (45 deg apart) instead of the leader's shared right-side
+        # point; the follow path lines carry the slot index. Recruit
+        # order Rowan, Elowen, Clem fixes slots 0, 1, 2.
+        want = {"Rowan": "0", "Elowen": "1", "Clem": "2"}
+        for n in COHORT:
+            slots = re.findall(
+                r"\[PlayerBot\]\[Follow\] path GUID:%d leader:%d slot:(\d+)"
+                % (self.guids[n], O), self.log2)
+            self.assertTrue(slots, "no follow path line for %s" % n)
+            self.assertEqual(set(slots), {want[n]},
+                             "%s pathed slot(s) %s, want %s"
+                             % (n, sorted(set(slots)), want[n]))
 
     def test_phase2_owner_accept_and_turnin(self):
         self.assertEqual(

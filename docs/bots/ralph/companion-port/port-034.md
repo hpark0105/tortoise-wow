@@ -180,6 +180,23 @@ Verified in `PlayerBotMgr.cpp` (BotHold ~line 1693; quarantine ~line 426):
    with the same name at spellLevel >= replaces it (name/spellLevel
    queried from the lab world DB; still no hard-coded spell ids); any
    other shrinkage still fails. Cohort run #11: 17/17.
+10. Turn-in walk target erased mid-scan (KAP-558 review finding 3): the
+    mirror turn-in loop cleared `_coopTurninWalkGuid` at the top of
+    every quest-log entry, so a later entry erased a walk target armed
+    by an earlier one in the same tick, handing motion back to normal
+    follow until the next quest tick. Fix: one clear before the scan;
+    the scan tracks the single nearest eligible finisher
+    (`bestWalkQid/bestWalkGuid/bestWalkDist`) and arms the walk once,
+    after the loop.
+11. Follower crowding (KAP-558 review finding 4): every companion
+    pathed the leader's shared right-side offset point, so a party of
+    companions crowded at one spot and issued repeated path
+    corrections. Fix (UpdateFollow): stable per-companion party slots
+    45 deg apart around the leader (slot 0 is the legacy right-side
+    point, unchanged for a solo follower); the in-range rest position
+    is the slot point (re-issue only beyond 0.75 yd, heal-hold and
+    throttle rules unchanged). The `[PlayerBot][Follow] path ...
+    slot:%d` line carries the slot index.
 
 ## Debug instrumentation
 
@@ -189,6 +206,36 @@ dist:%.1f gates:%x` logs all 13 `CanInteractWithNPC` gates as a bitmask:
 0x10 !invisible, 0x20 !charmer, 0x40 !IsHostileTo, 0x80 !IsInCombat,
 0x100 !NOT_SELECTABLE, 0x200 within 5 yd. Run #2 logged gates 0x3bf
 (only 0x40 failing), which isolated the hostility root cause in one run.
+
+## KAP-558 review changes (2026-09-20)
+
+Two review findings changed the ownership and mirror-provenance
+contracts (retrieval sync not performed; embedding paused per operator
+instruction):
+
+- Ownership at provision time (finding 1): `PlayerBot.OwnerAccountId`
+  (`PLAYERBOT_OWNER_ACCOUNT_ID`, default 0 = unowned) makes the
+  idempotent provision path publish `bot_ownership` with the
+  configured owner on both the fresh-create and orphan-resume branches
+  (`PlayerBotMgr::PublishBotOwnership`). A pre-existing binding from a
+  different account wins and is never overwritten; a NULL binding takes
+  the configured owner. Fresh cohorts are therefore commandable from
+  the first boot - no post-hoc SQL. The personal .env sets
+  `PLAYERBOT_OWNER_ACCOUNT_ID=4`.
+- Persisted mirror provenance (finding 2): the mirror turn-in gate no
+  longer trusts "the owner also holds this quest" alone - the
+  companion's log can carry rows the mirror path never accepted
+  (fixture seeds, the declared single-quest path). New table
+  `tw_char.bot_mirror_quest (char_guid, quest_id, mirrored_at)`
+  (migration 20260920120000_character, idempotent): the mirror accept
+  records the row and the reward consumes it; the gate requires both
+  the marker and a live owner-log entry (an unmarked row logs a
+  5 s-throttled `no-marker` skip and is left to its own handler). The
+  one-shot legacy backfill at login (`PlayerBot.MirrorMarkerBackfill`,
+  `PLAYERBOT_MIRROR_MARKER_BACKFILL`, default on) marks actionable
+  rows (INCOMPLETE, or COMPLETE + unrewarded) the owner account also
+  holds, capped at 32; labs that seed rows without a mirror accept set
+  it to 0 (Lab F).
 
 ## Labs
 
@@ -205,8 +252,16 @@ dist:%.1f gates:%x` logs all 13 `CanInteractWithNPC` gates as a bitmask:
   sets, rank-aware monotone post-set: a talent rank may be replaced by
   a same-ability rank at spellLevel >= (root cause 9)); companions reach
   level 2; world healthy; personal state untouched.
+- Marker (Lab F): `cd docker; python -m unittest -v
+  test_bot_quest_coop.BotQuestCoopMarkerTests` - 6 tests; persisted
+  mirror provenance (see the KAP-558 review changes section): phase 1
+  quiet window with no marker row, then marker insert + restart and
+  the mirror turn-in with the marker consumed.
+- Lab A (declared) and Lab D (mirror) also assert the marker
+  contract: the declared path writes no marker rows; the mirror path
+  sets exactly one on accept and clears it on the reward.
 
-Both labs run a disposable Compose project with synthetic characters; no
+All labs run a disposable Compose project with synthetic characters; no
 personal containers or personal volumes are touched.
 
 ## Personal deployment plan (one maintenance window)
@@ -218,11 +273,19 @@ personal containers or personal volumes are touched.
    (Name `20260919090000_character`, mirroring init-db-updates.sh).
 3. `.env`: set `PLAYERBOT_PROVISION=Bram,1,1,0;Rowan,1,3,0;Elowen,10,8,1;Clem,3,5,0`
    (replaces the bare `Companion`; keep MIN/MAX 1/1, MIRROR 1, COOP 0).
-4. `UPDATE tw_char.bot_ownership SET owner_account_id=4 WHERE
-   char_guid IN (<the three new cohort guids>)` (Bram guid 2 is already
-   bound to account 4).
+4. `.env`: set `PLAYERBOT_OWNER_ACCOUNT_ID=4` - the provision path
+   binds new cohort characters to account 4 at provision time
+   (pre-existing bindings, e.g. Bram guid 2, are never overwritten).
 5. `docker compose stop world; docker compose up -d world`; boot check.
    The operator character is kicked briefly during the restart.
+
+Post-review update (2026-09-20, KAP-558): step 4's manual `UPDATE`
+superseded - `PLAYERBOT_OWNER_ACCOUNT_ID=4` covers new cohorts, and
+the already-bound cohort keeps its binding. Migration
+20260920120000_character (`bot_mirror_quest`) auto-applies at world
+start through the Database.AutoUpdate path (and to lab DBs via
+init-db-updates.sh); the one-shot mirror-marker backfill marks any
+legacy in-flight mirrors at login.
 
 Ambient population MIN/MAX stays 1/1: the cohort is owned companions
 brought online through `.botrecruit`, not ambient population growth.
