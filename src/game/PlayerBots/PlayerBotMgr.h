@@ -85,6 +85,10 @@ class PlayerBotMgr
         // (character name). Safe to run more than once; completes an interrupted
         // run without touching unrelated records.
         void ProvisionPersistentBot(const std::string& name);
+        // KAP-558 review (finding 1): idempotent ownership publication;
+        // binds the configured owner (confOwnerAccount) at provision time
+        // and never silently replaces a pre-existing owner binding.
+        bool PublishBotOwnership(uint32 guid, uint32 account);
 
         void Update(uint32 diff);
         bool AddOrRemoveBot();
@@ -119,6 +123,7 @@ class PlayerBotMgr
         // through the normal quest APIs only.
         uint32 GetCooperativeQuestId() const { return confCooperativeQuestId; }
         bool GetMirrorOwnerQuests() const { return confMirrorOwnerQuests; } // PORT-030 (KAP-558)
+        bool GetMirrorMarkerBackfill() const { return confMirrorMarkerBackfill; } // KAP-558 review
         bool ForceLogoutDelay() const { return forceLogoutDelay; }
 
         // PORT-018 (KAP-558): the bounded nonblocking party-planner
@@ -196,6 +201,8 @@ class PlayerBotMgr
         uint32 confUpdateDiff;
         bool confDebug;
         std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
+        uint32 confOwnerAccount; // KAP-558 review: human account bound to new provisions (0 = unowned)
+        bool confMirrorMarkerBackfill; // KAP-558 review: one-shot legacy mirror-marker backfill at login (default on)
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)
         uint32 confQuestId; // MVP-006: one declared supported quest (0 = disabled)
         uint32 confCooperativeQuestId; // PORT-023: one declared supported cooperative quest (0 = disabled)

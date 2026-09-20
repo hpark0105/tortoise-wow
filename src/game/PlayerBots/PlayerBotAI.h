@@ -178,6 +178,13 @@ class PlayerBotAI: public PlayerAI
         void CooperativeQuestStep(uint32 diff); // PORT-023/030: one owner-driven cooperative quest action (declared quest, or dynamic kill-only mirror)
         void CooperativeDeclaredQuestStep(uint32 questId, Player* owner); // PORT-023: single declared quest path (value policy + authoritative quest APIs)
         void MirrorOwnerQuestStep(Player* owner); // PORT-030: dynamic mirror of the owner's kill-only quests (no per-quest config)
+        // KAP-558 review (finding 2): persisted mirror provenance
+        // (bot_mirror_quest). Set on mirror accept, cleared on reward;
+        // the turn-in gate requires the marker plus the live owner log.
+        bool HasMirrorQuestMarker(uint32 questId) const;
+        void RecordMirrorQuestMarker(uint32 questId);
+        void ClearMirrorQuestMarker(uint32 questId);
+        void BackfillMirrorQuestMarkers(); // one-shot legacy migration at login
         void CooperativeQuestProgressAnnounce(uint32 questId, Quest const* qInfo, QuestStatusData const* qStatus, uint8 status); // PORT-027: in-world quest status line (progress/complete)
         void ApplyPlannerPreference(uint32_t nowMs); // PORT-019: validated preference -> bounded effect
         bool IsFollowOwnerAvailable() const;

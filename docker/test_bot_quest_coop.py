@@ -43,6 +43,12 @@ Labs (disposable Compose projects, unique, port-free):
   E (PORT-033, negative): a seeded COMPLETE + unrewarded quest row (457)
     the owner does not hold stays untouched while the companion stands at
     a legitimate 457 finisher - the mirror turn-in owner cross-check.
+  F (KAP-558 review): persisted mirror provenance - both logs hold a
+    seeded 457 row and the owner self-binds, so the owner-holds
+    cross-check alone would have rewarded; with no marker row the marker
+    gate keeps phase 1 quiet, and after a marker insert + restart the
+    companion turns in (the reward consumes the marker) while the
+    owner's unmarked row stays untouched.
 
 No human play data, no personal-world restart, no personal containers.
 """
@@ -509,6 +515,19 @@ class BotQuestCoopEligibleTests(unittest.TestCase):
 
     def test_personal_state_untouched(self):
         self.assertEqual(self.before, f.BotFollowTests._personal_state())
+
+    def test_declared_path_leaves_no_mirror_marker(self):
+        # KAP-558 review (finding 2): the declared single-quest path is
+        # not a mirror; its accept/turn-in must not write provenance
+        # rows (only MirrorOwnerQuestStep does), so the declared lab
+        # leaves bot_mirror_quest empty.
+        for guid in (self.O, self.C):
+            self.assertNotIn("[CoopQuest] mirror-marker GUID:%d" % guid,
+                             self.logs)
+        out = p.db_exec(self.base, self.env,
+                        "SELECT COUNT(*) FROM bot_mirror_quest")
+        self.assertEqual(int(out.strip() or "0"), 0,
+                         "declared path must not write mirror markers")
 
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1177,24 @@ class BotQuestCoopFinisherTests(unittest.TestCase):
     def test_personal_state_untouched(self):
         self.assertEqual(self.before, f.BotFollowTests._personal_state())
 
+    def test_mirror_marker_set_and_cleared(self):
+        # KAP-558 review (finding 2): the mirror accept persists the
+        # provenance row and the reward consumes it; the owner
+        # (QuestScript-declared) never gets one.
+        set_line = ("[CoopQuest] mirror-marker GUID:%d quest:%s set"
+                    % (self.C, QUEST_ID))
+        clear_line = ("[CoopQuest] mirror-marker GUID:%d quest:%s cleared"
+                      % (self.C, QUEST_ID))
+        self.assertIn(set_line, self.logs)
+        self.assertIn(clear_line, self.logs)
+        self.assertEqual(self.logs.count(set_line), 1)
+        self.assertEqual(self.logs.count(clear_line), 1)
+        self.assertNotIn("[CoopQuest] mirror-marker GUID:%d" % self.O, self.logs)
+        out = p.db_exec(self.base, self.env,
+                        "SELECT COUNT(*) FROM bot_mirror_quest")
+        self.assertEqual(int(out.strip() or "0"), 0,
+                         "the marker row must be consumed by the reward")
+
 
 # ---------------------------------------------------------------------------
 # Lab E: PORT-033 (KAP-558) - the mirror turn-in owner cross-check,
@@ -1311,6 +1348,272 @@ class BotQuestCoopUnrelatedTests(unittest.TestCase):
 
     def test_world_healthy(self):
         self.assertNotIn("[CRASH]", self.logs)
+
+    def test_personal_state_untouched(self):
+        self.assertEqual(self.before, f.BotFollowTests._personal_state())
+
+
+# ---------------------------------------------------------------------------
+# Lab F: KAP-558 review (finding 2) - persisted mirror provenance.
+# Both characters hold a seeded 457 row COMPLETE + unrewarded, and the
+# owner self-binds so its own mirror step runs too: the owner-holds
+# cross-check passes for both bots, so only the persisted marker gate
+# can keep the turn-in loop quiet. Phase 1 proves that (no turn-in, no
+# reward, no marker row for the whole quiet window). Phase 2 inserts
+# the marker row (the record MirrorOwnerQuestStep would have written on
+# accept), restarts the world, and the companion turns in at the
+# finisher while the owner's unmarked row stays untouched.
+# ---------------------------------------------------------------------------
+class BotQuestCoopMarkerTests(unittest.TestCase):
+    O = 610641
+    C = 610642
+    ONAME = "Mkowner"
+    CNAME = "Mkcomp"
+    FINISHER_GUID = 2500096
+    FINISHER_ENTRY = 6911
+    MARKER_QUEST = "457"
+    REWARD_ITEM_457 = 5405
+    FIXTURE_EXPECT = {
+        6911: {"dmg_min": 0, "dmg_max": 0, "ranged_dmg_min": 0,
+               "ranged_dmg_max": 0, "detection_range": 0},
+    }
+
+    base = env = project = evidence = None
+    row1_c = row1_o = None
+    markers1 = inv1_c = None
+    logs1 = logs2 = ""
+    before = None
+
+    @classmethod
+    def _seed(cls):
+        return (
+            "INSERT INTO tw_char.characters\n"
+            " (guid,account,name,race,class,gender,level,money,position_x,position_y,position_z,map,\n"
+            "  orientation,zone,health,power1,power2,power3,power4,power5,xp,xp_gain)\n"
+            "VALUES\n"
+            " (%d,1000%d,'%s',1,1,0,3,100000,-8947.95,-132.493,83.5312,0,\n"
+            "  0,12,100,0,0,0,0,0,0,1),\n"
+            " (%d,1000%d,'%s',1,1,0,3,100000,-8949.95,-200.493,83.5312,0,\n"
+            "  0,12,100,0,0,0,0,0,0,1);\n"
+            "INSERT INTO tw_char.playerbot (char_guid,chance,ai)\n"
+            " VALUES (%d,100,'Default'),(%d,100,'Default');\n"
+            "INSERT INTO tw_char.bot_ownership (char_guid,account_id,bot_type,provision_version,owner_account_id)\n"
+            # The owner self-binds (Lab D pattern): the owner's own
+            # mirror step runs, so this lab also proves the marker gate
+            # keeps an unmarked owner row from self-rewarding.
+            " VALUES (%d,1000%d,1,2,1000%d),\n"
+            "        (%d,1000%d,1,2,1000%d);\n"
+            # PORT-033 fixture: 457's finisher is the pinned 6911 two
+            # yd from the owner (owner orientation 0: +X is the side
+            # the solo follower rests at), inside the companion's
+            # interaction distance.
+            "DELETE FROM tw_world.creature_involvedrelation WHERE quest=457;\n"
+            "INSERT INTO tw_world.creature_involvedrelation (id, quest) VALUES (6911, 457);\n"
+            "UPDATE tw_world.creature_template SET npc_flags = npc_flags | 2 WHERE entry=6911;\n"
+            # The base 6911 is a hostile damage dealer; zero all damage
+            # + detection and neutralize the faction. Only the
+            # QUESTGIVER flag and the 457 involvedrelation are
+            # load-bearing here.
+            "UPDATE tw_world.creature_template SET faction=1, dmg_min=0, dmg_max=0, "
+            "ranged_dmg_min=0, ranged_dmg_max=0, detection_range=0 WHERE entry=6911;\n"
+            # Both logs carry 457 COMPLETE + unrewarded (fork enum:
+            # status 1) with zero objective progress: rows the mirror
+            # path never accepted.
+            "INSERT INTO tw_char.character_queststatus (guid, quest, status, rewarded)\n"
+            " VALUES (%d, 457, 1, 0), (%d, 457, 1, 0);\n"
+            "INSERT INTO tw_world.creature\n"
+            " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
+            "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
+            "VALUES\n"
+            " (%d,6911,0,-8945.95,-132.493,83.5312,0,600,600,0,100,100,0,1);\n"
+            "DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910\n"
+            " AND position_y BETWEEN -230 AND -100 AND guid NOT IN (%d);\n"
+            % (cls.O, cls.O, cls.ONAME, cls.C, cls.C, cls.CNAME,
+               cls.O, cls.C,
+               cls.O, cls.O, cls.O, cls.C, cls.C, cls.O,
+               cls.C, cls.O,
+               cls.FINISHER_GUID, cls.FINISHER_GUID)
+        )
+
+    @classmethod
+    def setUpClass(cls):
+        p.IMAGE = os.environ.get("PORT023_LAB_IMAGE", "tortoise-local:dev")
+        try:
+            p.command(["docker", "image", "inspect", p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest("%s image not present; build it first" % p.IMAGE)
+        cls.before = f.BotFollowTests._personal_state()
+        cls.project = "tortoise-bot-questcoopm-" + uuid.uuid4().hex[:12]
+        cls.evidence = p.ROOT / "local" / (cls.project + "-"
+                                           + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+        cls.evidence.mkdir(parents=True)
+        world = p.world_env_for("")
+        world.update(PLAYERBOT_ENABLE="1", PLAYERBOT_MIN_BOTS="0", PLAYERBOT_MAX_BOTS="0",
+                     PLAYERBOT_REFRESH="600000", PLAYERBOT_UPDATE_MS="1000", PLAYERBOT_DEBUG="1",
+                     PLAYERBOT_PROVISION="", PLAYERBOT_TEST_LOGIN="%d,%d" % (cls.O, cls.C),
+                     PLAYERBOT_AMBIENT_ACQUIRE="0", PLAYERBOT_WANDER_RADIUS="1",
+                     PLAYERBOT_QUEST_ID="0",
+                     PLAYERBOT_COOPERATIVE_QUEST_ID="0",
+                     PLAYERBOT_MIRROR_OWNER_QUESTS="1",
+                     # The seeded rows are not mirror accepts; the
+                     # one-shot login backfill must not mark them as
+                     # legacy mirrors (that would defeat phase 1).
+                     PLAYERBOT_MIRROR_MARKER_BACKFILL="0",
+                     PLAYER_SAVE_INTERVAL="5000",
+                     # The script re-arms on the phase-2 boot and
+                     # re-forms the party (parties do not persist across
+                     # logout); the follow brings the companion back
+                     # inside the finisher's interaction distance.
+                     PLAYERBOT_FOLLOW_SCRIPT=";".join([
+                         "0:%d:bothold %s" % (cls.O, cls.ONAME),
+                         "4000:%d:bothold %s" % (cls.O, cls.CNAME),
+                         "8000:%d:botrecruit %s" % (cls.O, cls.CNAME),
+                         "12000:%d:botfollow %s" % (cls.O, cls.CNAME),
+                         "60000:%d:bothold %s" % (cls.O, cls.CNAME)]))
+        cls.base = cls.env = None
+        try:
+            cls.base, cls.env = p.boot_lab(cls.project, cls.evidence, world, cls._seed())
+            p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            _assert_fixture_templates(cls.base, cls.env, cls.FIXTURE_EXPECT)
+            cls.logs1 = p.wait_for(cls.base, cls.env,
+                                   lambda text: "hold accepted bot:%s guid:%d"
+                                                % (cls.CNAME, cls.C) in text,
+                                   deadline=600)
+            # Phase 1 quiet window: both logs hold 457 COMPLETE +
+            # unrewarded, the finisher is in range, no marker row.
+            time.sleep(90)
+            cls.logs1 = p.command(["docker", "compose"] + cls.base
+                                  + ["logs", "--no-color", "world"], env=cls.env, timeout=60)
+            (cls.evidence / "world-phase1.log").write_text(cls.logs1, encoding="utf-8")
+            # Phase 1 DB snapshot: the test methods run after
+            # phase 2 has rewarded the marked companion, so a
+            # live query at assert time would read the
+            # post-reward row; the phase 1 claim holds against
+            # the captured pre-stop values.
+            cls.row1_c = _quest_row(cls.base, cls.env, cls.C, cls.MARKER_QUEST)
+            cls.row1_o = _quest_row(cls.base, cls.env, cls.O, cls.MARKER_QUEST)
+            cls.markers1 = cls._marker_count()
+            cls.inv1_c = cls._inv_reward_457(cls.C)
+            # Phase 2: stop the world (clean stop = logout save), record
+            # the provenance a mirror accept would have written while
+            # the world is down (inserting before the stop let the
+            # companion consume the marker on its next quest tick,
+            # before the restart), then boot it again; the companion
+            # turns in at the finisher.
+            boot_marker = "World server is up and running!"
+            boot_count = cls.logs1.count(boot_marker)
+            p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
+            p.db_exec(cls.base, cls.env,
+                      "INSERT INTO bot_mirror_quest (char_guid, quest_id, mirrored_at) "
+                      "VALUES (%d, %s, 0)" % (cls.C, cls.MARKER_QUEST))
+            p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"], env=cls.env)
+            login_marker = "[PlayerBot][Login]  '%s' GUID:%d" % (cls.CNAME, cls.C)
+            p.wait_for(cls.base, cls.env,
+                       lambda text: (text.count(boot_marker) > boot_count
+                                     and login_marker in
+                                     text.rsplit(boot_marker, 1)[-1]),
+                       deadline=480)
+            cls.logs2 = p.wait_for(cls.base, cls.env,
+                                   lambda text: ("[CoopQuest] mirror-turnin GUID:%d quest:%s"
+                                                 % (cls.C, cls.MARKER_QUEST)
+                                                 in text.rsplit(boot_marker, 1)[-1]),
+                                   deadline=300)
+            cls.logs2 = cls.logs2.rsplit(boot_marker, 1)[-1]
+        except BaseException:
+            if cls.base is not None:
+                try:
+                    failure_logs = p.command(["docker", "compose"] + cls.base
+                                             + ["logs", "--no-color", "world"],
+                                             env=cls.env, timeout=60)
+                    (cls.evidence / "world-failure.log").write_text(failure_logs, encoding="utf-8")
+                except Exception:
+                    pass
+                p.force_down(cls.base, cls.env)
+            raise
+        # Let the post-turn-in state reach the periodic save.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if _quest_row(cls.base, cls.env, cls.C, cls.MARKER_QUEST) == "1:1:0:0":
+                break
+            time.sleep(5)
+        (cls.evidence / "world-phase2.log").write_text(cls.logs2, encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.base is not None:
+            p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
+
+    # --- helpers ---------------------------------------------------------
+    @classmethod
+    def _marker_count(cls):
+        out = p.db_exec(cls.base, cls.env,
+                        "SELECT COUNT(*) FROM bot_mirror_quest")
+        return int(out.strip() or "0")
+
+    @classmethod
+    def _inv_reward_457(cls, guid):
+        out = p.db_exec(cls.base, cls.env,
+                        "SELECT COALESCE(COUNT(*),0) FROM character_inventory "
+                        "WHERE guid=%d AND item_template=%d"
+                        % (guid, cls.REWARD_ITEM_457))
+        return int(out.strip() or "0")
+
+    # --- assertions ------------------------------------------------------
+    def test_companion_recruited_and_arrived(self):
+        self.assertIn("party recruit accepted bot:%s guid:%d" % (self.CNAME, self.C), self.logs1)
+        self.assertIn("[PlayerBot][Follow] active GUID:%d leader:%d" % (self.C, self.O), self.logs1)
+
+    def test_phase1_no_marker_no_turnin(self):
+        # The owner-holds cross-check alone would have rewarded both
+        # bots here; the persisted marker gate is what keeps phase 1
+        # quiet. The throttled no-marker skip line is the positive
+        # evidence the gate evaluated the seeded row.
+        self.assertIn("[CoopQuest] mirror turnin skip GUID:%d quest:%s no-marker"
+                      % (self.C, self.MARKER_QUEST), self.logs1)
+        for guid in (self.O, self.C):
+            self.assertNotIn("[CoopQuest] mirror-turnin GUID:%d" % guid, self.logs1)
+            self.assertNotIn("[CoopQuest] mirror-marker GUID:%d" % guid, self.logs1)
+        self.assertEqual(self.row1_c, "1:0:0:0",
+                         "phase 1 snapshot: companion row untouched")
+        self.assertEqual(self.row1_o, "1:0:0:0",
+                         "phase 1 snapshot: owner row untouched")
+        self.assertEqual(self.markers1, 0, "no marker row before phase 2")
+        self.assertEqual(self.inv1_c, 0,
+                         "phase 1 snapshot: no reward item granted")
+
+    def test_phase2_marker_turnin(self):
+        # With the marker row in place the companion turns in at the
+        # finisher and the reward consumes the provenance row.
+        self.assertIn("[CoopQuest] mirror-turnin GUID:%d quest:%s anchor:%d"
+                      % (self.C, self.MARKER_QUEST, self.FINISHER_ENTRY), self.logs2)
+        self.assertIn("[CoopQuest] mirror-marker GUID:%d quest:%s cleared"
+                      % (self.C, self.MARKER_QUEST), self.logs2)
+        self.assertEqual(_quest_row(self.base, self.env, self.C, self.MARKER_QUEST),
+                         "1:1:0:0")
+        xp = p.db_int(self.base, self.env,
+                      "SELECT xp FROM characters WHERE guid=%d" % self.C)
+        money = p.db_int(self.base, self.env,
+                         "SELECT money FROM characters WHERE guid=%d" % self.C)
+        self.assertEqual(xp, 250, "457 RewXP")
+        self.assertEqual(money, 100050, "457 RewOrReqMoney 50c at Rate.Drop.Money=1")
+        self.assertEqual(self._inv_reward_457(self.C), 1, "457 choice item 5405")
+        self.assertEqual(self._marker_count(), 0, "marker consumed by the reward")
+
+    def test_phase2_owner_row_untouched(self):
+        # The owner's own 457 row is unmarked: the mirror gate leaves
+        # it to its own (absent) handler.
+        self.assertNotIn("[CoopQuest] mirror-turnin GUID:%d" % self.O, self.logs2)
+        self.assertNotIn("[CoopQuest] mirror-marker GUID:%d" % self.O, self.logs2)
+        self.assertEqual(_quest_row(self.base, self.env, self.O, self.MARKER_QUEST),
+                         "1:0:0:0")
+        money = p.db_int(self.base, self.env,
+                         "SELECT money FROM characters WHERE guid=%d" % self.O)
+        self.assertEqual(money, 100000)
+        self.assertEqual(self._inv_reward_457(self.O), 0)
+
+    def test_world_healthy(self):
+        self.assertNotIn("[CRASH]", self.logs1)
+        self.assertNotIn("[CRASH]", self.logs2)
 
     def test_personal_state_untouched(self):
         self.assertEqual(self.before, f.BotFollowTests._personal_state())

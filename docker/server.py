@@ -62,6 +62,8 @@ def main():
             "PlayerBot.UpdateMs": os.environ.get("PLAYERBOT_UPDATE_MS", "10000"),
             "PlayerBot.Debug": os.environ.get("PLAYERBOT_DEBUG", "0"),
             "PlayerBot.Provision": '"%s"' % os.environ.get("PLAYERBOT_PROVISION", ""),
+            "PlayerBot.OwnerAccountId": os.environ.get("PLAYERBOT_OWNER_ACCOUNT_ID", "0"),
+            "PlayerBot.MirrorMarkerBackfill": os.environ.get("PLAYERBOT_MIRROR_MARKER_BACKFILL", "1"),
             "PlayerBot.TestLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_LOGIN", ""),
             "PlayerBot.TestStaleLogin": '"%s"' % os.environ.get("PLAYERBOT_TEST_STALE_LOGIN", ""),
             "PlayerBot.TestLogoutScript": '"%s"' % os.environ.get("PLAYERBOT_TEST_LOGOUT_SCRIPT", ""),

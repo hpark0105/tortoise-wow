@@ -1167,6 +1167,7 @@ void PlayerBotAI::OnPlayerLogin()
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
     InitQuestState();
+    BackfillMirrorQuestMarkers(); // KAP-558 review: legacy in-flight mirrors
 }
 
 void PlayerBotAI::OnLevelUp()
@@ -3193,6 +3194,93 @@ void PlayerBotAI::CooperativeDeclaredQuestStep(uint32 questId, Player* owner)
 }
 
 
+// KAP-558 review (finding 2): persisted mirror provenance. "The owner also
+// holds this quest" is not proof the companion mirrored it (a seeded row
+// or the declared quest path can share the quest id), so the mirror
+// turn-in gate requires a marker row in bot_mirror_quest as well. Set on
+// mirror accept, cleared on reward; BackfillMirrorQuestMarkers covers
+// mirrors accepted before the table existed (one-shot legacy migration at
+// login, owner cross-checked against the persisted owner quest logs).
+bool PlayerBotAI::HasMirrorQuestMarker(uint32 questId) const
+{
+    if (!me)
+        return false;
+    QueryResult *res = CharacterDatabase.PQuery(
+        "SELECT 1 FROM bot_mirror_quest WHERE char_guid = %u AND quest_id = %u LIMIT 1",
+        me->GetGUIDLow(), questId);
+    bool found = (res != nullptr);
+    delete res;
+    return found;
+}
+
+void PlayerBotAI::RecordMirrorQuestMarker(uint32 questId)
+{
+    if (!me)
+        return;
+    if (!CharacterDatabase.DirectPExecute(
+            "INSERT INTO bot_mirror_quest (char_guid, quest_id, mirrored_at) "
+            "VALUES (%u, %u, %u) ON DUPLICATE KEY UPDATE mirrored_at = VALUES(mirrored_at)",
+            me->GetGUIDLow(), questId, (uint32)(WorldTimer::getMSTime() / 1000)))
+    {
+        sLog.outError("Playerbot mirror: marker set failed GUID:%u quest:%u", me->GetGUIDLow(), questId);
+        return;
+    }
+    sLog.outString("[CoopQuest] mirror-marker GUID:%u quest:%u set", me->GetGUIDLow(), questId);
+}
+
+void PlayerBotAI::ClearMirrorQuestMarker(uint32 questId)
+{
+    if (!me)
+        return;
+    if (!CharacterDatabase.DirectPExecute(
+            "DELETE FROM bot_mirror_quest WHERE char_guid = %u AND quest_id = %u",
+            me->GetGUIDLow(), questId))
+    {
+        sLog.outError("Playerbot mirror: marker clear failed GUID:%u quest:%u", me->GetGUIDLow(), questId);
+        return;
+    }
+    sLog.outString("[CoopQuest] mirror-marker GUID:%u quest:%u cleared", me->GetGUIDLow(), questId);
+}
+
+void PlayerBotAI::BackfillMirrorQuestMarkers()
+{
+    if (!me || !IsOwnedCompanion() || !sPlayerBotMgr.GetMirrorOwnerQuests() ||
+        !sPlayerBotMgr.GetMirrorMarkerBackfill())
+        return;
+    QueryResult *own = CharacterDatabase.PQuery(
+        "SELECT owner_account_id FROM bot_ownership WHERE char_guid = %u", me->GetGUIDLow());
+    if (!own)
+        return;
+    Field *of = own->Fetch();
+    uint32 ownerAccount = (of && !of->IsNULL()) ? of->GetUInt32() : 0;
+    delete own;
+    if (!ownerAccount)
+        return;
+    // Fork quest-status enum: 1 = COMPLETE, 3 = INCOMPLETE; an in-progress
+    // row or an unrewarded complete row is the actionable legacy state.
+    QueryResult *res = CharacterDatabase.PQuery(
+        "SELECT q.quest FROM character_queststatus q "
+        "WHERE q.guid = %u AND (q.status = 3 OR (q.status = 1 AND q.rewarded = 0)) "
+        "AND EXISTS (SELECT 1 FROM character_queststatus oq "
+        "  WHERE oq.quest = q.quest AND (oq.status = 1 OR oq.status = 3) "
+        "  AND oq.guid IN (SELECT guid FROM characters WHERE account = %u))",
+        me->GetGUIDLow(), ownerAccount);
+    int32 marked = 0;
+    while (res)
+    {
+        Field *f = res->Fetch();
+        RecordMirrorQuestMarker(f->GetUInt32());
+        ++marked;
+        if (marked >= 32) // bound the legacy scan
+            break;
+    }
+    delete res;
+    if (marked && sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[CoopQuest] mirror-marker backfill GUID:%u marked:%d "
+                       "(legacy rows accepted before the persisted marker)",
+                       me->GetGUIDLow(), marked);
+}
+
 void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
 {
     // Accept: the owner holds a mirror-eligible quest the companion does
@@ -3224,6 +3312,7 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
             me->AddQuest(qInfo, anchor);
             if (me->GetQuestStatus(qid) != QUEST_STATUS_NONE)
             {
+                RecordMirrorQuestMarker(qid); // KAP-558 review: persist the provenance
                 sLog.outString("[CoopQuest] mirror-accepted GUID:%u quest:%u anchor:%u",
                                me->GetGUIDLow(), qid, anchor->GetEntry());
                 QuestStatusData const* aStatus = me->GetQuestStatusData(qid);
@@ -3267,22 +3356,40 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
 
     // Turn-in: our own COMPLETE (unrewarded) quest whose finisher is in
     // range; the same handler-shaped sequence as the declared path.
+    // KAP-558 review (finding 3): one clear before the scan; the old
+    // per-entry clear let a later entry erase a walk target armed by an
+    // earlier one in the same tick, handing motion back to normal follow
+    // until the next quest tick. One nearest eligible finisher is tracked
+    // during the scan and armed once after it.
+    _coopTurninWalkGuid = 0;
+    uint32 bestWalkQid = 0;
+    uint64_t bestWalkGuid = 0;
+    float bestWalkDist = 0.0f;
     for (QuestStatusMap::const_iterator it = me->getQuestStatusMap().begin();
          it != me->getQuestStatusMap().end(); ++it)
     {
         uint32 const qid = it->first;
-        _coopTurninWalkGuid = 0; // PORT-034: fresh per quest
         if (it->second.m_status != QUEST_STATUS_COMPLETE || it->second.m_rewarded)
             continue;
-        // PORT-033 (KAP-558): mirror provenance without a persisted
-        // table - the companion's log can only hold quests the mirror or
-        // the declared path accepted, and an owner-log cross-check keeps
-        // a seeded or owner-abandoned quest from being turned in for the
-        // companion. The owner's log persists across restarts, so the
-        // rule survives them.
+        // PORT-033 (KAP-558): the owner-log cross-check keeps an
+        // owner-abandoned quest from being turned in for the companion.
+        // KAP-558 review (finding 2) adds the persisted mirror marker:
+        // "the owner also holds it" alone is not proof the companion
+        // mirrored it (a seeded row or the declared quest path can share
+        // the quest id); the marker in bot_mirror_quest is the provenance
+        // record, and it survives restarts by construction.
         if (owner->GetQuestStatus(qid) == QUEST_STATUS_NONE)
+            continue; // provenance gone
+        if (!HasMirrorQuestMarker(qid))
         {
-            _coopTurninWalkGuid = 0; // PORT-034: provenance gone
+            if (sPlayerBotMgr.IsDebugEnabled() &&
+                WorldTimer::getMSTime() > _coopTurninDebugUntilMs)
+            {
+                _coopTurninDebugUntilMs = WorldTimer::getMSTime() + 5000;
+                sLog.outString("[CoopQuest] mirror turnin skip GUID:%u quest:%u no-marker "
+                               "(accepted outside the mirror path; left to its own handler)",
+                               me->GetGUIDLow(), qid);
+            }
             continue;
         }
         Quest const* qInfo = sObjectMgr.GetQuestTemplate(qid);
@@ -3297,40 +3404,19 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
             // PORT-034 (KAP-558): group credit can complete the
             // quest while the finisher stands out of interaction
             // range (the party, not this companion, landed the
-            // kills). Arm a bounded walk to the finisher when one
-            // is findable and the companion can move; UpdateFollow
-            // steers there at follow-motion level and the next
-            // quest tick acts on arrival.
+            // kills). Track the nearest eligible finisher; one bounded
+            // walk is armed after the scan (KAP-558 review, finding 3).
             Creature* walkTarget =
                 FindCoopQuestFinisher(me, qid, kCoopTurninWalkSearchRange);
             if (walkTarget && !_held && !me->IsInCombat() &&
                 !me->HasUnitState(UNIT_STAT_CAN_NOT_REACT_OR_LOST_CONTROL))
             {
-                _coopTurninWalkGuid = walkTarget->GetObjectGuid().GetRawValue();
-                // PORT-034 (KAP-558): issue the walk here, not only
-                // from UpdateFollow - a companion without an active
-                // follow order never runs the follow path, and its
-                // group credit can still complete out of interaction
-                // range. Hold and combat preempt it: the Hold executor
-                // clears motion after this step, and the combat
-                // executor re-issues its own motion. MotionIdle (not
-                // empty): the MotionMaster keeps the static idle
-                // generator at the stack bottom, so empty() never
-                // observed the no-motion state and the walk was armed
-                // but never issued (cohort run #7).
-                if (MotionIdle())
-                    me->GetMotionMaster()->MovePoint(
-                        0, walkTarget->GetPositionX(), walkTarget->GetPositionY(),
-                        walkTarget->GetPositionZ(), MOVE_PATHFINDING);
-                if (sPlayerBotMgr.IsDebugEnabled() &&
-                    WorldTimer::getMSTime() > _coopTurninWalkLogUntilMs)
+                float const d = me->GetDistance(walkTarget);
+                if (!bestWalkGuid || d < bestWalkDist)
                 {
-                    _coopTurninWalkLogUntilMs = WorldTimer::getMSTime() + 5000;
-                    sLog.outString(
-                        "[CoopQuest] turnin-walk GUID:%u quest:%u finisher:%u "
-                        "dist:%.1f",
-                        me->GetGUIDLow(), qid,
-                        walkTarget->GetGUIDLow(), me->GetDistance(walkTarget));
+                    bestWalkQid = qid;
+                    bestWalkGuid = walkTarget->GetObjectGuid().GetRawValue();
+                    bestWalkDist = d;
                 }
             }
             continue;
@@ -3394,6 +3480,7 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
                            "xpBefore:%u xpAfter:%u",
                            me->GetGUIDLow(), qid, anchor->GetEntry(), xpBefore,
                            me->GetUInt32Value(PLAYER_XP));
+            ClearMirrorQuestMarker(qid); // KAP-558 review: provenance consumed
             _coopTurninWalkGuid = 0; // PORT-034: goal complete
             std::string line = "[Quest] Turned in " + qInfo->GetTitle() + ".";
             me->Say(line.c_str(), LANG_UNIVERSAL);
@@ -3404,6 +3491,36 @@ void PlayerBotAI::MirrorOwnerQuestStep(Player* owner)
             sLog.outString("[CoopQuest] mirror reward denied GUID:%u quest:%u", me->GetGUIDLow(), qid);
         _coopQuestDenyTimer = 5000;
         return;
+    }
+    // KAP-558 review (finding 3): arm the walk once, for the single
+    // nearest eligible finisher found by the scan. PORT-034 (KAP-558):
+    // issue the walk here, not only from UpdateFollow - a companion
+    // without an active follow order never runs the follow path, and
+    // its group credit can still complete out of interaction range.
+    // Hold and combat preempt it: the Hold executor clears motion after
+    // this step, and the combat executor re-issues its own motion.
+    // MotionIdle (not empty): the MotionMaster keeps the static idle
+    // generator at the stack bottom, so empty() never observed the
+    // no-motion state and the walk was armed but never issued
+    // (cohort run #7).
+    if (bestWalkGuid && !_held && !me->IsInCombat() &&
+        !me->HasUnitState(UNIT_STAT_CAN_NOT_REACT_OR_LOST_CONTROL))
+    {
+        _coopTurninWalkGuid = bestWalkGuid;
+        Creature* finisher = me->GetMap()->GetCreature(ObjectGuid(bestWalkGuid));
+        if (finisher && finisher->IsInWorld() && finisher->IsAlive() && MotionIdle())
+            me->GetMotionMaster()->MovePoint(
+                0, finisher->GetPositionX(), finisher->GetPositionY(),
+                finisher->GetPositionZ(), MOVE_PATHFINDING);
+        if (sPlayerBotMgr.IsDebugEnabled() &&
+            WorldTimer::getMSTime() > _coopTurninWalkLogUntilMs)
+        {
+            _coopTurninWalkLogUntilMs = WorldTimer::getMSTime() + 5000;
+            sLog.outString(
+                "[CoopQuest] turnin-walk GUID:%u quest:%u finisher:%u dist:%.1f",
+                me->GetGUIDLow(), bestWalkQid,
+                finisher ? finisher->GetGUIDLow() : 0, bestWalkDist);
+        }
     }
 }
 
@@ -4553,6 +4670,40 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
         return true;
     }
 
+    // KAP-558 review (finding 4): stable per-companion party slot. The
+    // slot point is shared by the out-of-range approach and the in-range
+    // rest position, so compute it once. Slot 0 is the legacy right-side
+    // point (side vector for facing (sin o, cos o) is (cos o, -sin o),
+    // PORT-032), unchanged for a solo follower; each further party slot
+    // steps 45 deg around the leader, so a party of companions fans out
+    // instead of pathing one shared point (crowding + repeated path
+    // corrections). The kFollowRange stop rule still owns arrival, so
+    // the companion never overlaps the player's center.
+    float const lx = leader->GetPositionX();
+    float const ly = leader->GetPositionY();
+    float const lz = leader->GetPositionZ();
+    float const o = leader->GetOrientation();
+    int slot = 0;
+    if (Group* grp = leader->GetGroup())
+    {
+        ObjectGuid const leaderGuid = grp->GetLeaderGuid();
+        if (leaderGuid != me->GetObjectGuid())
+        {
+            for (Group::MemberSlotList::const_iterator it = grp->GetMemberSlots().begin();
+                 it != grp->GetMemberSlots().end(); ++it)
+            {
+                if (it->guid == leaderGuid)
+                    continue;
+                if (it->guid == me->GetObjectGuid())
+                    break;
+                ++slot;
+            }
+        }
+    }
+    float const a = -o + slot * 0.7853982f; // 45 deg per slot
+    float const tx = lx + cosf(a) * kFollowSideOffsetYd;
+    float const ty = ly + sinf(a) * kFollowSideOffsetYd;
+
     if (me->GetDistance(leader) > kFollowRange)
     {
         // PORT-015 (KAP-558): the declared heal is cast-interruptible by
@@ -4577,17 +4728,6 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
         // 2.0 yd (2D) from the last issued target, or the issued target is
         // stale (kFollowPathRefreshMs).
         {
-            float const lx = leader->GetPositionX();
-            float const ly = leader->GetPositionY();
-            float const lz = leader->GetPositionZ();
-            // PORT-032 (KAP-558): natural stance. The path target is a
-            // fixed offset to the leader's right (side vector for facing
-            // (sin o, cos o) is (cos o, -sin o)); the kFollowRange stop
-            // rule still owns arrival, so the companion never overlaps
-            // the player's center.
-            float const o = leader->GetOrientation();
-            float const tx = lx + cosf(o) * kFollowSideOffsetYd;
-            float const ty = ly - sinf(o) * kFollowSideOffsetYd;
             float const dpx = tx - _followPathX;
             float const dpy = ty - _followPathY;
             bool const moved = (dpx * dpx + dpy * dpy) > (2.0f * 2.0f);
@@ -4599,11 +4739,48 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
                 _followPathZ = lz;
                 _followPathAgeMs = 0;
                 me->GetMotionMaster()->MovePoint(0, tx, ty, lz, MOVE_PATHFINDING);
+                if (sPlayerBotMgr.IsDebugEnabled())
+                    sLog.outString("[PlayerBot][Follow] path GUID:%u leader:%u slot:%d "
+                                   "target:%.2f,%.2f",
+                                   me->GetGUIDLow(), leader->GetGUIDLow(), slot, tx, ty);
             }
             else
                 _followPathAgeMs += diff;
         }
         return true;
+    }
+
+    // KAP-558 review (finding 4): in-range rest at the own slot point.
+    // Followers that all stopped at the leader's shared approach point
+    // crowd there; rest at the slot instead. Re-issue only when more
+    // than 0.75 yd from it, so a settled party stays still.
+    {
+        float const dsx = me->GetPositionX() - tx;
+        float const dsy = me->GetPositionY() - ty;
+        if (dsx * dsx + dsy * dsy > 0.75f * 0.75f)
+        {
+            if (me->IsNonMeleeSpellCasted(true))
+            {
+                if (!me->GetMotionMaster()->empty())
+                    me->GetMotionMaster()->Clear(false);
+                return true; // cast-interruptible: hold position (PORT-015)
+            }
+            float const dpx = tx - _followPathX;
+            float const dpy = ty - _followPathY;
+            bool const moved = (dpx * dpx + dpy * dpy) > (0.75f * 0.75f);
+            if (me->GetMotionMaster()->empty() || moved ||
+                _followPathAgeMs >= kFollowPathRefreshMs)
+            {
+                _followPathX = tx;
+                _followPathY = ty;
+                _followPathZ = lz;
+                _followPathAgeMs = 0;
+                me->GetMotionMaster()->MovePoint(0, tx, ty, lz, MOVE_PATHFINDING);
+            }
+            else
+                _followPathAgeMs += diff;
+            return true;
+        }
     }
 
     if (!me->GetMotionMaster()->empty())

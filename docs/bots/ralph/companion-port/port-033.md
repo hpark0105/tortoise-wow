@@ -71,6 +71,13 @@ reconciles skill ranks, and the companion's `AutoLearnSpellsForLevel`
 re-learns the full legal spell set for the level (no persisted
 character_spell rows existed for the new bots).
 
+Post-review update (2026-09-20, KAP-558): the ownership binding above
+was applied manually at the time; provisioning now binds the
+configured owner itself (`PLAYERBOT_OWNER_ACCOUNT_ID` ->
+`PlayerBotMgr::PublishBotOwnership`), so future cohorts need no manual
+SQL, and a pre-existing binding is never overwritten. The personal
+.env carries `PLAYERBOT_OWNER_ACCOUNT_ID=4`.
+
 ## Review assignment
 
 A fresh read-only `park-agent` assignment may review the parser, ownership and resume contract, party formation, planner four-slot behavior and fixture design from bounded verified source cards. Hosted Codex owns implementation choices, diff review, deterministic gates and final acceptance.
