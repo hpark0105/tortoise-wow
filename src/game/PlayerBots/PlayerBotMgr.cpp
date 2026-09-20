@@ -708,6 +708,34 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
             sLog.outError("party recall completion rejected bot:%s guid:%u leader:%u seq:%u",
                           e->name.c_str(), e->playerGUID, leaderGuid, sequence);
     }
+    // PORT-035: a .botinit issued while this bot was offline queued the
+    // login through BotRecall. Finish the setup now that the bot is
+    // in-world: enable reactive defend and arm the owner-follow goal. This
+    // runs after the pending-recruit block above (party membership already
+    // settled when it succeeded); defend and follow are owner commands, so
+    // the setup proceeds independently of the recruit result.
+    if (e->botInitLeaderGuid)
+    {
+        uint32 const leaderGuid = e->botInitLeaderGuid;
+        e->botInitLeaderGuid = 0;
+        Player* leader = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, leaderGuid));
+        if (leader && leader->GetSession())
+        {
+            e->defendEnabled = true;
+            sLog.outString("defend enabled bot:%s guid:%u issuer:%u acc:%u",
+                           e->name.c_str(), e->playerGUID, leaderGuid,
+                           leader->GetSession()->GetAccountId());
+            ++e->followSeq;
+            e->ai->FollowGoal(leaderGuid, e->followSeq);
+            sLog.outString("follow accepted bot:%s guid:%u leader:%u seq:%u",
+                           e->name.c_str(), e->playerGUID, leaderGuid, e->followSeq);
+            sLog.outString("botinit deferred setup bot:%s guid:%u leader:%u",
+                           e->name.c_str(), e->playerGUID, leaderGuid);
+        }
+        else
+            sLog.outError("botinit deferred setup failed bot:%s guid:%u leader:%u (leader not found)",
+                          e->name.c_str(), e->playerGUID, leaderGuid);
+    }
 }
 
 void PlayerBotMgr::Update(uint32 diff)
@@ -2294,6 +2322,65 @@ bool PlayerBotMgr::BotRecall(Player* issuer, const std::string& botName)
     sLog.outString("party recall queued bot:%s guid:%u leader:%u seq:%u",
                    e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// PORT-035 (KAP-558): one-shot owner convenience.
+//
+// Recalls every owned persistent companion (this account's full roster)
+// into the issuer's party, enables reactive defend, and arms owner-follow:
+// the single-command replacement for the .botrecall/.botdefend/.botfollow
+// sequence. BotRecall is idempotent for a companion already in the party
+// (CompletePartyRecruit reports already-member and returns true), so a
+// re-run only re-arms defend and follow. Offline companions queue their
+// login through BotRecall; the botInitLeaderGuid marker carries the
+// defend+follow setup into OnPlayerInWorld when that login completes.
+// Every outcome is logged; the counts are reported through out params for
+// the chat handler summary.
+// ---------------------------------------------------------------------------
+bool PlayerBotMgr::BotInit(Player* issuer, uint32& readyCount, uint32& deferredCount, uint32& skippedCount)
+{
+    readyCount = 0;
+    deferredCount = 0;
+    skippedCount = 0;
+    if (!issuer || !issuer->GetSession())
+        return false;
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    uint32 const issuerGuid = issuer->GetGUIDLow();
+    for (std::map<uint32, PlayerBotEntry*>::iterator it = m_bots.begin(); it != m_bots.end(); ++it)
+    {
+        PlayerBotEntry* e = it->second;
+        if (!e->persistent || e->ownerAccountId != issuerAcc)
+            continue;
+        if (uint32(e->playerGUID) == issuerGuid)
+            continue; // defensive: a human issuer is never its own companion
+        if (!BotRecall(issuer, e->name))
+        {
+            ++skippedCount;
+            continue;
+        }
+        if (e->state == PB_STATE_ONLINE && e->ai)
+        {
+            e->defendEnabled = true;
+            sLog.outString("defend enabled bot:%s guid:%u issuer:%u acc:%u",
+                           e->name.c_str(), e->playerGUID, issuerGuid, issuerAcc);
+            ++e->followSeq;
+            e->ai->FollowGoal(issuerGuid, e->followSeq);
+            sLog.outString("follow accepted bot:%s guid:%u leader:%u seq:%u",
+                           e->name.c_str(), e->playerGUID, issuerGuid, e->followSeq);
+            ++readyCount;
+        }
+        else
+        {
+            e->botInitLeaderGuid = issuerGuid;
+            sLog.outString("botinit deferred bot:%s guid:%u leader:%u",
+                           e->name.c_str(), e->playerGUID, issuerGuid);
+            ++deferredCount;
+        }
+    }
+    sLog.outString("botinit complete issuer:%u acc:%u ready:%u deferred:%u skipped:%u",
+                   issuerGuid, issuerAcc, readyCount, deferredCount, skippedCount);
+    return (readyCount + deferredCount) > 0;
 }
 
 bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
