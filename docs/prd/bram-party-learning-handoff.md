@@ -1,4 +1,4 @@
-﻿# Bram party learning: local-worker handoff
+# Bram party learning: local-worker handoff
 
 Last updated: 2026-09-21
 
@@ -163,3 +163,15 @@ Copy this block at the end of this document after each completed or stopped card
 
 Never replace prior failed evidence with a success-only summary. Retain the failed
 attempt, its cause, and the repair/retest evidence.
+
+### [BL-001] -- 2026-09-21
+- Status: complete pending head review (decision rendered; operator direction pending)
+- Baseline/result commit: ae06f56 / audit-doc commit
+- Worker: none (park-head local-Qwen direct reads); edit permission: no
+- Retrieval: direct current-source reads for this read-only closeout; Tank.h and PlayerBotAI.cpp SHA-256 match the PRD-pinned values (unchanged since baseline); live tw_char read for enrolled tank level/spellbook. No new retrieval search run in this session; the substantive BL-001 investigation used retrieval in the prior session.
+- Changed paths: docs/prd/bram-party-learning-bl001-audit.md (new)
+- Decision and rationale: NOT VIABLE as specified. The supported tank matrix has no rage-costing protective action; the sole recovery Taunt(355) is 0-rage (gated by learned/cooldown/range, never rage), so rage_blocked_recovery_count is structurally 0; the only rage spenders are offensive (suppressing them cannot improve protection); the enrolled tank is below the capability window (level 9, no Taunt 355). Bounded prerequisite proposed (section 8 of the audit).
+- Validation: read-only audit; no code, no SQL, no tests (not applicable). Verified cited source lines: Tank.h 66-140; PlayerBotAI.cpp 1361-1395, 1700-1723, 4498-4514.
+- Evidence: docs/prd/bram-party-learning-bl001-audit.md (sections 2-6, 10); live tw_char characters + character_spell for the enrolled tank.
+- Open risks/uncertainty: reserve_rage has no supported causal path to unprotected_fraction under the current matrix; a viable candidate requires a newly-defined rage-gated protective action or a primary-metric redefinition (both out of scope, to be accepted separately); offense DBC PowerType/cost not yet pinned (Spell.dbc-only, no SQL mirror).
+- Next permitted card: BL-001A (shared contracts + pure baseline extraction), reusable regardless of the reserve outcome; or a head-defined bounded prerequisite card for a viable protective action before BL-005.
