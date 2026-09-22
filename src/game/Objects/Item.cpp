@@ -516,7 +516,9 @@ bool Item::LoadFromDB(uint32 guidLow, ObjectGuid ownerGuid, Field* fields, uint3
 		ApplyModFlag(ITEM_FIELD_FLAGS, ITEM_DYNFLAG_BOA, true);
 	}
 
-    Tokenizer tokens(fields[4].GetString(), ' ', MAX_ITEM_PROTO_SPELLS);
+    // charges is a nullable column; a SQL NULL makes GetString() return null and the
+    // implicit std::string conversion aborts the world on login; GetCppString() maps NULL to empty.
+    Tokenizer tokens(fields[4].GetCppString(), ' ', MAX_ITEM_PROTO_SPELLS);
     if (tokens.size() == MAX_ITEM_PROTO_SPELLS)
         for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
             SetSpellCharges(i, atoi(tokens[i]));
@@ -544,7 +546,7 @@ bool Item::LoadFromDB(uint32 guidLow, ObjectGuid ownerGuid, Field* fields, uint3
         }
     }
 
-    std::string enchants = fields[6].GetString();
+    std::string enchants = fields[6].GetCppString(); // null-safe: column may be NULL
     _LoadIntoDataField(enchants, ITEM_FIELD_ENCHANTMENT, MAX_ENCHANTMENT_SLOT * MAX_ENCHANTMENT_OFFSET);
     SetInt32Value(ITEM_FIELD_RANDOM_PROPERTIES_ID, fields[7].GetInt16());
 
