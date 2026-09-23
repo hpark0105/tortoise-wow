@@ -3983,6 +3983,7 @@ void PlayerBotAI::SellJunkToVendor(Creature* vendor)
 
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
+    PresenceStep(diff);
     // PORT-018 (KAP-558): planner rounds key on party membership, not
     // order state, so the round step runs before the no-order early
     // return.
@@ -4220,6 +4221,35 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     }
     ExecuteCompanion(intent, diff);
     return true;
+}
+
+// Living-world presence: a quiet, deterministic regroup cue makes a party
+// feel inhabited after travel without turning the heartbeat into a chat loop.
+// It is suppressed while dead, fighting, holding, or outside a real party.
+void PlayerBotAI::PresenceStep(uint32 diff)
+{
+    if (_presenceTimerMs > diff)
+    {
+        _presenceTimerMs -= diff;
+        return;
+    }
+    _presenceTimerMs = 0;
+
+    if (!me || !IsOwnedCompanion() || !me->IsAlive() || me->IsInCombat() ||
+        !_following || !_followReached || _held || !me->GetGroup())
+        return;
+
+    Companion::Personality::Profile const profile = botEntry
+        ? (Companion::Personality::Profile)botEntry->personalityProfile
+        : Companion::Personality::Profile::None;
+    char const* line = Companion::Presence::RegroupLine(profile, _presenceSequence++);
+    me->Say(line, LANG_UNIVERSAL);
+    _presenceTimerMs = Companion::Presence::kBaseIntervalMs +
+        (me->GetGUIDLow() % 3) * Companion::Presence::kIntervalJitterMs;
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Presence] regroup GUID:%u profile:%s seq:%u next:%u",
+                       me->GetGUIDLow(), Companion::Personality::ProfileName(profile),
+                       _presenceSequence - 1, _presenceTimerMs);
 }
 
 // ---------------------------------------------------------------------------
