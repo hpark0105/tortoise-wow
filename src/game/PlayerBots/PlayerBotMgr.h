@@ -5,6 +5,7 @@
 #include "Policies/Singleton.h"
 #include "Database/DatabaseEnv.h"
 #include "Companion/PlannerTransport.h"
+#include "Companion/LearningStore.h"
 #include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
 
@@ -13,6 +14,7 @@
 class PlayerBotAI;
 class WorldSession;
 class Player;
+class Group;
 
 enum PlayerBotState
 {
@@ -134,9 +136,25 @@ class PlayerBotMgr
         // PORT-022 (KAP-558): bounded nonblocking companion-conversation
         // transport (disabled when PlayerBot.ConversationServiceURL is empty).
         Companion::Conversation::ConversationTransport& ConversationTransport() { return m_conversationTransport; }
+        // BL-003 (KAP-558): bounded async encounter-summary persistence.
+        Companion::Learning::Store& LearningStore() { return m_learningStore; }
+        bool QueueLearningRollback(uint32 charGuid);
+        bool QueueLearningStatus(uint32 charGuid, uint32 issuerGuid = 0, bool explain = false);
+        bool BotLearn(Player* issuer, const std::string& action, const std::string& botName);
+        // BOTLEARN-START-ALL: batch learning start for every persistent
+        // registered companion owned by the issuer's account. One
+        // serialized async statement through the learning store (never a
+        // per-bot loop; the maintenance queue is bounded). candidateCount
+        // is the honest in-memory roster count; zero candidates reject.
+        bool BotLearnStartAll(Player* issuer, uint32& candidateCount);
         // PORT-018 (KAP-558): live bot lookup by low GUID (world thread,
         // no allocation).
         PlayerBotEntry* FindBotByGuid(uint32 guid) const;
+
+        // TW-OWNER-PARTY-LOGOUT: true when the group contains the logging-out
+        // owner plus at least one registered companion owned by that account,
+        // and no other members.
+        bool IsOwnedCompanionGroup(Group const* group, uint32 logoutGuid, uint32 accountId) const;
 
         // TW-007 (contract C4): only verified persistent (roster) bots may save,
         // and only through a session that uses their approved bound identity.
@@ -190,6 +208,8 @@ class PlayerBotMgr
         PlayerBotStats& GetStats(){ return m_stats; }
         void Start() { enable = true; }
     protected:
+        void OnLearningStatusResult(QueryResult* result, uint32 charGuid,
+                                    uint32 issuerGuid, uint32 explain);
         /* Combien de temps depuis la derniere MaJ ?*/
         uint32 m_elapsedTime;
         uint32 m_lastBotsRefresh;
@@ -200,6 +220,9 @@ class PlayerBotMgr
         std::map<uint32 /*pl guid*/, PlayerBotEntry*> m_bots;
         Companion::Planner::PlannerTransport m_plannerTransport;
     Companion::Conversation::ConversationTransport m_conversationTransport; // PORT-022
+    Companion::Learning::Store m_learningStore; // BL-003
+    uint32 m_learningRetentionMs = 0; // BL-003: bounded retention pace (ms)
+    bool m_learningStoreDisabledLogged = false; // BL-003: one error line per disable
     Companion::Personality::Profile m_personalityProfile = Companion::Personality::Profile::None; // PORT-019: declared profile (config now; PORT-020 persists)
         std::map<uint32 /*account*/, uint32> m_tempBots;
         PlayerBotStats m_stats;

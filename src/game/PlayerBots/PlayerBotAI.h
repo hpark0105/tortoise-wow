@@ -5,6 +5,8 @@
 #include "WorldSession.h"
 #include "Companion/Policy.h"
 #include "Companion/Combat.h"
+#include "Companion/Encounter.h"
+#include "Companion/LearningStore.h"
 #include "Companion/Tank.h"
 #include "Companion/Healer.h"
 #include "Companion/Damage.h"
@@ -44,6 +46,11 @@ class PlayerBotAI: public PlayerAI
         virtual void OnPacketReceived(WorldPacket const* /*packet*/) {} // server has sent a packet to this session
         virtual void SendFakePacket(uint16 /*opcode*/) {} // ai has scheduled delayed response to opcode
         virtual void UpdateAI(const uint32 /*diff*/) override; // Handle delayed teleports
+        // BL-002: observe-only encounter recording; no behavior change.
+        void OnDamageDealt(Unit* target, uint32 effectiveDamage, uint32 spellId,
+                           bool periodic, bool targetDied) override;
+        void OnDamageTaken(Unit* attacker, uint32 effectiveDamage, uint32 spellId,
+                           bool periodic, bool victimDied) override;
         virtual void OnPlayerLogin();
         // TW-014 (KAP-557): owner-directed follow/stop goal. While active
         // the follow state machine preempts normal behavior; a goal whose
@@ -71,6 +78,8 @@ class PlayerBotAI: public PlayerAI
         // dead corpse pending loot are explicit slots with named transitions
         // (Companion::Combat::TargetSlots); owner orders never live here.
         Companion::Combat::TargetSlots _targets;
+        Companion::Encounter::Recorder _encounter; // BL-002: observe-only encounter recorder (value-only)
+        uint32 _learningEncounterSeq = 0; // BL-003: per-session encounter sequence (1-based)
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
         uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
@@ -170,6 +179,14 @@ class PlayerBotAI: public PlayerAI
         // Companion::Combat::Request); the per-source debug lines are
         // the fixture contract.
         bool ExecuteCombat(Companion::Combat::Request const& req, uint32 diff);
+        // BL-002: begin or continue the observe-only encounter for a legal
+        // engagement (a new target closes the prior one as target-changed
+        // before beginning; duration ticks once per ExecuteCombat call).
+        void EncounterEngage(Companion::Combat::Source source, Companion::Combat::OffenseRoute route,
+                             uint64_t targetGuid, uint32 diff);
+        // BL-003: persist a completed encounter summary to the learning store
+        // (owned companions only; no-op otherwise).
+        void TryPersistLearningSummary();
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);

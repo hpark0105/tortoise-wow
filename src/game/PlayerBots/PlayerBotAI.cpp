@@ -1162,6 +1162,7 @@ bool PlayerBotAI::UpdateQuestPhases(uint32 diff)
 
 void PlayerBotAI::OnPlayerLogin()
 {
+    _encounter.Reset(); // BL-002: encounters never span a login
     _lastLevel = me ? me->GetLevel() : 0;
     RepairBrokenEquipment();
     AutoLearnSpellsForLevel();
@@ -1318,11 +1319,122 @@ static Companion::Combat::CastReject MapCastReject(uint32 res)
 // the ordinary-attack fallback. NoEligibleAbility is never a rejected
 // cast: spell:0 plus an unknown-failure value never crosses the boundary as
 // one. Behavior is unchanged by this card.
+
+// ---------------------------------------------------------------------------
+// BL-002 (KAP-558): observe-only encounter recording. The recorder is a
+// pure value module (Companion/Encounter.h); these adapters drive it from
+// the shared combat executor, the owner-order handlers and the PlayerAI
+// damage observation callbacks. None of this changes combat behavior:
+// no decision, timer, target slot, log or fallback is altered by it.
+// ---------------------------------------------------------------------------
+// The shared cast vocabulary -> the encounter recorder's cast outcome.
+static Companion::Encounter::CastOutcome ToEncounterOutcome(Companion::Combat::CastOutcome o)
+{
+    switch (o)
+    {
+        case Companion::Combat::CastOutcome::Accepted:
+            return Companion::Encounter::CastOutcome::Accepted;
+        case Companion::Combat::CastOutcome::Rejected:
+            return Companion::Encounter::CastOutcome::Rejected;
+        case Companion::Combat::CastOutcome::NoEligibleAbility:
+            return Companion::Encounter::CastOutcome::NoEligibleAbility;
+        case Companion::Combat::CastOutcome::None:
+        default:
+            return Companion::Encounter::CastOutcome::None;
+    }
+}
+
+void PlayerBotAI::EncounterEngage(Companion::Combat::Source source,
+                                  Companion::Combat::OffenseRoute route,
+                                  uint64_t targetGuid, uint32 diff)
+{
+    if (_encounter.GetState() == Companion::Encounter::State::Active &&
+        _encounter.GetTargetGuid() != targetGuid)
+    {
+        _encounter.End(Companion::Encounter::EndReason::TargetChanged);
+        // BL-003: the prior completion is persisted before the new
+        // target begins (exactly once, before reset).
+        TryPersistLearningSummary();
+    }
+    _encounter.Begin(targetGuid, static_cast<uint32_t>(source),
+                     static_cast<uint32_t>(route));
+    _encounter.Tick(diff);
+}
+
+// BL-003 (KAP-558): persist a completed encounter summary to the
+// learning store exactly once, before the recorder resets. Owned
+// companions only. The store assigns the delivery identity
+// (process nonce + monotonic sequence); a failed enqueue drops the
+// summary by design (the FIFO is bounded and fail-closed).
+void PlayerBotAI::TryPersistLearningSummary()
+{
+    if (_encounter.GetState() != Companion::Encounter::State::Complete)
+        return;
+    if (IsOwnedCompanion() && me)
+    {
+        Companion::Encounter::Recorder::Summary const r = _encounter.GetSummary();
+        Companion::Learning::SummaryFifo::Summary s;
+        s.charGuid = me->GetGUIDLow();
+        s.targetGuid = r.targetGuid; // full 64-bit creature GUID
+        s.sequence = ++_learningEncounterSeq; // per-session, 1-based
+        s.policyVersion = 0; // BL-003: learned behavior stays disabled
+        s.playbookVersion = 0;
+        s.source = r.source;
+        s.route = r.route;
+        s.durationMs = r.durationMs;
+        s.effectiveDamage = r.effectiveDamage;
+        s.periodicDamage = r.periodicDamage;
+        s.damageTaken = r.damageTaken;
+        s.deaths = r.deaths;
+        s.ownerOverrides = r.ownerOverrides;
+        s.decisions = r.decisions;
+        s.castsAccepted = r.castsAccepted;
+        s.castsRejected = r.castsRejected;
+        s.castsNoEligible = r.castsNoEligible;
+        s.eventCount = r.eventCount;
+        s.endReason = static_cast<uint32_t>(r.endReason);
+        s.complete = r.complete;
+        s.overflow = r.overflow;
+        s.efficacyEligible = r.efficacyEligible;
+        s.capturedAt = static_cast<uint32_t>(time(nullptr));
+        if (!sPlayerBotMgr.LearningStore().Enqueue(s))
+            sLog.outError("[PlayerBot][Learning] enqueue dropped GUID:%u reason:%s",
+                          me->GetGUIDLow(), Companion::Encounter::EndReasonName(r.endReason));
+    }
+    _encounter.Reset(); // BL-003: persist before reset
+}
+
+void PlayerBotAI::OnDamageDealt(Unit* target, uint32 effectiveDamage, uint32 spellId,
+                                bool periodic, bool targetDied)
+{
+    if (!target)
+        return;
+    // Target-matching happens in the recorder: damage to any other victim
+    // is ignored, and a matching target death completes the encounter.
+    _encounter.RecordDamageDealt(target->GetObjectGuid().GetRawValue(), effectiveDamage,
+                                 spellId, periodic, targetDied);
+    // BL-003: a matching target death completes the encounter; persist
+    // the summary before the recorder resets (no-op otherwise).
+    TryPersistLearningSummary();
+}
+
+void PlayerBotAI::OnDamageTaken(Unit* /*attacker*/, uint32 effectiveDamage, uint32 spellId,
+                                bool periodic, bool victimDied)
+{
+    // Direct damage taken by the companion while the encounter is active;
+    // the companion's death completes it as a safety outcome.
+    _encounter.RecordDamageTaken(effectiveDamage, spellId, periodic, victimDied);
+    // BL-003: companion death completes the encounter; persist before reset.
+    TryPersistLearningSummary();
+}
 bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
 {
     uint32 const spellId = SelectOffensiveSpell(target);
+    // BL-002: the rotation decision boundary (0 = no eligible ability).
+    _encounter.RecordDecision(spellId, false);
     if (!spellId)
     {
+        _encounter.RecordCastResult(0, Companion::Encounter::CastOutcome::NoEligibleAbility);
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot][Offense] no-eligible-ability GUID:%u t:%u fallback:ordinary-attack",
                            me->GetGUIDLow(), target->GetGUIDLow());
@@ -1332,6 +1444,8 @@ bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
     SpellCastResult const castRes = me->CastSpell(target, spellId, false);
     Companion::Combat::CastReport const report =
         Companion::Combat::ReportCast(spellId, (uint32)castRes, MapCastReject((uint32)castRes));
+    // BL-002: the cast result at the existing cast boundary.
+    _encounter.RecordCastResult(spellId, ToEncounterOutcome(report.outcome));
     if (report.outcome == Companion::Combat::CastOutcome::Accepted)
     {
         _abilityTimer = urand(2000, 4000);
@@ -1400,6 +1514,8 @@ void PlayerBotAI::TankTauntStep(Unit* target)
     SpellCastResult const res = me->CastSpell(target, spellId, false);
     Companion::Combat::CastReport const report =
         Companion::Combat::ReportCast(spellId, (uint32)res, MapCastReject((uint32)res));
+    // BL-002: the taunt cast result (recorded only while an encounter is active).
+    _encounter.RecordCastResult(spellId, ToEncounterOutcome(report.outcome));
     if (report.outcome == Companion::Combat::CastOutcome::Accepted)
     {
         if (sPlayerBotMgr.IsDebugEnabled())
@@ -1851,7 +1967,11 @@ uint32 PlayerBotAI::SelectOffensiveSpell(Unit* target) const
         profiles.push_back(p);
     }
 
-    return Companion::Combat::SelectExecutable(profiles, query).selected;
+    // BL-001A: baseline plan (identity permutation); a future non-baseline
+    // plan will be supplied here after validation.
+    Companion::Combat::RotationPlan const plan =
+        Companion::Combat::RotationPlan::Baseline(static_cast<int>(profiles.size()));
+    return Companion::Combat::SelectExecutable(profiles, query, plan).selected;
 }
 
 uint32 PlayerBotAI::GetHighestKnownSpell(uint32 spellId) const
@@ -2460,6 +2580,11 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
                            seq, _followSeq, me->GetGUIDLow());
         return;
     }
+    // BL-002: an accepted owner order closes an active encounter as owner
+    // override before mutating target/order state.
+    _encounter.RecordOwnerOverride();
+    // BL-003: persist the closed encounter before the new order state.
+    TryPersistLearningSummary();
     _followSeq = seq;
     _followLeaderGuid = leaderGuid;
     _followGroupId = me->GetGroup() ? me->GetGroup()->GetId() : 0;
@@ -2482,6 +2607,11 @@ void PlayerBotAI::FollowStop()
 {
     if (!me)
         return;
+    // BL-002: an accepted owner order closes an active encounter as owner
+    // override before mutating target/order state.
+    _encounter.RecordOwnerOverride();
+    // BL-003: persist the closed encounter before the new order state.
+    TryPersistLearningSummary();
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
@@ -2496,6 +2626,11 @@ void PlayerBotAI::Hold(uint32 seq)
 {
     if (!me || seq <= _followSeq)
         return;
+    // BL-002: an accepted owner order closes an active encounter as owner
+    // override before mutating target/order state.
+    _encounter.RecordOwnerOverride();
+    // BL-003: persist the closed encounter before the new order state.
+    TryPersistLearningSummary();
     _followSeq = seq;
     _held = true;
     _following = false;
@@ -2530,6 +2665,11 @@ void PlayerBotAI::AssistTarget(uint64_t targetGuid, uint32 seq)
                            seq, _followSeq, me->GetGUIDLow());
         return;
     }
+    // BL-002: an accepted owner order closes an active encounter as owner
+    // override before mutating target/order state.
+    _encounter.RecordOwnerOverride();
+    // BL-003: persist the closed encounter before the new order state.
+    TryPersistLearningSummary();
     _followSeq = seq;
     _assistTargetGuid = targetGuid;
     _held = false; // a new authorized order cancels the hold
@@ -4354,6 +4494,12 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
     Companion::Combat::Verdict const verdict = Companion::Combat::Verify(req, snap);
     if (!verdict.legal)
     {
+        // BL-002: a dropped engagement closes any active encounter with its
+        // explicit reason (idempotent: a matching-target death already
+        // ended it as target-death).
+        _encounter.End(Companion::Encounter::EndReason::TargetInvalid);
+        // BL-003: persist the closed encounter before the engagement drops.
+        TryPersistLearningSummary();
         switch (req.source)
         {
             case Companion::Combat::Source::Assist:
@@ -4406,6 +4552,10 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
     // like an invalid target and the prior order resumes.
     if (PursuitLeashTick(target, diff))
     {
+        // BL-002: an expired pursuit closes any active encounter.
+        _encounter.End(Companion::Encounter::EndReason::LeashExpired);
+        // BL-003: persist the closed encounter before the pursuit ends.
+        TryPersistLearningSummary();
         switch (req.source)
         {
             case Companion::Combat::Source::Assist:
@@ -4433,6 +4583,15 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
         }
         return false;
     }
+    // BL-002: observe-only encounter recording (no behavior change): the
+    // legal engagement begins or continues one encounter and ticks its
+    // duration once per ExecuteCombat call; a new target closes the prior
+    // encounter as target-changed before beginning.
+    EncounterEngage(req.source,
+                    Companion::Combat::RouteOffense(
+                        req.source,
+                        req.source == Companion::Combat::Source::Assist && IsDeclaredTank()),
+                    req.target, diff);
     if (_abilityTimer > diff)
         _abilityTimer -= diff;
     else
@@ -4495,7 +4654,14 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
     // step: measured normal threat, a taunt when the protected party member
     // holds it, and the ordinary attack otherwise. The [Tank] threat line
     // is the fixture contract, sampled on the 2 s combat pacing above.
-    if (req.source == Companion::Combat::Source::Assist && IsDeclaredTank())
+    // BL-001B: the per-source offense route is a pure value decision in
+    // Companion::Combat; only an Assist with the declared-tank gate true
+    // owns the Tank branch (below); every other source takes the rotation path.
+    Companion::Combat::OffenseRoute const route =
+        Companion::Combat::RouteOffense(
+            req.source,
+            req.source == Companion::Combat::Source::Assist && IsDeclaredTank());
+    if (route == Companion::Combat::OffenseRoute::Tank)
     {
         Companion::Tank::Observation const obs = FillTankObservation(target);
         if (sPlayerBotMgr.IsDebugEnabled())
@@ -4503,6 +4669,10 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
                            me->GetGUIDLow(), obs.tankThreat, obs.ownerThreat,
                            target->GetGUIDLow(), obs.victimGuid);
         Companion::Tank::Decision const decision = Companion::Tank::SelectAction(obs);
+        // BL-002: the tank decision boundary (Taunt or ordinary attack).
+        _encounter.RecordDecision(
+            decision.action == Companion::Tank::Action::Taunt
+                ? Companion::Tank::kDeclaredTankTaunt : 0, true);
         if (decision.action == Companion::Tank::Action::Taunt)
             TankTauntStep(target);
         else

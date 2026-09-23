@@ -1,7 +1,9 @@
 #ifndef TORTOISE_COMPANION_COMBAT_H
 #define TORTOISE_COMPANION_COMBAT_H
 #include <cfloat>
+#include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 // PORT-012 (KAP-558): value-only combat decision module for one owned
 // companion. Like Policy.h, everything here is a pure function over
@@ -38,6 +40,11 @@ namespace Combat
 // Engagement source and per-tick request
 // ---------------------------------------------------------------------------
 enum class Source { Assist, ContinueCombat, Defend, Damage };
+enum class OffenseRoute { Rotation, Tank };
+inline OffenseRoute RouteOffense(Source source, bool declaredTank)
+{ return source == Source::Assist && declaredTank ? OffenseRoute::Tank : OffenseRoute::Rotation; }
+inline const char* OffenseRouteName(OffenseRoute r)
+{ return r == OffenseRoute::Tank ? "tank" : "rotation"; }
 
 // Values only: the target GUID, the source intent, the order generation and
 // the engagement distance limit. The executor re-resolves the target from
@@ -394,6 +401,32 @@ struct AbilityDecision
     Block firstBlock = Block::None; // first blocker among known profiles (diagnostic)
 };
 
+struct RotationPlan
+{
+    static constexpr int kMaxProfiles = 8;
+    int8_t order[kMaxProfiles] = {};
+    uint8_t count = 0;
+    RotationPlan() = default;
+    RotationPlan(std::initializer_list<int> values)
+    {
+        count = static_cast<uint8_t>(values.size() <= kMaxProfiles ? values.size() : kMaxProfiles + 1);
+        size_t i = 0;
+        for (int v : values) { if (i < kMaxProfiles) order[i++] = static_cast<int8_t>(v); }
+    }
+    static RotationPlan Baseline(int n)
+    {
+        RotationPlan p; if (n < 0 || n > kMaxProfiles) return p;
+        p.count = static_cast<uint8_t>(n); for (int i=0;i<n;++i) p.order[i]=static_cast<int8_t>(i); return p;
+    }
+    bool CompatibleWith(int n) const
+    {
+        if (n < 0 || n > kMaxProfiles || count != n) return false;
+        bool seen[kMaxProfiles] = {};
+        for (int i=0;i<n;++i) { int v=order[i]; if(v<0||v>=n||seen[v]) return false; seen[v]=true; }
+        return true;
+    }
+};
+
 // Deterministic selection: the first profile in table order that is known
 // and currently usable wins. A known-but-blocked profile never becomes the
 // selected cast; its first blocker is recorded (diagnostic) so the adapter
@@ -438,6 +471,97 @@ inline AbilityDecision SelectExecutable(ProfileRange const& profiles, AbilityQue
     }
     return d;
 }
+
+template <typename ProfileRange>
+inline AbilityDecision SelectExecutable(ProfileRange const& profiles, AbilityQuery const& q, RotationPlan const& plan)
+{
+    int n = static_cast<int>(profiles.size());
+    if (!plan.CompatibleWith(n)) return SelectExecutable(profiles, q);
+    AbilityDecision d;
+    for (int index : plan.order)
+    {
+        if (index < 0 || index >= n) continue;
+        AbilityProfile const& p = profiles[static_cast<size_t>(index)];
+        if (!p.known) continue; d.anyKnown = true; Block b = Block::None;
+        if (p.obsoleteRank) b=Block::ObsoleteRank; else if(p.passive) b=Block::Passive; else if(p.onNextSwing) b=Block::OnNextSwing;
+        else if(p.powerType<AbilityQuery::kPowerSlots && p.powerCost>q.power[p.powerType]) b=Block::Unaffordable; else if(p.onCooldown) b=Block::Cooldown;
+        else if(!p.stanceOk) b=Block::StanceForm; else if(!p.reagentOk) b=Block::Reagent; else if(!p.targetOk) b=Block::TargetInappropriate;
+        else if((p.minRange>0.0f&&q.distance<p.minRange)||(p.maxRange>0.0f&&q.distance>p.maxRange)||(p.meleeOnly&&!q.meleeReach)) b=Block::OutOfRange;
+        if (b==Block::None) { d.selected=p.id; return d; } if(d.firstBlock==Block::None) d.firstBlock=b;
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// BL-005: value-only warrior playbook adapter
+// ---------------------------------------------------------------------------
+// Converts a validated candidate ability-ID ordering (from the BL-004
+// tactical protocol) into a fixed RotationPlan index permutation for
+// SelectExecutable. Pure value-only: no heap allocation, no engine access,
+// no LLM, no persistence.
+//
+// The adapter validates the candidate against the live capability catalog:
+//   - unknown: any ability ID not present in the catalog
+//   - duplicate: the same ability ID appears more than once
+//   - missing: the candidate count does not match the catalog count
+//   - oversized: the candidate count exceeds kMaxProfiles
+//   - capability-version-mismatch: the expected version does not match
+//     the live catalog version
+//
+// On any rejection, returns the baseline identity plan (no behavior change).
+// Every existing eligibility check, on-next-swing exclusion, tank route,
+// and class behavior is preserved: the adapter only reorders the scan;
+// it does not alter profile facts or block classification.
+struct WarriorPlaybookAdapter
+{
+    static RotationPlan Adapt(uint32_t const* candidateIds, uint32_t candidateCount,
+                              uint32_t expectedVersion,
+                              uint32_t catalogVersion,
+                              uint32_t const* catalogIds,
+                              uint32_t catalogCount)
+    {
+        RotationPlan baseline = RotationPlan::Baseline(static_cast<int>(catalogCount));
+
+        if (!candidateIds || !catalogIds)
+            return baseline;
+        if (catalogCount == 0 || candidateCount > RotationPlan::kMaxProfiles)
+            return baseline;
+        if (expectedVersion != catalogVersion)
+            return baseline;
+        if (candidateCount != catalogCount)
+            return baseline;
+
+        // Map each candidate ID to its catalog index; reject on unknown or duplicate.
+        int8_t indices[RotationPlan::kMaxProfiles] = {};
+        for (uint32_t i = 0; i < candidateCount; ++i)
+        {
+            uint32_t id = candidateIds[i];
+            for (uint32_t j = 0; j < i; ++j)
+                if (candidateIds[j] == id)
+                    return baseline;
+            int32_t idx = -1;
+            for (uint32_t k = 0; k < catalogCount; ++k)
+            {
+                if (catalogIds[k] == id)
+                {
+                    idx = static_cast<int32_t>(k);
+                    break;
+                }
+            }
+            if (idx < 0)
+                return baseline;
+            indices[i] = static_cast<int8_t>(idx);
+        }
+
+        RotationPlan plan;
+        for (uint32_t i = 0; i < candidateCount; ++i)
+        {
+            plan.order[i] = indices[i];
+            plan.count = static_cast<uint8_t>(i + 1);
+        }
+        return plan;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Cast-result vocabulary (PORT-011 outcomes, value form)

@@ -29,6 +29,7 @@ Safety invariants:
 """
 import hashlib
 import json
+import time
 import os
 
 import fake_planner as fp
@@ -238,3 +239,51 @@ def build_wire_response(request, steps, round_ms, tick_ms):
     return fp.build_response(
         request, wire,
         capture_offset_ms=capture_offset_ms(round_ms, tick_ms))
+
+
+# BL-006: bounded learning prompt contracts. These helpers are deliberately
+# sidecar-only and have no database or engine authority.
+LEARNING_SCHEMA_VERSION = 2
+LEARNING_MAX_BYTES = 16 * 1024
+LEARNING_MAX_LESSONS = 3
+LEARNING_MAX_SUMMARIES = 5
+
+def _clean_text(value, limit=160):
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError("invalid bounded text")
+    if any(x in value.lower() for x in ("spellid", "target_guid", "coordinate", "password", "token")):
+        raise ValueError("unsafe evidence")
+    return value
+
+def build_learning_request(capability_fingerprint, playbook_version, lessons=(), summaries=(), request_id=""):
+    if not isinstance(capability_fingerprint, str) or not capability_fingerprint or len(capability_fingerprint) > 128:
+        raise ValueError("invalid capability fingerprint")
+    if not isinstance(playbook_version, int) or playbook_version < 0:
+        raise ValueError("invalid playbook version")
+    if not isinstance(request_id, str) or len(request_id) > 96:
+        raise ValueError("invalid request id")
+    lessons = list(lessons); summaries = list(summaries)
+    if len(lessons) > LEARNING_MAX_LESSONS or len(summaries) > LEARNING_MAX_SUMMARIES:
+        raise ValueError("evidence limit")
+    safe_lessons = []
+    for lesson in lessons:
+        if not isinstance(lesson, dict) or set(lesson) - {"id", "text", "evidence_count"}:
+            raise ValueError("invalid lesson")
+        if not isinstance(lesson.get("id"), str) or not isinstance(lesson.get("evidence_count"), int) or lesson["evidence_count"] < 1:
+            raise ValueError("fabricated lesson")
+        safe_lessons.append({"id": _clean_text(lesson["id"], 64), "text": _clean_text(lesson.get("text", "")), "evidence_count": lesson["evidence_count"]})
+    safe_summaries = []
+    for summary in summaries:
+        if not isinstance(summary, dict) or set(summary) - {"id", "outcome", "duration_ms"}:
+            raise ValueError("invalid summary")
+        if not isinstance(summary.get("id"), str) or not isinstance(summary.get("duration_ms"), int) or summary["duration_ms"] < 0:
+            raise ValueError("fabricated summary")
+        safe_summaries.append({"id": _clean_text(summary["id"], 64), "outcome": _clean_text(summary.get("outcome", "")), "duration_ms": summary["duration_ms"]})
+    doc = {"schema_version": LEARNING_SCHEMA_VERSION, "request_id": request_id, "capability_fingerprint": capability_fingerprint, "playbook_version": playbook_version, "lessons": safe_lessons, "summaries": safe_summaries}
+    encoded = json.dumps(doc, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if len(encoded) > LEARNING_MAX_BYTES:
+        raise ValueError("request too large")
+    return doc
+
+def inference_metadata(start_ms, end_ms, contended=False):
+    return {"latency_ms": max(0, int(end_ms) - int(start_ms)), "contended": bool(contended)}

@@ -19542,6 +19542,83 @@ bool ChatHandler::HandleBotInitCommand(char* args)
     return ok;
 }
 
+// BL-008: owner-only learning lifecycle control. The manager resolves the
+// current bot name through the ownership binding and serializes every mutation
+// or status read through the learning store's one-in-flight async slot.
+bool ChatHandler::HandleBotLearnCommand(char* args)
+{
+    Player* issuer = GetPlayer();
+    if (!issuer || !issuer->GetSession())
+        return false;
+
+    std::string rest(args ? args : "");
+    size_t begin = rest.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos)
+    {
+        SendSysMessage("Usage: .botlearn start <botname|all> | status|pause|resume|explain|rollback <botname>");
+        return false;
+    }
+    rest = rest.substr(begin);
+    size_t split = rest.find_first_of(" \t\r\n");
+    if (split == std::string::npos)
+    {
+        SendSysMessage("Usage: .botlearn start <botname|all> | status|pause|resume|explain|rollback <botname>");
+        return false;
+    }
+    std::string action = rest.substr(0, split);
+    begin = rest.find_first_not_of(" \t\r\n", split);
+    std::string botName = begin == std::string::npos ? "" : rest.substr(begin);
+    split = botName.find_first_of(" \t\r\n");
+    if (split != std::string::npos)
+        botName.resize(split);
+    for (size_t i = 0; i < action.size(); ++i)
+        action[i] = static_cast<char>(tolower(static_cast<unsigned char>(action[i])));
+
+    if (botName.empty() ||
+        (action != "start" && action != "status" && action != "pause" &&
+         action != "resume" && action != "explain" && action != "rollback"))
+    {
+        SendSysMessage("Usage: .botlearn start <botname|all> | status|pause|resume|explain|rollback <botname>");
+        return false;
+    }
+
+    // BOTLEARN-START-ALL: the "all" target token is case-insensitive and
+    // only valid with start; every other action with "all" fails closed
+    // with a clear message instead of reaching the per-bot resolver.
+    std::string targetKey = botName;
+    for (size_t i = 0; i < targetKey.size(); ++i)
+        targetKey[i] = static_cast<char>(tolower(static_cast<unsigned char>(targetKey[i])));
+    if (targetKey == "all")
+    {
+        if (action != "start")
+        {
+            SendSysMessage("The 'all' target is only supported with start: .botlearn start all.");
+            return false;
+        }
+        uint32 candidates = 0;
+        if (!sPlayerBotMgr.BotLearnStartAll(issuer, candidates))
+        {
+            SendSysMessage("Bot learning start all rejected (no owned companions or store busy).");
+            return false;
+        }
+        PSendSysMessage("Bot learning start queued for %u owned companion(s); use .botlearn status <botname> to confirm.",
+                        candidates);
+        return true;
+    }
+
+    if (!sPlayerBotMgr.BotLearn(issuer, action, botName))
+    {
+        SendSysMessage("Bot learning command rejected (not owner, busy, or invalid state).");
+        return false;
+    }
+    if (action == "status" || action == "explain")
+        SendSysMessage("Bot learning status query queued.");
+    else
+        PSendSysMessage("Bot learning %s queued; use .botlearn status %s to confirm.",
+                        action.c_str(), botName.c_str());
+    return true;
+}
+
 bool ChatHandler::HandleBotPartyCommand(char* args, uint8 action)
 {
     Player* p = GetPlayer();

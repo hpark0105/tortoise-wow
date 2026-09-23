@@ -39,6 +39,7 @@
 #include "MapManager.h"
 #include "ObjectAccessor.h"
 #include "CreatureAI.h"
+#include "PlayerAI.h"
 #include "TemporarySummon.h"
 #include "Formulas.h"
 #include "Pet.h"
@@ -1062,6 +1063,30 @@ uint32 Unit::DealDamage(Unit* pVictim, uint32 damage, CleanDamage const* cleanDa
         {
             pVictim->RemoveAura(PLAINSRUNNING_SPELL, EFFECT_INDEX_0);
             pVictim->RemoveAura(PLAINSRUNNING_SPELL, EFFECT_INDEX_1);
+        }
+    }
+
+    // BL-002: observe-only damage observation for player AIs (no-op base;
+    // PlayerBotAI feeds its encounter recorder). Only a direct player
+    // attacker or a direct player victim is reported - pet/owner damage is
+    // not attributed to a player here. Effective damage is the victim's
+    // actual health loss in this operation, so overkill is never counted
+    // and zero/blocked damage produces no callback.
+    if (pVictim->GetHealth() < health)
+    {
+        uint32 const effective = health - pVictim->GetHealth();
+        bool const died = !pVictim->IsAlive();
+        uint32 const spellId = spellProto ? spellProto->Id : 0;
+        bool const periodic = (damagetype == DOT);
+        if (IsPlayer())
+        {
+            if (PlayerAI* ai = ToPlayer()->AI())
+                ai->OnDamageDealt(pVictim, effective, spellId, periodic, died);
+        }
+        if (pVictim->IsPlayer())
+        {
+            if (PlayerAI* ai = pVictim->ToPlayer()->AI())
+                ai->OnDamageTaken(this, effective, spellId, periodic, died);
         }
     }
 

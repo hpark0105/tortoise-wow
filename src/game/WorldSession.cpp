@@ -768,6 +768,20 @@ void WorldSession::LogoutPlayer(bool Save)
         ///- If the player is in a group (or invited), remove him. If the group if then only 1 person, disband the group.
         _player->UninviteFromGroup();
 
+        // TW-OWNER-PARTY-LOGOUT: disband a party made only of this owner and
+        // their owned companions, preventing stale bot-only groups on relogin.
+        if (_player->GetGroup() && !_player->GetGroup()->isRaidGroup()
+            && !_player->GetGroup()->isBGGroup() && m_Socket
+            && sPlayerBotMgr.IsOwnedCompanionGroup(_player->GetGroup(),
+                                                   _player->GetGUIDLow(),
+                                                   GetAccountId()))
+        {
+            sLog.outString("TW-OWNER-PARTY-LOGOUT: disband companion-only party "
+                           "owner:%u account:%u group:%u",
+                           _player->GetGUIDLow(), GetAccountId(),
+                           _player->GetGroup()->GetId());
+            _player->GetGroup()->Disband();
+        }
         // remove player from the group if he is:
         // a) in group; b) not in raid group; c) logging out normally (not being kicked or disconnected)
         if (_player->GetGroup() && !_player->GetGroup()->isRaidGroup() && m_Socket)
