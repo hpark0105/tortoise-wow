@@ -1,7 +1,7 @@
 ---
 id: TW-BRAM-LEARN-001
 title: Bram Learns Warrior Tactics During Party Play
-version: 1.1
+version: 1.2
 status: implementation-specification-not-accepted
 created: 2026-09-21
 owner: hpark
@@ -18,18 +18,19 @@ uses a local LLM to choose bounded tactics, records real outcomes, and gradually
 retains useful tactical changes across logout and server restart. Evaluation runs
 automatically alongside normal play; the owner need not operate a separate lab.
 
-The first proposed learnable behavior, subject to the capability audit, is rage spending: compare the established ability
-selection with a conservative rage-reserve policy while preserving immediate
-legal defensive threat recovery. The model selects a supported tactic and proposes
-evidence-backed revisions. Code executes actions, computes metrics and decides
-whether evidence qualifies a revision for retention. This is persistent memory
-and policy adaptation, not model-weight training.
+The first learnable behavior is ability priority: compare the established warrior
+selection with a finite, capability-compatible priority plan over Bram's currently
+learned legal abilities. The model proposes a plan and evidence-backed revisions;
+C++ executes actions, computes outcomes, and decides whether evidence qualifies a
+revision for retention. This is persistent memory and policy adaptation, not
+model-weight training.
 
 A prerequisite is a bounded combat-policy refactor: expose a runtime playbook to
 the existing ability selection and execution paths before connecting learning.
 The LLM proposes validated data, never edits C++, recompiles the server or invents
-new executable mechanics. Version 1 tunes only the rage reserve; learned ability
-reordering and additional class behaviors remain later extensions.
+new executable mechanics. Version 1 permits only a finite ordering and declared
+gates for capability-catalog actions; it does not permit arbitrary conditions,
+targets, spell IDs, or novel class behavior.
 
 User-authorized work in this session is this specification. Implementation is
 handed off through the bounded cards below; this document does not deploy changes,
@@ -88,12 +89,21 @@ lists and the Assist-only tank bypass make a reserve check added solely to
 SelectOffensiveSpell insufficient. This documentation update uses already-inspected
 source evidence; no new runtime behavior or independent worker acceptance is claimed.
 
+Revision 1.2 incorporates BL-001's valid rejection of `reserve_rage`: Taunt costs
+no rage and current rage spenders are offensive, so the old experiment cannot prove
+the protection metric. The rejection does not block current-level learning. Bram's
+level-9 legal ability set is the first catalog/playbook candidate surface; each
+candidate declares an outcome metric appropriate to its goal and retains all
+existing safety constraints.
+
 # 3. Capability audit and first experiment
 
-BL-001 must verify Bram's supported warrior capabilities from current source and
-matching game data using synthetic fixtures. Do not infer live level from old docs,
-hardcode Bram's name/GUID, change his level, or assume Taunt exists below level 10.
-Enrollment resolves the owned character once and stores its stable identity locally.
+BL-001 is complete: `reserve_rage` is NOT viable as specified. See
+`bram-party-learning-bl001-audit.md`. Do not revive that candidate unless a later,
+separately accepted capability and metric make it causal. Its findings do not mean
+Bram must wait for level 10: at every level the catalog exposes only abilities he
+actually knows and can legally execute. Enrollment resolves the owned character
+once and stores its stable identity locally; it never changes level or spells.
 
 Audit Assist, ContinueCombat and Defend separately below and above the declared tank
 gate. Document which selector runs, whether it spends rage, and which decisions a
@@ -101,29 +111,25 @@ reserve can change. The existing tank Assist branch is Taunt/ordinary-attack onl
 adding a reserve to the generic selector must not be presented as tuning that branch.
 Include the actual .botinit follow/defend path in the acceptance matrix.
 
-First policy vocabulary:
+First playbook vocabulary:
 
-- baseline: unchanged established deterministic warrior selection.
-- reserve_rage: suppress optional rage-spending offense when its verified cost
-  would leave less than the selected reserve; ordinary attacks continue.
-- Reserve values: 0, 10 or 20 displayed rage points, converted explicitly to the
-  core's internal units. Never apply the reserve to an eligible emergency recovery.
-- One candidate changes only the reserve; no concurrent change to target selection,
-  spell priority, stance, pull policy, equipment or other companions.
-- Model chooses baseline or the active candidate; trial assignment constrains the
-  choice so the model cannot selectively test only easy encounters. Out-of-arm
-  suggestions are recorded as rejected, never silently executed.
+- baseline: the exact current per-class selection order and eligibility checks.
+- rotation_plan: an ordered subset of catalog action keys plus one declared gate
+  per action from a finite vocabulary: always-eligible, target-aura-missing,
+  resource-at-least-cost, range-valid, melee-reachable, or cooldown-ready.
+- A plan may reorder or omit only actions available in Bram's current capability
+  fingerprint. It cannot add target selection, new pulls, stance changes, gear,
+  other companions, raw spell IDs, or conditions outside the catalog.
+- The model proposes `baseline` or the preassigned trial plan; trial assignment,
+  not the model, determines which eligible encounter exposes a candidate.
+- A candidate changes one declared priority/gate difference from its parent. All
+  other plan entries and safety behavior remain fixed, making outcome attribution
+  possible.
 
-BL-001 must establish at least one legitimate optional rage spender and a measurable
-reason retaining rage can help within a supported capability window. If the current
-controller has no such action, return a bounded prerequisite proposal to the head;
-do not invent an ability or widen the experiment. Observe-only mode remains useful.
-Establish a causal mechanism relevant to the declared primary metric: retaining
-rage must enable a supported action that could improve protection. Taunt must not
-be presumed to need a rage reserve. A reserve that merely skips damage with no
-supported benefit is not a viable experiment. If adding actions to tank Assist is
-needed, specify and accept that behavior change separately from baseline extraction;
-establish a new versioned baseline before evaluating learning against it.
+BL-001R must audit the first current-level rotation candidate against the catalog
+and matching game data. It must name the capability fingerprint, legal action keys,
+the one changed priority/gate, an expected causal mechanism, and a metric bundle.
+If no candidate can be measured honestly, retain baseline and continue observation.
 Queued on-next-swing abilities remain unsupported unless their lifecycle is repaired
 and independently accepted in a separate prerequisite. Never silently unlock them.
 
@@ -143,7 +149,7 @@ are selected in the bounded architecture card, not mandated as an engine rewrite
 | Component | Contract | Reuse boundary |
 | --- | --- | --- |
 | Ability catalog | Supported action keys, verified effects, resource units/cost semantics, target types and restrictions; resolve current learned ranks and live availability separately | Shared format, class-specific declarations |
-| Runtime playbook | Immutable schema/version, class/role/capability compatibility, baseline priority references and bounded settings | Shared format; initial LLM mutation permits only warrior rage reserve |
+| Runtime playbook | Immutable schema/version, class/role/capability compatibility, baseline priorities and finite catalog gates | Shared format; initial LLM mutation permits only warrior catalog priority/gate changes |
 | Decision selector | Consume observation, capability set, playbook and engagement source; produce typed action/target plus decision reason | Shared eligibility machinery with explicit role policies |
 | Executor | Re-resolve targets, enforce live legality and orders, perform normal engine actions and report outcomes | Existing integration reused; no async engine pointers |
 
@@ -214,9 +220,10 @@ personal game records to coding workers or retrieval services.
 
 Planner input adds the accepted playbook and at most three applicable lessons.
 Output is strict JSON: schema_version, request_id, capability_fingerprint,
-playbook_version, tactic enum and bounded reserve value. Reject unknown fields,
-invalid types, unauthorized tactics, stale capabilities or out-of-arm choices.
-Do not permit executable conditions or model-selected raw spell IDs/coordinates.
+playbook_version, plan_id, ordered catalog-action keys and finite gate identifiers.
+Reject unknown fields, duplicate or unavailable keys, invalid types, unauthorized
+plans, stale capabilities, unknown gates, and out-of-arm choices. Do not permit
+executable conditions or model-selected raw spell IDs/coordinates.
 
 Keep original server capture time immutable. The sidecar must not move capture
 timestamps forward to make old observations appear fresh. The existing v1 adapter's
@@ -270,6 +277,12 @@ Required coded metrics:
   rage waste at cap, attempted/rejected/wasted abilities and fallback duration.
 - Input integrity, missing events, inference rejection/latency and owner overrides.
 
+Every candidate declares one primary outcome and fixed safety constraints before it
+is assigned. Tank-protection candidates use `unprotected_fraction` and recovery
+latency. Current-level rotation candidates use effective hostile damage per active
+combat second and action-effect rate, while preserving all safety constraints. Do
+not reuse a protection metric for a candidate that cannot causally affect protection.
+
 Snapshots carry capability/gear/level fingerprints, party role composition, enemy
 template/relative level/count, starting resource bands and policy versions. Ordinary
 owner damage/healing is recorded context. Explicit tactical overrides interrupt the
@@ -300,10 +313,10 @@ Initial promotion rule is deliberately conservative and versioned:
 
 - Evaluate efficacy once at 30 complete encounters per arm in a comparable stratum;
   inspect safety continuously. No repeated significance peeking or optional stopping.
-- Primary metric is unprotected_fraction; candidate must improve the mean by at
-  least 10% relatively and have a 95% bootstrap interval for the mean difference
-  entirely below zero. Resample encounter records, never individual tick samples;
-  persist evaluator version and random seed. Zero baseline means no demonstrated gain.
+- The predeclared primary metric must improve by at least 10% relatively and have
+  a 95% bootstrap interval for the mean difference entirely in the favorable
+  direction. Resample encounter records, never individual tick samples; persist
+  evaluator version and random seed. A zero/undefined baseline is inconclusive.
 - Candidate party damage/second and median encounter duration must each be <=110%
   of baseline; retain separate death and emergency-recovery constraints.
 - Any candidate-arm party death, suppressed emergency recovery, new pull, unauthorized
@@ -382,21 +395,25 @@ module names are design suggestions; exact allowed paths are fixed by each card.
 | BL-002 | Pure encounter/value contracts and recorder hooks; new Companion/Encounter module | Boundaries, attribution, caps, overflow, deaths, interruption, deterministic metrics; no behavior change |
 | BL-003 | Ordered memory migration, bounded async persistence and version lifecycle | Isolated DB migration twice, duplicate delivery, writer failure, restart, rollback and retention tests |
 | BL-004 | Tactical protocol v2, fake adapter and validator; preserve v1 | Invalid/stale/reordered/capability-change/owner-hold tests; immutable timestamps; bounded queues |
-| BL-005 | Warrior reserve policy through the accepted shared interface | Actual legal rage behavior on declared applicable sources, unchanged inapplicable paths, reserve unit conversion, emergency preemption and unsupported ability tests; no silent new tank rotation |
+| BL-001R | Current-level warrior rotation-candidate audit after the catalog exists | Capability fingerprint, one priority/gate delta, causal metric bundle, legal fixture and explicit no-candidate result if unsupported |
+| BL-005 | Warrior finite-priority plan through the accepted shared interface | Current-level legal ability ordering/gates, unchanged inapplicable paths, baseline parity, owner/emergency preemption and unsupported-ability tests; no silent new rotation mechanics |
 | BL-006 | Real planner/reflection prompts and memory selection | Strict schemas, fake inference, fabricated evidence rejection, latency/contention measurement, no direct DB authority |
 | BL-007 | Candidate evaluator, matching, assignment and auto mode transitions | Synthetic improvement/no effect/regression, sparse/zero baseline, exclusions, no repeated peeking, restart and atomic activation |
 | BL-008 | Owner commands, notices, status and explain | Ownership/intruder, renamed character, party/session boundaries, pause/resume/rollback tests |
 | BL-009 | Cumulative disposable runtime and controlled real-model qualification | Actual behavior difference, off-line fallback, two-boot persistence, engine metrics vs recorder, model budgets |
 | BL-010 | Owner party-play pilot and final report | Normal .botinit session, real observations, evidence-backed status, restart continuity; honest inconclusive results allowed |
 
-Execution order is BL-001 -> BL-001A -> BL-001B -> BL-002 through BL-010. The two
-inserted cards preserve existing identifiers. BL-001A/B are prerequisite refactor
-work, independently accepted before learning is connected. If the audit identifies
-a required gameplay capability addition, the head defines a separate bounded card
-and accepts its new baseline before BL-005; workers cannot silently expand scope.
+Execution order is BL-001 (closed: reserve rejected) -> BL-001A -> BL-001B ->
+BL-001R -> BL-002 through BL-010. BL-001A/B are prerequisite refactor work,
+independently accepted before learning is connected. BL-001R establishes a viable
+current-level rotation candidate; it does not wait for Taunt or level 10. If an
+audit identifies a required gameplay capability addition, the head defines a
+separate bounded card and accepts its new baseline before BL-005; workers cannot
+silently expand scope.
 Dependencies are sequential unless the head provides an explicitly independent
-bounded assignment. BL-001 must resolve viability before building a learning policy
-with no useful action. Do not mark the feature finished at shadow-only recording.
+bounded assignment. Each executable candidate must resolve viability before it is
+tested, but baseline extraction and observe-only recording may proceed without a
+candidate. Do not mark the feature finished at shadow-only recording.
 BL-009 qualifies automated trials; BL-010 establishes in-game usability. Measured
 improvement is a separate claim and requires the promotion evidence above.
 
@@ -436,7 +453,7 @@ activation; migration retry; restart restores accepted policy; rollback preserve
 character state; sparse encounters never produce invented improvement.
 
 Refactor-specific gates: source-by-source parity for Assist/ContinueCombat/Defend;
-warrior below/above the Taunt capability gate; actual .botinit defend flow; unchanged
+warrior current-level and below/above the Taunt capability gate; actual .botinit defend flow; unchanged
 default spell ordering, rank resolution and on-next-swing exclusion; mage value-level
 baseline parity; class/role-incompatible playbook rejection; resource units; owner
 orders and emergency actions unaffected by tuning. Verify candidate exposure reaches
@@ -456,6 +473,7 @@ disable/rollback usable without removing character data or reverting the databas
 
 Final report distinguishes implemented behavior, deterministic/synthetic evidence,
 real-model evidence, owner client observations, pending acceptance and actual
-improvement. Retrieval remains paused: no sync or embedding/derived-write counts
-are claimed. When the operator resumes retrieval, follow normal tracked-source sync
-and report its counts. Do not change existing Phase 2 acceptance flags as a side effect.
+improvement. Retrieval services were restored on 2026-09-21; verify status and
+freshness before each substantial card, sync every tracked-source change, and report
+its embedding and derived-write counts. Do not change existing Phase 2 acceptance
+flags as a side effect.

@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "Database/DatabaseImpl.h"
 #include "Policies/SingletonImp.h"
 #include "PlayerBotMgr.h"
 #include "ObjectMgr.h"
@@ -113,6 +114,8 @@ PlayerBotMgr::~PlayerBotMgr()
     m_plannerTransport.Shutdown();
     // PORT-022 (KAP-558): same bounded shutdown for conversation.
     m_conversationTransport.Shutdown();
+    // BL-003 (KAP-558): bounded shutdown for learning store.
+    m_learningStore.Shutdown();
 }
 
 void PlayerBotMgr::LoadConfig()
@@ -350,6 +353,20 @@ void PlayerBotMgr::LoadConfig()
     m_staleProbeGuid = (staleTokenValid && staleProbeGuid != 0) ? staleProbeGuid : 0;
     if (m_staleProbeGuid)
         sLog.outString("Playerbot: stale-probe armed for %u (MVP-002 lab probe)", m_staleProbeGuid);
+    // BL-003 (KAP-558): the learning store nonce is process-unique (wall
+    // start time + system entropy + process id); it is never the server
+    // uptime clock, so rows from earlier processes can be told apart.
+    m_learningStore.Init(Companion::Learning::MakeProcessNonce());
+    // One write at a time through the repository's async callback
+    // convention (CharacterDatabase.PExecuteCallback / SqlDelayThread);
+    // the callback carries its own lifetime-safe completion state.
+    m_learningStore.SetSubmitter(
+        [](char const* sql, std::function<void(bool)>* cb)
+        { return CharacterDatabase.PExecuteCallback("%s", cb, sql); });
+    // Async startup repair: rows that earlier processes captured but
+    // never completed are marked interrupted through the same
+    // single-in-flight slot as encounter writes (no race, no sync query).
+    m_learningStore.MarkStaleInterrupted();
     // PORT-008 (KAP-558) lab-only probe (default off): deterministic owner
     // logout/relogin at fixed offsets after the owner's own login. Format:
     // <guid>,<logoutMs>,<reloginMs>. Never set outside the Docker lab.
@@ -738,6 +755,100 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
     }
 }
 
+bool PlayerBotMgr::QueueLearningRollback(uint32 charGuid)
+{
+    if (!charGuid || !m_learningStore.BeginExternalControl(charGuid, true))
+        return false;
+    if (!CharacterDatabase.BeginTransaction(charGuid))
+    {
+        m_learningStore.CompleteExternalControl(false);
+        return false;
+    }
+    if (!CharacterDatabase.PExecute(Companion::Learning::kControlRollbackAuditSqlTemplate, charGuid) ||
+        !CharacterDatabase.PExecute(Companion::Learning::kControlRollbackProfileSqlTemplate, charGuid))
+    {
+        CharacterDatabase.RollbackTransaction();
+        m_learningStore.CompleteExternalControl(false);
+        return false;
+    }
+    std::function<void(bool)> callback = m_learningStore.ExternalCompletionCallback();
+    if (!CharacterDatabase.CommitTransaction(&callback))
+    {
+        m_learningStore.CompleteExternalControl(false);
+        return false;
+    }
+    return true;
+}
+
+bool PlayerBotMgr::QueueLearningStatus(uint32 charGuid, uint32 issuerGuid, bool explain)
+{
+    if (!charGuid || !m_learningStore.BeginExternalControl(charGuid, false))
+        return false;
+
+    if (!CharacterDatabase.AsyncPQuery(this, &PlayerBotMgr::OnLearningStatusResult,
+                                       charGuid, issuerGuid, explain ? 1u : 0u,
+                                       Companion::Learning::kControlStatusSqlTemplate,
+                                       charGuid))
+    {
+        m_learningStore.CompleteExternalControl(false);
+        return false;
+    }
+    return true;
+}
+
+void PlayerBotMgr::OnLearningStatusResult(QueryResult* result, uint32 charGuid,
+                                          uint32 issuerGuid, uint32 explain)
+{
+    auto reportFailure = [issuerGuid]()
+    {
+        Player* issuer = issuerGuid ? sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, issuerGuid)) : nullptr;
+        if (issuer && issuer->GetSession())
+            ChatHandler(issuer->GetSession()).SendSysMessage("Bot learning status unavailable (missing or invalid profile state).");
+    };
+    if (!result || result->GetFieldCount() != 3 || result->GetRowCount() != 1)
+    {
+        m_learningStore.CompleteExternalControl(false);
+        reportFailure();
+        return;
+    }
+
+    Field* fields = result->Fetch();
+    if (!fields)
+    {
+        m_learningStore.CompleteExternalControl(false);
+        reportFailure();
+        return;
+    }
+
+    Companion::Learning::ControlStatus status;
+    status.valid = true;
+    status.charGuid = charGuid;
+    status.mode = fields[0].GetUInt32();
+    status.activePlaybookVersion = fields[1].GetUInt32();
+    status.expectedPlaybookVersion = fields[2].GetUInt32();
+    status.candidateState = static_cast<uint32>(Companion::Learning::CandidateState::None);
+    status.evidenceCount = 0;
+    status.insufficientEvidence = true;
+
+    if (!Companion::Learning::IsValidControlMode(status.mode))
+    {
+        m_learningStore.CompleteExternalControl(false);
+        reportFailure();
+        return;
+    }
+    m_learningStore.CompleteExternalControl(true, &status);
+
+    Player* issuer = issuerGuid ? sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, issuerGuid)) : nullptr;
+    if (!issuer || !issuer->GetSession())
+        return;
+    ChatHandler handler(issuer->GetSession());
+    static char const* const modes[] = {"disabled", "observe", "shadow", "trial", "paused"};
+    handler.PSendSysMessage("Bot learning: mode=%s, playbook=%u, evidence=%u (insufficient evidence).",
+                            modes[status.mode], status.activePlaybookVersion, status.evidenceCount);
+    if (explain)
+        handler.SendSysMessage("No improvement is claimed: no qualified candidate evidence is available; baseline play remains active.");
+}
+
 void PlayerBotMgr::Update(uint32 diff)
 {
     // Bots temporaires
@@ -771,6 +882,27 @@ void PlayerBotMgr::Update(uint32 diff)
     }
 
     m_elapsedTime += diff;
+    // BL-003 (KAP-558): bounded async learning-store pump (never blocks).
+    m_learningStore.Pump();
+    // BL-003: bounded retention pace (10 minutes) through the store.
+    m_learningRetentionMs += diff;
+    if (m_learningRetentionMs >= 600000)
+    {
+        m_learningRetentionMs = 0;
+        m_learningStore.QueueRetention();
+    }
+    if (m_learningStore.WriterDisabled() && !m_learningStoreDisabledLogged)
+    {
+        m_learningStoreDisabledLogged = true;
+        sLog.outError("[PlayerBot][Learning] store disabled "
+                      "submit-failures:%u db-failures:%u truncated:%u "
+                      "maintenance-failures:%u maintenance-dropped:%u",
+                      m_learningStore.SubmitFailureCount(),
+                      m_learningStore.DbFailureCount(),
+                      m_learningStore.TruncatedCount(),
+                      m_learningStore.MaintenanceFailureCount(),
+                      m_learningStore.MaintenanceDroppedCount());
+    }
     // MVP-002 (KAP-552): deterministic stale-completion probe (lab-only,
     // config-gated; cheap state check when disabled).
     UpdateStaleLoginProbe();
@@ -1691,6 +1823,97 @@ PlayerBotEntry* PlayerBotMgr::FindBotByGuid(uint32 guid) const
 {
     std::map<uint32, PlayerBotEntry*>::const_iterator const it = m_bots.find(guid);
     return (it != m_bots.end()) ? it->second : nullptr;
+}
+
+bool PlayerBotMgr::IsOwnedCompanionGroup(Group const* group, uint32 logoutGuid, uint32 accountId) const
+{
+    if (!group)
+        return false;
+
+    bool ownerFound = false;
+    bool companionFound = false;
+    for (const auto& slot : group->GetMemberSlots())
+    {
+        if (slot.guid.GetCounter() == logoutGuid)
+        {
+            ownerFound = true;
+            continue;
+        }
+        PlayerBotEntry* entry = FindBotByGuid(slot.guid.GetCounter());
+        if (!entry || entry->ownerAccountId != accountId)
+            return false;
+        companionFound = true;
+    }
+    return ownerFound && companionFound;
+}
+
+bool PlayerBotMgr::BotLearn(Player* issuer, const std::string& action,
+                            const std::string& botName)
+{
+    if (!issuer || !issuer->GetSession() || action.empty() || botName.empty())
+        return false;
+    PlayerBotEntry* entry = FindBotByName(botName);
+    if (!ValidatePartyOwner(issuer, entry, "learn"))
+        return false;
+
+    uint32 const charGuid = static_cast<uint32>(entry->playerGUID);
+    bool queued = false;
+    if (action == "start")
+        queued = m_learningStore.QueueControl(Companion::Learning::ControlAction::Start, charGuid);
+    else if (action == "pause")
+        queued = m_learningStore.QueueControl(Companion::Learning::ControlAction::Pause, charGuid);
+    else if (action == "resume")
+        queued = m_learningStore.QueueControl(Companion::Learning::ControlAction::Resume, charGuid);
+    else if (action == "rollback")
+        queued = QueueLearningRollback(charGuid);
+    else if (action == "status" || action == "explain")
+        queued = QueueLearningStatus(charGuid, issuer->GetGUIDLow(), action == "explain");
+    else
+        return false;
+
+    if (queued)
+        sLog.outString("learning %s queued bot:%s guid:%u issuer:%u", action.c_str(),
+                       entry->name.c_str(), charGuid, issuer->GetGUIDLow());
+    else
+        sLog.outError("learning %s rejected busy/invalid bot:%s guid:%u issuer:%u", action.c_str(),
+                      entry->name.c_str(), charGuid, issuer->GetGUIDLow());
+    return queued;
+}
+
+// BOTLEARN-START-ALL: batch start for every persistent registered
+// companion owned by the issuer's account. The candidate count is an
+// in-memory roster walk with the same ownership filter as BotInit; the
+// mutation is one batch statement queued through the learning store's
+// serialized maintenance slot, so any roster size consumes exactly one
+// slot. Zero candidates reject: the statement would be an empty no-op.
+bool PlayerBotMgr::BotLearnStartAll(Player* issuer, uint32& candidateCount)
+{
+    candidateCount = 0;
+    if (!issuer || !issuer->GetSession())
+        return false;
+    uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (!issuerAcc)
+        return false;
+    for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
+    {
+        PlayerBotEntry const* e = it->second;
+        if (e && e->persistent && e->ownerAccountId == issuerAcc)
+            ++candidateCount;
+    }
+    if (candidateCount == 0)
+    {
+        sLog.outError("learning start-all rejected no owned companions issuer:%u acc:%u",
+                      issuer->GetGUIDLow(), issuerAcc);
+        return false;
+    }
+    bool const queued = m_learningStore.QueueStartAll(issuerAcc);
+    if (queued)
+        sLog.outString("learning start-all queued acc:%u candidates:%u issuer:%u",
+                       issuerAcc, candidateCount, issuer->GetGUIDLow());
+    else
+        sLog.outError("learning start-all rejected store busy acc:%u candidates:%u issuer:%u",
+                      issuerAcc, candidateCount, issuer->GetGUIDLow());
+    return queued;
 }
 
 bool PlayerBotMgr::BotFollow(Player* issuer, const std::string& botName)

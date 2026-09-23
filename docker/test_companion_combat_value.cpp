@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace CC = Companion::Combat;
 
@@ -296,6 +297,165 @@ static void TestSelectExecutable()
     CHECK(d.anyKnown);
 }
 
+
+static void TestRotationPlanBaseline()
+{
+    CC::AbilityQuery q;
+    q.distance = 5.0f;
+    q.meleeReach = true;
+
+    std::vector<CC::AbilityProfile> profiles;
+    profiles.push_back(Prof(100));
+    profiles.push_back(Prof(200));
+    profiles.push_back(Prof(300));
+
+    // Baseline plan (identity) must produce the same result as no plan.
+    CC::AbilityDecision d0 = CC::SelectExecutable(profiles, q);
+    CC::RotationPlan baseline = CC::RotationPlan::Baseline(3);
+    CC::AbilityDecision d1 = CC::SelectExecutable(profiles, q, baseline);
+    CHECK(d0.selected == d1.selected);
+    CHECK(d0.anyKnown == d1.anyKnown);
+    CHECK(d0.firstBlock == d1.firstBlock);
+    CHECK(d1.selected == 100); // first in table order
+}
+
+static void TestRotationPlanReordered()
+{
+    CC::AbilityQuery q;
+    q.distance = 5.0f;
+    q.meleeReach = true;
+
+    std::vector<CC::AbilityProfile> profiles;
+    profiles.push_back(Prof(100));
+    profiles.push_back(Prof(200));
+    profiles.push_back(Prof(300));
+
+    // Plan that reverses the order: scan index 2 first.
+    CC::RotationPlan reversed{2, 1, 0};
+    CHECK(reversed.CompatibleWith(3));
+    CC::AbilityDecision d = CC::SelectExecutable(profiles, q, reversed);
+    CHECK(d.selected == 300); // profile at index 2 is scanned first
+
+    // Plan that puts the second profile first.
+    CC::RotationPlan secondFirst{1, 0, 2};
+    CHECK(secondFirst.CompatibleWith(3));
+    d = CC::SelectExecutable(profiles, q, secondFirst);
+    CHECK(d.selected == 200); // profile at index 1 is scanned first
+}
+
+static void TestRotationPlanNullFallback()
+{
+    CC::AbilityQuery q;
+    q.distance = 5.0f;
+    q.meleeReach = true;
+
+    std::vector<CC::AbilityProfile> profiles;
+    profiles.push_back(Prof(100));
+    profiles.push_back(Prof(200));
+
+    // Default-constructed (empty) plan: incompatible, falls back to table order.
+    CC::RotationPlan null_plan;
+    CHECK(!null_plan.CompatibleWith(2));
+    CC::AbilityDecision d = CC::SelectExecutable(profiles, q, null_plan);
+    CHECK(d.selected == 100); // table order first
+
+    // Wrong-size plan: incompatible, falls back.
+    CC::RotationPlan wrongSize{0, 1, 2}; // 3 indices for 2 profiles
+    CHECK(!wrongSize.CompatibleWith(2));
+    d = CC::SelectExecutable(profiles, q, wrongSize);
+    CHECK(d.selected == 100);
+}
+
+static void TestRotationPlanIncompatible()
+{
+    CC::AbilityQuery q;
+    q.distance = 5.0f;
+    q.meleeReach = true;
+
+    std::vector<CC::AbilityProfile> profiles;
+    profiles.push_back(Prof(100));
+    profiles.push_back(Prof(200));
+    profiles.push_back(Prof(300));
+
+    // Duplicate index: not a permutation, incompatible.
+    CC::RotationPlan dup{0, 0, 1};
+    CHECK(!dup.CompatibleWith(3));
+    CC::AbilityDecision d = CC::SelectExecutable(profiles, q, dup);
+    CHECK(d.selected == 100); // falls back to table order
+
+    // Out-of-range index: incompatible.
+    CC::RotationPlan oob{0, 1, 3}; // index 3 is out of range for 3 profiles
+    CHECK(!oob.CompatibleWith(3));
+    d = CC::SelectExecutable(profiles, q, oob);
+    CHECK(d.selected == 100);
+
+    // Negative index: incompatible.
+    CC::RotationPlan neg{0, -1, 1};
+    CHECK(!neg.CompatibleWith(3));
+    d = CC::SelectExecutable(profiles, q, neg);
+    CHECK(d.selected == 100);
+
+    // Oversized input must fail closed; it cannot be silently truncated into
+    // an acceptable plan for an eight-profile catalog.
+    CC::RotationPlan oversized{0, 1, 2, 3, 4, 5, 6, 7, 0};
+    CHECK(!oversized.CompatibleWith(8));
+}
+
+static void TestRotationPlanNoLearning()
+{
+    // The plan holds indices only: it cannot name spell IDs, targets,
+    // coordinates, or conditions. Verify the struct exposes no such fields
+    // by checking that a reordered plan with the same profiles produces
+    // the same set of selectable IDs (only order changes).
+    CC::AbilityQuery q;
+    q.distance = 5.0f;
+    q.meleeReach = true;
+
+    std::vector<CC::AbilityProfile> profiles;
+    profiles.push_back(Prof(100));
+    profiles.push_back(Prof(200));
+    profiles.push_back(Prof(300));
+    profiles.push_back(Prof(400));
+
+    // With all profiles unblocked, every permutation selects some profile
+    // from the same set; the selected ID is always one of the profile IDs.
+    CC::RotationPlan p{3, 1, 0, 2};
+    CHECK(p.CompatibleWith(4));
+    CC::AbilityDecision d = CC::SelectExecutable(profiles, q, p);
+    bool found = false;
+    for (auto const& prof : profiles)
+        if (prof.id == d.selected)
+            found = true;
+    CHECK(found);
+    CHECK(d.selected == 400); // index 3 scanned first
+}
+
+static void TestRotationPlanCurrentClassBaselines()
+{
+    CC::AbilityQuery q;
+    q.distance = 5.0f;
+    q.meleeReach = true;
+
+    // Pin the identity plan to the live warrior and mage action-table ordering
+    // in PlayerBotAI::SelectOffensiveSpell.
+    std::vector<CC::AbilityProfile> warrior;
+    warrior.push_back(Prof(100));  // Charge
+    warrior.push_back(Prof(7372)); // Hamstring
+    warrior.push_back(Prof(772));  // Rend
+    warrior.push_back(Prof(78));   // Heroic Strike
+    CHECK(CC::SelectExecutable(warrior, q).selected == 100);
+    CHECK(CC::SelectExecutable(warrior, q, CC::RotationPlan::Baseline(4)).selected == 100);
+
+    std::vector<CC::AbilityProfile> mage;
+    mage.push_back(Prof(116));  // Frostbolt
+    mage.push_back(Prof(133));  // Fireball
+    mage.push_back(Prof(2136)); // Fire Blast
+    mage.push_back(Prof(122));  // Frost Nova
+    mage.push_back(Prof(1449)); // Arcane Explosion
+    CHECK(CC::SelectExecutable(mage, q).selected == 116);
+    CHECK(CC::SelectExecutable(mage, q, CC::RotationPlan::Baseline(5)).selected == 116);
+}
+
 static void TestCastReport()
 {
     static_assert(CC::kCastOk == 0xFF, "SPELL_CAST_OK must stay 0xFF");
@@ -362,6 +522,39 @@ static void TestVerifyDamage()
     CHECK(std::string(CC::RejectName(CC::Reject::TargetUnderCC)) == "target-under-cc");
 }
 
+static void TestOffenseRoute()
+{
+    // BL-001B: the routing matrix. The Tank route is the Assist +
+    // declared-tank row only; every other source (or an Assist without
+    // the gate) uses the ordinary rotation selector.
+    CHECK(CC::RouteOffense(CC::Source::Assist, true) == CC::OffenseRoute::Tank);
+    CHECK(CC::RouteOffense(CC::Source::Assist, false) == CC::OffenseRoute::Rotation);
+    CHECK(CC::RouteOffense(CC::Source::ContinueCombat, true) == CC::OffenseRoute::Rotation);
+    CHECK(CC::RouteOffense(CC::Source::ContinueCombat, false) == CC::OffenseRoute::Rotation);
+    CHECK(CC::RouteOffense(CC::Source::Defend, true) == CC::OffenseRoute::Rotation);
+    CHECK(CC::RouteOffense(CC::Source::Defend, false) == CC::OffenseRoute::Rotation);
+    CHECK(CC::RouteOffense(CC::Source::Damage, true) == CC::OffenseRoute::Rotation);
+    CHECK(CC::RouteOffense(CC::Source::Damage, false) == CC::OffenseRoute::Rotation);
+
+    // Stable name/value for applicability diagnostics.
+    CHECK(std::string(CC::OffenseRouteName(CC::OffenseRoute::Tank)) == "tank");
+    CHECK(std::string(CC::OffenseRouteName(CC::OffenseRoute::Rotation)) == "rotation");
+}
+
+static void TestWarriorPlaybookAdapter()
+{
+    uint32_t catalog[] = {355, 772, 676, 78};
+    uint32_t candidate[] = {355, 772, 78, 676};
+    auto p = CC::WarriorPlaybookAdapter::Adapt(candidate, 4, 7, 7, catalog, 4);
+    CHECK(p.CompatibleWith(4));
+    CHECK(p.order[0] == 0 && p.order[1] == 1 && p.order[2] == 3 && p.order[3] == 2);
+    uint32_t duplicate[] = {355, 772, 772, 78};
+    auto fallback = CC::WarriorPlaybookAdapter::Adapt(duplicate, 4, 7, 7, catalog, 4);
+    CHECK(fallback.count == 4 && fallback.order[0] == 0 && fallback.order[1] == 1 && fallback.order[2] == 2 && fallback.order[3] == 3);
+    auto stale = CC::WarriorPlaybookAdapter::Adapt(candidate, 4, 6, 7, catalog, 4);
+    CHECK(stale.order[0] == 0 && stale.order[1] == 1 && stale.order[2] == 2 && stale.order[3] == 3);
+}
+
 int main()
 {
     TestVerifyAssist();
@@ -372,7 +565,15 @@ int main()
     TestLeash();
     TestTargetSlots();
     TestSelectExecutable();
+    TestRotationPlanBaseline();
+    TestRotationPlanReordered();
+    TestRotationPlanNullFallback();
+    TestRotationPlanIncompatible();
+    TestRotationPlanNoLearning();
+    TestRotationPlanCurrentClassBaselines();
     TestCastReport();
+    TestOffenseRoute();
+    TestWarriorPlaybookAdapter();
     if (g_failures != 0)
     {
         std::printf("value tests: %d FAILURES\n", g_failures);

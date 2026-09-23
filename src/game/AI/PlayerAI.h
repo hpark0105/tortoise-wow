@@ -45,6 +45,16 @@ class PlayerAI
         virtual void UpdateAI(const uint32 /*diff*/);
         virtual void MovementInform(uint32 MovementType, uint32 Data = 0) {}
 
+        // BL-002: observe-only damage observation callbacks (no-op in the
+        // base class; existing AIs remain behaviorally unchanged). The
+        // authoritative damage path fires them for a direct player attacker
+        // or a direct player victim only, with the effective damage (the
+        // victim's actual health loss, overkill excluded), the spell id
+        // (0 for white damage), the periodic (DoT) flag and whether the
+        // victim died from this operation.
+        virtual void OnDamageDealt(Unit* /*target*/, uint32 /*effectiveDamage*/, uint32 /*spellId*/, bool /*periodic*/, bool /*targetDied*/) {}
+        virtual void OnDamageTaken(Unit* /*attacker*/, uint32 /*effectiveDamage*/, uint32 /*spellId*/, bool /*periodic*/, bool /*victimDied*/) {}
+
         ///== Helpeurs =====================================
         CanCastResult CanCastSpell(Unit* pTarget, const SpellEntry *pSpell, bool isTriggered, bool checkControlled = true);
 
