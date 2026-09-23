@@ -2590,6 +2590,7 @@ void PlayerBotAI::FollowGoal(uint32 leaderGuid, uint32 seq)
     _followGroupId = me->GetGroup() ? me->GetGroup()->GetId() : 0;
     _following = true;
     _followReached = false;
+    _presence.ResetParty();
     _held = false; // PORT-004: a new follow order cancels the hold
     _assistTargetGuid = 0; // PORT-005: a new follow order cancels an assist
     _pursuitLeash.Disarm(); // PORT-008: a new order starts a fresh pursuit budget
@@ -2615,6 +2616,7 @@ void PlayerBotAI::FollowStop()
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
+    _presence.ResetParty();
     _pursuitLeash.Disarm(); // PORT-008: the pursuit is over; fresh budget for the next one
     // Invalidate the current goal immediately (TW-014 AC1).
     me->GetMotionMaster()->Clear(true);
@@ -2636,6 +2638,7 @@ void PlayerBotAI::Hold(uint32 seq)
     _following = false;
     _followLeaderGuid = 0;
     _followReached = false;
+    _presence.ResetParty();
     _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
     _pursuitLeash.Disarm(); // PORT-008: a hold starts a fresh pursuit budget
     ClearTarget();
@@ -4223,33 +4226,74 @@ bool PlayerBotAI::UpdateCompanion(uint32 diff)
     return true;
 }
 
-// Living-world presence: a quiet, deterministic regroup cue makes a party
-// feel inhabited after travel without turning the heartbeat into a chat loop.
-// It is suppressed while dead, fighting, holding, or outside a real party.
+// Owner distress is a transition, sampled from the live owner while this bot
+// follows in the same party. One eligible companion speaks; the shared cue
+// cooldown also covers regroup speech.
 void PlayerBotAI::PresenceStep(uint32 diff)
 {
-    if (_presenceTimerMs > diff)
+    _presence.Tick(diff);
+    if (!me || !IsOwnedCompanion() || !me->IsAlive() || !_following ||
+        _held || !me->GetGroup() || !IsFollowOwnerAvailable())
     {
-        _presenceTimerMs -= diff;
+        _presence.ResetParty();
         return;
     }
-    _presenceTimerMs = 0;
 
-    if (!me || !IsOwnedCompanion() || !me->IsAlive() || me->IsInCombat() ||
-        !_following || !_followReached || _held || !me->GetGroup())
+    Player* owner = me->GetMap()->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, _followLeaderGuid));
+    if (!owner || !owner->GetMaxHealth())
+        return;
+    uint8_t const healthPct = static_cast<uint8_t>(
+        (static_cast<uint64_t>(owner->GetHealth()) * 100) / owner->GetMaxHealth());
+    bool const canSpeak = me->GetDistance(owner) <= 30.0f &&
+        IsPresenceSpeaker(owner);
+    Companion::Presence::Cue const cue = _presence.ObserveOwner(
+        true, healthPct, owner->IsInCombat(), canSpeak, me->GetGUIDLow());
+    SayPresenceCue(cue);
+}
+
+bool PlayerBotAI::IsPresenceSpeaker(Player const* owner) const
+{
+    if (!me || !owner || !me->GetGroup() || owner->GetGroup() != me->GetGroup() ||
+        !botEntry || !botEntry->ownerAccountId)
+        return false;
+    uint32 speakerLow = 0;
+    for (Group::MemberSlot const& slot : me->GetGroup()->GetMemberSlots())
+    {
+        uint32 const low = slot.guid.GetCounter();
+        Player* member = sObjectAccessor.FindPlayer(ObjectGuid(low));
+        PlayerBotEntry* entry = member ? sPlayerBotMgr.FindBotByGuid(low) : nullptr;
+        if (!member || !entry || !entry->ai ||
+            entry->ownerAccountId != botEntry->ownerAccountId ||
+            !member->IsInWorld() || member->GetGroup() != me->GetGroup() ||
+            member->GetMap() != me->GetMap() || !member->IsAlive() ||
+            entry->ai->_held || !entry->ai->_following ||
+            entry->ai->_followLeaderGuid != owner->GetGUIDLow() ||
+            member->GetDistance(owner) > 30.0f)
+            continue;
+        if (!speakerLow || low < speakerLow)
+            speakerLow = low;
+    }
+    return speakerLow == me->GetGUIDLow();
+}
+
+void PlayerBotAI::SayPresenceCue(Companion::Presence::Cue cue)
+{
+    if (cue == Companion::Presence::Cue::None || !me || !me->IsAlive())
         return;
 
     Companion::Personality::Profile const profile = botEntry
         ? (Companion::Personality::Profile)botEntry->personalityProfile
         : Companion::Personality::Profile::None;
-    char const* line = Companion::Presence::RegroupLine(profile, _presenceSequence++);
+    uint32 const sequence = _presence.sequence++;
+    char const* line = cue == Companion::Presence::Cue::Regroup
+        ? Companion::Presence::RegroupLine(profile, sequence)
+        : Companion::Presence::OwnerInjuredLine(profile, sequence);
     me->Say(line, LANG_UNIVERSAL);
-    _presenceTimerMs = Companion::Presence::kBaseIntervalMs +
-        (me->GetGUIDLow() % 3) * Companion::Presence::kIntervalJitterMs;
     if (sPlayerBotMgr.IsDebugEnabled())
-        sLog.outString("[Presence] regroup GUID:%u profile:%s seq:%u next:%u",
+        sLog.outString("[Presence] %s GUID:%u profile:%s seq:%u next:%u",
+                       cue == Companion::Presence::Cue::Regroup ? "regroup" : "owner-injured",
                        me->GetGUIDLow(), Companion::Personality::ProfileName(profile),
-                       _presenceSequence - 1, _presenceTimerMs);
+                       sequence, _presence.remainingMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -4283,6 +4327,7 @@ bool PlayerBotAI::UpdateRecovery(uint32 diff)
     if (!_recoveryDead)
     {
         _recoveryDead = true;
+        _presence.ResetParty();
         _recoveryReportMs = 0;
         _recoveryWalkMs = 0;
         _recoveryDeathAck = false;
@@ -4920,6 +4965,8 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
         // "reached" line marks every out-of-range -> in-range transition
         // (a completed regroup), not just the first approach.
         _followReached = false;
+        if (me->GetDistance(leader) >= Companion::Presence::kRegroupArmDistanceYd)
+            _presence.MarkAway();
         // The same path-find-to-position pattern idle wander and the quest
         // giver pursuit use (a player chase is a no-op without a victim).
         // PORT-008 (KAP-558): throttle follow path re-issuance. The path is
@@ -4989,6 +5036,10 @@ bool PlayerBotAI::UpdateFollow(uint32 diff)
     if (!_followReached)
     {
         _followReached = true;
+        bool const canSpeak = IsOwnedCompanion() && !me->IsInCombat() &&
+            !_held && me->GetGroup() && IsFollowOwnerAvailable() &&
+            IsPresenceSpeaker(leader);
+        SayPresenceCue(_presence.Arrived(canSpeak, me->GetGUIDLow()));
         if (sPlayerBotMgr.IsDebugEnabled())
             sLog.outString("[PlayerBot][Follow] reached GUID:%u leader:%u dist:%.2f seq:%u",
                            me->GetGUIDLow(), _followLeaderGuid, me->GetDistance(leader), _followSeq);

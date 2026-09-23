@@ -38,7 +38,7 @@ PlayerBotAI* CreatePlayerBotAI(std::string ainame);
 class PlayerBotAI: public PlayerAI
 {
     public:
-        explicit PlayerBotAI(Player* pPlayer = nullptr) : PlayerAI(pPlayer), botEntry(nullptr), _wanderTimer(0), _combatCheckTimer(0), _abilityTimer(0), _presenceTimerMs(Companion::Presence::kInitialDelayMs) {}
+        explicit PlayerBotAI(Player* pPlayer = nullptr) : PlayerAI(pPlayer), botEntry(nullptr), _wanderTimer(0), _combatCheckTimer(0), _abilityTimer(0) {}
         virtual ~PlayerBotAI() {}
         void Remove() override;
 
@@ -75,8 +75,7 @@ class PlayerBotAI: public PlayerAI
         uint32 _wanderTimer;
         uint32 _combatCheckTimer;
         uint32 _abilityTimer;
-        uint32 _presenceTimerMs;
-        uint32 _presenceSequence = 0;
+        Companion::Presence::State _presence;
         // Hardening item 4 / PORT-012: the live combat target and the
         // dead corpse pending loot are explicit slots with named transitions
         // (Companion::Combat::TargetSlots); owner orders never live here.
@@ -193,7 +192,9 @@ class PlayerBotAI: public PlayerAI
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
-        void PresenceStep(uint32 diff); // bounded regroup cue for living-world presence
+        void PresenceStep(uint32 diff); // bounded party event cues
+        bool IsPresenceSpeaker(Player const* owner) const;
+        void SayPresenceCue(Companion::Presence::Cue cue);
         void PlannerRoundStep(uint32 diff); // PORT-018: one shared planner round per party (record-only offers)
         void ConversationRoundStep(); // PORT-022: consume one bounded reply (world thread never waits)
         void CooperativeQuestStep(uint32 diff); // PORT-023/030: one owner-driven cooperative quest action (declared quest, or dynamic kill-only mirror)
