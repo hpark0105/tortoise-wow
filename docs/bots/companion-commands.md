@@ -11,7 +11,7 @@ printed in chat (`Bot ... rejected.`) and logged server-side
 | Command | What it does |
 | --- | --- |
 | `.botrecruit <botname>` | Invites the bot into your party. The bot session is socketless and never answers invites itself, so the server settles them: the owner's invite is accepted, anyone else's is declined. Rejected if the bot is offline (benched), the party is full, or you are not the owner. Party leadership does not matter: if the bot already holds the party (it becomes leader when you log out, see notes), re-recruiting works, and recruiting a bot that is already in your party is a no-op. |
-| `.botdismiss <botname>` | Removes the bot from your party and clears its follow, hold, assist, and defend orders. It stays online and wanders locally around its release point without auto-pulling enemies. Party leadership does not matter. A 2-person party disbands on either path (classic rule). |
+| `.botdismiss <botname>` | Removes the bot from your party and clears its follow, hold, assist, and defend orders. It stays online and resumes bounded off-duty travel and hunting around its release point while its owner is online. Party leadership does not matter. A 2-person party disbands on either path (classic rule). |
 | `.botrecall <botname>` | Logs the bot in. After a world restart, owned companions stay benched (offline) until recalled; recall queues a login for the bot character. If the bot came back into a stale group persisted from before a restart (one you are no longer in), it leaves that group first so it can join yours. |
 | `.botfollow <botname>` | Orders the bot to follow you. It pathfinds to you (same map) and stays within ~2 yards. A new order invalidates the previous one by sequence number, so a stale follow can never re-arm. |
 | `.botstop <botname>` | Cancels the follow order. With no other active order, an owned companion returns to its default: it holds position near you and pathfinds to catch up if you move more than 25 yd away on the same map (ambient bots resume the legacy idle wander and auto-hunt). |
@@ -33,9 +33,9 @@ When several orders are live, selection is deterministic:
   Loot) and a legal attacker is in range.
 - With **no** active order at all, an owned companion in your party runs
   default owner-follow: hold position, and pathfind to catch up if the owner
-  is more than 25 yd away on the same map. An ungrouped owned companion
-  wanders around its release point, but never auto-engages (self-defense and
-  explicit orders only). Ambient bots (no owner) run the legacy loop: wander
+  is more than 25 yd away on the same map. An ungrouped owned companion with
+  its owner online shares the zone citizen's bounded travel-and-hunt activity
+  around its release point. Legacy ambient bots (no owner) wander
   locally (8-20 yd), auto-engage the nearest hostile within 30 yd, loot the
   corpse, repeat.
 
@@ -43,12 +43,11 @@ When several orders are live, selection is deterministic:
 
 - Offline/benched: after any world restart, owned companions are offline and
   `.botrecruit` is rejected until you `.botrecall` them.
-- Death and recovery: if the bot dies while it has an active order
-  (follow/hold/assist), it waits out the normal corpse-reclaim delay, walks
-  to its corpse if needed, and resurrects in place at 50% HP (no teleport,
-  no second mechanism). If it dies with **no** active order (default
-  owner-follow, or legacy auto-hunt for an ambient bot), it stays
-  dead-idle at the corpse until you give it an order or recall it.
+- Death and recovery: persistent owned companions and zone citizens reclaim
+  their corpses even when off duty. They wait out the normal reclaim delay,
+  walk to the corpse if needed, and resurrect in place at 50% HP (no
+  teleport or second mechanism). Legacy ambient bots without an order retain
+  their dead-idle behavior.
 - Leadership drift: classic rules transfer party leadership to the bot
   when the owner logs out while the bot is in the party. The bot keeps
   leading until the owner reclaims it (party frame) or the party disbands;
@@ -69,4 +68,4 @@ When several orders are live, selection is deterministic:
     .botassist Companion <mob>    # fight this one
     .bothold Companion            # stop, stand still
     .botstop Companion            # cancel follow; it stays near you and catches up
-    .botdismiss Companion         # release from party; wanders locally, stays online
+    .botdismiss Companion         # release from party; resumes local hunting, stays online

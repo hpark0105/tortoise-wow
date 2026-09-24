@@ -23,6 +23,7 @@
 #include "Anticheat.h"
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 
 namespace
 {
@@ -33,6 +34,7 @@ struct BotIdentitySpec
     uint8 playerClass = CLASS_WARRIOR;
     uint8 gender = GENDER_MALE;
     uint8 skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0;
+    bool fourField = false;
 };
 
 bool ParseBotIdentitySpec(std::string const& value, BotIdentitySpec& spec)
@@ -47,14 +49,14 @@ bool ParseBotIdentitySpec(std::string const& value, BotIdentitySpec& spec)
         fields.push_back(value.substr(pos, comma - pos));
         pos = comma + 1;
     }
-    // PORT-034 (KAP-558): the short form Name,race,class,gender is valid;
-    // appearance fields keep their BotIdentitySpec defaults (all zero),
-    // the same defaults the bare-name spec already relies on.
+    // Four-field citizen specs derive a stable human appearance at provision.
+    // The bare-name and explicit nine-field forms are unchanged.
     if (fields.size() != 1 && fields.size() != 4 && fields.size() != 9)
         return false;
     spec.name = fields[0];
     if (fields.size() == 1)
         return true;
+    spec.fourField = fields.size() == 4;
     uint8* outputs[] = {&spec.race, &spec.playerClass, &spec.gender, &spec.skin,
                         &spec.face, &spec.hairStyle, &spec.hairColor, &spec.facialHair};
     for (size_t i = 1; i < fields.size(); ++i)
@@ -70,6 +72,30 @@ bool ParseBotIdentitySpec(std::string const& value, BotIdentitySpec& spec)
         *outputs[i - 1] = (uint8)parsed;
     }
     return true;
+}
+
+void DeriveCitizenAppearance(BotIdentitySpec& spec)
+{
+    if (!spec.fourField || spec.race != RACE_HUMAN)
+        return;
+    // Ranges verified against the bundled Turtle 1.18.1 CharSections.dbc:
+    // human skin 0..9, male/female faces 0..11/14, hair styles
+    // 0..16/25, colors 0..9, and male facial hair 0..8.
+    uint32 seed = 2166136261u;
+    for (char c : spec.name)
+        seed = (seed ^ (uint8)std::tolower((unsigned char)c)) * 16777619u;
+    auto next = [&seed](uint32 count) -> uint8
+    {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return (uint8)(seed % count);
+    };
+    spec.skin = next(10);
+    spec.face = next(spec.gender == GENDER_FEMALE ? 15 : 12);
+    spec.hairStyle = next(spec.gender == GENDER_FEMALE ? 26 : 17);
+    spec.hairColor = next(10);
+    spec.facialHair = spec.gender == GENDER_MALE ? next(9) : 0;
 }
 }
 
@@ -1300,8 +1326,9 @@ void PlayerBotMgr::UpdateOwnedWorldPopulation()
 // Zone citizens are a separate, opt-in population. They are full persistent
 // characters, never spawned by the legacy ambient Min/Max controller. A
 // human must be in a continent zone before one login is queued. Candidate
-// positions come from the map's walkable-position query and are checked
-// against the same zone before the AI receives a one-use pre-map placement.
+// positions come from static creature spawn points across the anchor's zone;
+// the map walkable-position query checks each point before the AI receives a
+// one-use pre-map placement.
 void PlayerBotMgr::UpdateZoneWorldPopulation()
 {
     if (!enable || !confZoneWorldTarget ||
@@ -1337,6 +1364,27 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
     if (!anchor)
         return;
 
+    Map* map = anchor->GetMap();
+    auto const zoneKey = std::make_pair(anchor->GetMapId(), anchor->GetZoneId());
+    auto anchorsIt = m_zoneSpawnAnchors.find(zoneKey);
+    if (anchorsIt == m_zoneSpawnAnchors.end())
+    {
+        std::vector<WorldLocation> candidates;
+        auto collectAnchor = [&](CreatureDataPair const& pair) -> bool
+        {
+            WorldLocation const& pos = pair.second.position;
+            if (pos.mapId == zoneKey.first &&
+                MaNGOS::IsValidMapCoord(pos.x, pos.y, pos.z) &&
+                map->GetTerrain()->GetZoneId(pos.x, pos.y, pos.z) == zoneKey.second)
+                candidates.push_back(pos);
+            return false;
+        };
+        sObjectMgr.DoCreatureData(collectAnchor);
+        anchorsIt = m_zoneSpawnAnchors.emplace(zoneKey, std::move(candidates)).first;
+        sLog.outString("[ZoneCitizen] zone:%u map:%u has %u spawn anchors",
+                       zoneKey.second, zoneKey.first, (uint32)anchorsIt->second.size());
+    }
+
     auto it = m_bots.upper_bound(m_zoneWorldCursor);
     for (size_t seen = 0; seen < m_bots.size(); ++seen)
     {
@@ -1352,24 +1400,51 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         if (!data || Player::TeamForRace(data->uiRace) != anchor->GetTeam())
             continue;
 
-        Map* map = anchor->GetMap();
         float x = 0.0f, y = 0.0f, z = 0.0f;
         bool placed = false;
-        float const minDistance = std::min(80.0f, confZoneWorldRadiusYd / 3.0f);
-        for (uint32 attempt = 0; attempt < 12; ++attempt)
+        float bestSpacing = -1.0f;
+        // Sample the entire zone, not a circle around the player. Favor the
+        // candidate furthest from players/citizens already there so a dense
+        // spawn cluster does not make the new population look cloned.
+        std::vector<WorldLocation> const& zoneAnchors = anchorsIt->second;
+        for (uint32 attempt = 0; attempt < 24 && !zoneAnchors.empty(); ++attempt)
         {
-            x = anchor->GetPositionX();
-            y = anchor->GetPositionY();
-            z = anchor->GetPositionZ();
+            WorldLocation const& origin = zoneAnchors[urand(0, zoneAnchors.size() - 1)];
+            float candidateX = origin.x, candidateY = origin.y, candidateZ = origin.z;
+            if (!map->GetWalkRandomPosition(nullptr, candidateX, candidateY, candidateZ, 25.0f))
+                continue;
+            if (map->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) != anchor->GetZoneId())
+                continue;
+            float spacing = std::numeric_limits<float>::max();
+            for (auto const& playerItem : sObjectAccessor.GetPlayers())
+            {
+                Player const* other = playerItem.second;
+                if (!other || !other->IsInWorld() || other->GetMapId() != anchor->GetMapId() ||
+                    other->GetZoneId() != anchor->GetZoneId())
+                    continue;
+                float const dx = candidateX - other->GetPositionX();
+                float const dy = candidateY - other->GetPositionY();
+                spacing = std::min(spacing, dx * dx + dy * dy);
+            }
+            if (spacing < 80.0f * 80.0f || spacing <= bestSpacing)
+                continue;
+            x = candidateX; y = candidateY; z = candidateZ;
+            bestSpacing = spacing;
+            placed = true;
+        }
+        // A zone without usable creature anchors still gets the old safe
+        // nearby placement, rather than silently failing to populate.
+        for (uint32 attempt = 0; !placed && attempt < 12; ++attempt)
+        {
+            x = anchor->GetPositionX(); y = anchor->GetPositionY(); z = anchor->GetPositionZ();
             if (!map->GetWalkRandomPosition(nullptr, x, y, z, confZoneWorldRadiusYd))
                 continue;
             float const dx = x - anchor->GetPositionX();
             float const dy = y - anchor->GetPositionY();
-            if (dx * dx + dy * dy < minDistance * minDistance ||
+            if (dx * dx + dy * dy < 80.0f * 80.0f ||
                 map->GetTerrain()->GetZoneId(x, y, z) != anchor->GetZoneId())
                 continue;
             placed = true;
-            break;
         }
         m_zoneWorldCursor = (uint32)e->playerGUID;
         if (!placed)
@@ -1400,7 +1475,9 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
 bool PlayerBotMgr::SubmitWorldIntent(PlayerBotEntry* e, std::string const& context,
                                      uint32 nowMs)
 {
-    if (!confWorldIntentEnabled || !e || !e->persistent || !e->ownerAccountId ||
+    if (!confWorldIntentEnabled || !e || !e->persistent ||
+        (!e->ownerAccountId && !(e->ai && e->ai->IsZoneCitizen())) ||
+        (e->ai && e->ai->IsZoneCitizen() && e->recruiterAccountId) ||
         e->state != PB_STATE_ONLINE || !m_conversationTransport.Enabled() ||
         nowMs - m_lastWorldIntentSubmitMs < confWorldIntentGlobalPaceMs)
         return false;
@@ -1799,6 +1876,8 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name, bool zoneCiti
         sLog.outError("Playerbot provisioning: identity spec for '%s' has an invalid race/class/gender combination", characterName.c_str());
         return;
     }
+    if (zoneCitizen)
+        DeriveCitizenAppearance(spec);
     if (zoneCitizen && Player::TeamForRace(spec.race) != ALLIANCE)
     {
         sLog.outError("Playerbot zone provisioning: '%s' is not Alliance; rejected", characterName.c_str());

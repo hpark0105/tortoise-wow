@@ -50,13 +50,32 @@ class IndependentCompanionValueTest(unittest.TestCase):
         release = re.search(r"void PlayerBotAI::ReleaseToWorld\(\)\s*\{(.*?)\n\}", ai, re.S)
         self.assertIn("_followGroupId = 0", release.group(1))
 
-    def test_ungrouped_owned_bot_roams_without_auto_pull(self):
+    def test_ungrouped_owned_bot_uses_shared_activity_while_owner_online(self):
         ai = source("src/game/PlayerBots/PlayerBotAI.cpp")
-        self.assertIn("if (IsOwnedCompanion() && me->GetGroup())", ai)
-        self.assertIn("else if (IsOwnedCompanion())", ai)
-        self.assertIn("if (!FindOwnerByAccount())", ai)
-        self.assertIn("_independentHomeSet", ai)
-        self.assertIn("if (IsOwnedCompanion())\n            {\n                if (sPlayerBotMgr.IsDebugEnabled())", ai)
+        update = re.search(r"void PlayerBotAI::UpdateAI\(const uint32 diff\).*?\n\{(.*?)\n\}", ai, re.S)
+        self.assertIsNotNone(update)
+        for fragment in ("FindOwnerByAccount()", "!me->GetGroup()",
+                         "!_following && !_held && !_assistTargetGuid",
+                         "(citizenOffDuty || ownedOffDuty) && UpdateIndependentActivity(diff)"):
+            self.assertIn(fragment, update.group(1))
+        self.assertIn("bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)", ai)
+        self.assertIn("else if (IsOwnedCompanion())", ai)  # owner-offline fallback
+
+    def test_all_persistent_bots_can_acquire_after_party_release(self):
+        ai = source("src/game/PlayerBots/PlayerBotAI.cpp")
+        body = re.search(r"else\n\s*\{\n\s*// All persistent bots use the same citizen acquisition policy.*?\n\s*\}\n\s*else\n\s*_combatCheckTimer", ai, re.S)
+        self.assertIsNotNone(body)
+        self.assertIn("SelectNearestTarget(30.0f)", body.group(0))
+        self.assertNotIn("no-order idle", body.group(0))
+
+    def test_shared_kills_create_persistent_rate_limited_acquaintances(self):
+        ai = source("src/game/PlayerBots/PlayerBotAI.cpp")
+        self.assertIn("void PlayerBotAI::RecordSocialEncounter", ai)
+        for fragment in ("bot_social_acquaintance", "shared_events = shared_events + 1",
+                         "_socialCooldownMs = 30000",
+                         "event:shared-kill", "Good work, friend."):
+            self.assertIn(fragment, ai)
+        self.assertIn("RecordSocialEncounter(target, true)", ai)
 
     def test_owned_world_activation_is_opt_in_and_separate(self):
         mgr = source("src/game/PlayerBots/PlayerBotMgr.cpp")
@@ -88,6 +107,17 @@ class IndependentCompanionValueTest(unittest.TestCase):
             body.group(1))
         # The existing normal reclaim mechanism is unchanged.
         self.assertIn("CMSG_RECLAIM_CORPSE", body.group(1))
+
+    def test_citizen_party_and_evidence_paths_share_guarded_capabilities(self):
+        ai = source("src/game/PlayerBots/PlayerBotAI.cpp")
+        mgr = source("src/game/PlayerBots/PlayerBotMgr.cpp")
+        self.assertIn("(botEntry->ownerAccountId || IsZoneCitizen())", ai)
+        self.assertIn("be->recruiterAccountId == leaderAccount", ai)
+        self.assertIn("be->recruiterGuid == leaderLow", ai)
+        self.assertIn("member->GetGroup() == group", ai)
+        self.assertIn("botEntry->recruiterGuid == owner->GetGUIDLow()", ai)
+        self.assertIn("(e->ai && e->ai->IsZoneCitizen() && e->recruiterAccountId)", mgr)
+        self.assertIn("(!IsZoneCitizen() && !FindOwnerByAccount())", ai)
 
 
 if __name__ == "__main__":

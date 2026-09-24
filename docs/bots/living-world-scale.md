@@ -9,11 +9,11 @@ a validated setting or a recommendation to add fifty to one party.
 `.botinit <name>` sets up one owned companion; `.botinit` fills only free
 normal-party slots and skips the rest of a large roster. `.botdismiss <name>`
 releases a companion from the party without logging it out. While its owner is
-online, an ungrouped owned bot
-wanders locally around its release point, within a bounded home area, and
-does not auto-acquire enemies. It pauses that wandering while the owner is
-offline. This is presence, not yet independent questing or combat. The
-release point and off-duty state are session-scoped, not a persistent job.
+online, an ungrouped owned bot travels and hunts level-appropriate, unclaimed
+enemies within a bounded home area, using the same activity loop as a zone
+citizen. It pauses that activity while the owner is offline. This is not
+independent questing or LLM-directed combat. The release point and off-duty
+state are session-scoped, not a persistent job.
 
 ## Opt-in owned roster activation
 
@@ -38,7 +38,7 @@ zero until you deliberately opt into a staged in-game pilot.
 
 ## Per-bot local-model world intent (opt-in)
 
-`PLAYERBOT_WORLD_INTENT_ENABLE=1` lets an online, ungrouped owned bot ask the
+`PLAYERBOT_WORLD_INTENT_ENABLE=1` lets an online, ungrouped persistent bot ask the
 existing local model adapter for one quiet activity: `roam` or `rest`.
 Requests carry only its letters-only name, persisted personality profile,
 and previous choice. The adapter accepts only a strict JSON intent and
@@ -76,10 +76,31 @@ default for the first pilot; a timeout still falls back to local roaming.
 The smaller `park-llama` preset is not automatically selected: that launcher
 swaps the single managed GPU model, which would interrupt other 27B work.
 
+## Shared persistent-bot activity
+
+Owned companions with an online owner and independent zone citizens now use
+the same bounded off-duty travel-and-hunt loop. A party follow, hold, assist,
+combat, recovery, or loot job takes priority. On leaving a party, the bot
+re-anchors its activity around the release point. An owned bot with its owner
+offline retains the prior idle behavior; this does not log it in or recruit it.
+Unowned legacy ambient bots retain their separate behavior.
+
+A recruited citizen can follow, defend, join the party planner round and be
+considered for party presence cues while its exact recruiter lease is valid.
+The citizen returns to solo activity when the lease ends. A recruiter can use
+`.botlearn start <name>` on that citizen while it is in their party; with an
+active profile, completed solo encounters can also be recorded under the
+citizen's own character. `.botlearn start all` still targets permanently owned
+companions only. Learning remains observe-only: no recorded summary changes
+spells, targeting, quest choice, or combat policy. The optional shared local
+model chooses only `roam` or `rest`, never a target or skill.
+
 ## Four-citizen same-zone pilot
 
-Four separately owned Alliance citizens can be brought online near a live
-Alliance player with `PLAYERBOT_ZONE_WORLD_TARGET=4`. They are not members of
+Four independent Alliance citizens can be brought online across a live
+Alliance player's zone with `PLAYERBOT_ZONE_WORLD_TARGET=4`. Candidate areas
+come from that zone's creature spawns and receive walkability and spacing
+checks; the nearby-radius setting is only a fallback. They are not members of
 that player's owned companion roster. A normal invite temporarily recruits
 one: party follow and defense take priority, and leaving the party returns
 them to independent activity. Placement and recruit/defend have disposable-
@@ -87,14 +108,24 @@ world tests; the operator has also confirmed recruitment in game.
 
 While independent, a citizen first looks for an ordinary, untapped,
 level-appropriate creature within 25 yards. Otherwise it looks up to 110
-yards away for a suitable same-zone hunting ground within 180 yards of its
+yards away for a suitable same-zone hunting ground within 240 yards of its
 spawn home and walks toward it. If none is available, it patrols a walkable
 same-zone point. Low health pauses pulls, corpse recovery and loot retain
-priority, and an unreachable hunting destination expires after 30 seconds
+priority, and an unreachable hunting destination expires after 45 seconds
 with a brief retry exclusion. This is local deterministic behavior, not an
 LLM-directed quest or a zone-wide travel network. Disposable-world fixtures
 cover the distant-target and combat paths; live movement and killing still
 require the in-game pilot.
+
+The outdoor route pilot now remembers up to 12 successfully reached points
+per bot and the legs walked between them. It sometimes reuses a learned leg
+instead of choosing a fresh patrol point. The graph is session-scoped and
+cleared when the bot changes zone or is released from a party; it is not a
+persisted map or T-imothy's dungeon route recorder. A stalled travel leg
+gets one path reissue, then one small walkable same-zone nudge, then is
+abandoned with a destination cooldown. No recovery step teleports the bot.
+These stages still need a density and obstruction pilot before use on the
+live 50-citizen world.
 
 ## Scaling constraints in the current implementation
 
@@ -114,6 +145,9 @@ require the in-game pilot.
 1. Extend the local hunting-ground pilot to named places, rest, vendor, and
    limited quest work, with explicit home, death, logout, and persistence
    rules. Validate each addition in a disposable world and in game.
+   Persisting or sharing learned routes needs a versioned destination/route
+   schema, cross-bot validation, and invalidation when terrain or paths change;
+   the current 12-node graph deliberately does not survive a restart.
 2. Extend the bounded roam/rest world-intent path to reviewed noncombat jobs
    and compact durable memory. Keep combat, movement, legality, and
    persistence deterministic. A stalled model must not stall the world tick.

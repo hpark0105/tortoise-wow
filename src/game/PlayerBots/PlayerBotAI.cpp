@@ -333,7 +333,7 @@ public:
         float const distance = me->GetDistance(u);
         float const hx = u->GetPositionX() - m_homeX;
         float const hy = u->GetPositionY() - m_homeY;
-        if (distance < 30.0f || hx * hx + hy * hy > 180.0f * 180.0f ||
+        if (distance < 30.0f || hx * hx + hy * hy > 240.0f * 240.0f ||
             me->GetMap()->GetTerrain()->GetZoneId(u->GetPositionX(),
                 u->GetPositionY(), u->GetPositionZ()) != m_zone)
             return false;
@@ -383,6 +383,11 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
 
     if (!me->IsInWorld())
         return;
+
+    if (_socialCooldownMs > diff)
+        _socialCooldownMs -= diff;
+    else
+        _socialCooldownMs = 0;
 
     // PORT-009 (KAP-558): a socketless bot session can never answer the
     // first-logon racial cinematic (no client sends CMSG_CINEMATIC_DONE);
@@ -455,11 +460,16 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (UpdateQuestPhases(diff))
         return;
 
-    // Independent citizens use a bounded travel-and-hunt loop while off
-    // duty. Party follow/combat above preempts it; the legacy ambient
-    // nearest-target and tiny random wander are not their world purpose.
-    if (IsZoneCitizen() && botEntry && !botEntry->recruiterAccountId &&
-        !me->GetGroup() && UpdateIndependentActivity(diff))
+    // Persistent bots share one bounded off-duty travel-and-hunt loop.
+    // Owned companions wait for their owner to be online; citizens need no
+    // owner. Party orders, hold, combat, recovery and loot preempt this job.
+    bool const citizenOffDuty = IsZoneCitizen() && botEntry &&
+        !botEntry->recruiterAccountId;
+    bool const ownedOffDuty = botEntry && botEntry->ownerAccountId &&
+        FindOwnerByAccount();
+    if (botEntry && botEntry->persistent && !me->GetGroup() &&
+        !_following && !_held && !_assistTargetGuid &&
+        (citizenOffDuty || ownedOffDuty) && UpdateIndependentActivity(diff))
         return;
 
     // Ability usage timer
@@ -530,17 +540,10 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         }
         else
         {
-            // KAP-558 hardening: an owned companion without an order never
-            // autonomously acquires targets; the legacy auto-hunt
-            // acquisition stays for ambient bots (ownerAccountId == 0).
-            // It idles near its owner (owner-follow below) and fights
-            // only via self-defense or explicit assist/defend orders.
-            if (IsOwnedCompanion())
-            {
-                if (sPlayerBotMgr.IsDebugEnabled())
-                    sLog.outString("[PlayerBot] no-order idle GUID:%u", me->GetGUIDLow());
-            }
-            else if (Unit* target = sPlayerBotMgr.IsAmbientAcquireEnabled()
+            // All persistent bots use the same citizen acquisition policy
+            // once they are not in a party. A party order, follow, defend,
+            // combat, recovery or loot state has already returned above.
+            if (Unit* target = sPlayerBotMgr.IsAmbientAcquireEnabled()
                                  ? me->SelectNearestTarget(30.0f) : nullptr)
             {
                 // Autonomous companions never initiate PvP. A hostile player
@@ -1499,15 +1502,18 @@ void PlayerBotAI::EncounterEngage(Companion::Combat::Source source,
 }
 
 // BL-003 (KAP-558): persist a completed encounter summary to the
-// learning store exactly once, before the recorder resets. Owned
-// companions only. The store assigns the delivery identity
+// learning store exactly once, before the recorder resets. Persistent
+// owned companions and citizens share the per-character evidence path;
+// the store still requires an explicitly started profile. It assigns
+// the delivery identity
 // (process nonce + monotonic sequence); a failed enqueue drops the
 // summary by design (the FIFO is bounded and fail-closed).
 void PlayerBotAI::TryPersistLearningSummary()
 {
     if (_encounter.GetState() != Companion::Encounter::State::Complete)
         return;
-    if (IsOwnedCompanion() && me)
+    if (me && botEntry && botEntry->persistent &&
+        (botEntry->ownerAccountId || IsZoneCitizen()))
     {
         Companion::Encounter::Recorder::Summary const r = _encounter.GetSummary();
         Companion::Learning::SummaryFifo::Summary s;
@@ -1553,6 +1559,65 @@ void PlayerBotAI::OnDamageDealt(Unit* target, uint32 effectiveDamage, uint32 spe
     // BL-003: a matching target death completes the encounter; persist
     // the summary before the recorder resets (no-op otherwise).
     TryPersistLearningSummary();
+    if (targetDied)
+        RecordSocialEncounter(target, true);
+}
+
+void PlayerBotAI::RecordSocialEncounter(Unit* target, bool targetDied)
+{
+    if (!targetDied || !target || !me || !me->IsInWorld() || !me->IsAlive() ||
+        !botEntry || !botEntry->persistent || _socialCooldownMs ||
+        target->GetTypeId() != TYPEID_UNIT)
+        return;
+
+    PlayerBotAI* partnerAI = nullptr;
+    Player* partner = nullptr;
+    for (auto const& item : sObjectAccessor.GetPlayers())
+    {
+        Player* candidate = item.second;
+        if (!candidate || candidate == me || !candidate->IsInWorld() ||
+            candidate->GetMapId() != me->GetMapId() ||
+            candidate->GetDistance(me) > 25.0f)
+            continue;
+        PlayerBotAI* candidateAI = dynamic_cast<PlayerBotAI*>(candidate->AI());
+        if (!candidateAI || !candidateAI->botEntry ||
+            !candidateAI->botEntry->persistent || !candidate->IsAlive())
+            continue;
+        if (candidate->GetVictim() != target && !candidate->IsInCombat())
+            continue;
+        if (!partner || candidate->GetGUIDLow() < partner->GetGUIDLow())
+        {
+            partner = candidate;
+            partnerAI = candidateAI;
+        }
+    }
+    if (!partner || !partnerAI)
+        return;
+
+    CharacterDatabase.DirectPExecute(
+        "INSERT INTO bot_social_acquaintance "
+        "(char_guid, acquaintance_guid, shared_events, first_seen, last_seen) "
+        "VALUES (%u, %u, 1, UNIX_TIMESTAMP(), UNIX_TIMESTAMP()) "
+        "ON DUPLICATE KEY UPDATE shared_events = shared_events + 1, "
+        "last_seen = UNIX_TIMESTAMP()",
+        me->GetGUIDLow(), partner->GetGUIDLow());
+    CharacterDatabase.DirectPExecute(
+        "INSERT INTO bot_social_acquaintance "
+        "(char_guid, acquaintance_guid, shared_events, first_seen, last_seen) "
+        "VALUES (%u, %u, 1, UNIX_TIMESTAMP(), UNIX_TIMESTAMP()) "
+        "ON DUPLICATE KEY UPDATE shared_events = shared_events + 1, "
+        "last_seen = UNIX_TIMESTAMP()",
+        partner->GetGUIDLow(), me->GetGUIDLow());
+    _socialCooldownMs = 30000;
+    partnerAI->_socialCooldownMs = 30000;
+
+    // Only the lower GUID speaks, so one shared kill creates one visible,
+    // world-local line rather than a two-bot echo.
+    if (me->GetGUIDLow() < partner->GetGUIDLow())
+        me->Say("Good work, friend.", LANG_UNIVERSAL);
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[Social] acquaintance GUID:%u partner:%u event:shared-kill",
+                       me->GetGUIDLow(), partner->GetGUIDLow());
 }
 
 void PlayerBotAI::OnDamageTaken(Unit* /*attacker*/, uint32 effectiveDamage, uint32 spellId,
@@ -2238,6 +2303,13 @@ void PlayerBotAI::AutoEquipForLevel()
         return;
 
     uint8 level = me->GetLevel();
+    // Citizens should look like ordinary leveling characters, not receive
+    // the strongest free kit at every login. A GUID-derived level band makes
+    // their common gear varied but stable; earned better gear is never removed.
+    uint8 const citizenGearLevel = IsZoneCitizen()
+        ? std::max<uint8>(1, level > 2 + me->GetGUIDLow() % 4
+                                ? level - 2 - me->GetGUIDLow() % 4 : 1)
+        : level;
     uint32 classMask = 1 << (me->GetClass() - 1);
     uint32 raceMask = 1 << (me->GetRace() - 1);
 
@@ -2327,7 +2399,10 @@ void PlayerBotAI::AutoEquipForLevel()
         if (!IsAllowedSource(proto))
             continue;
 
-        if (proto.RequiredLevel > level)
+        if (IsZoneCitizen() && proto.Quality > ITEM_QUALITY_NORMAL)
+            continue;
+
+        if (proto.RequiredLevel > citizenGearLevel)
             continue;
 
         // avoid items too far below current level if required level known
@@ -2337,7 +2412,8 @@ void PlayerBotAI::AutoEquipForLevel()
             // crude estimate: item level maps roughly to 2/3 of required level
             effectiveLevel = proto.ItemLevel ? std::max<uint32>(1, (proto.ItemLevel * 2) / 3) : level;
         }
-        if (std::abs(int(level) - int(effectiveLevel)) > int(_gearMaxDiff))
+        if (effectiveLevel > citizenGearLevel ||
+            std::abs(int(citizenGearLevel) - int(effectiveLevel)) > int(_gearMaxDiff))
             continue;
 
         if (proto.RequiredSkill || proto.RequiredSpell || proto.RequiredHonorRank || proto.RequiredCityRank || proto.RequiredReputationRank)
@@ -2686,7 +2762,97 @@ void PopulateAreaBotAI::OnPlayerLogin()
         me->GetMotionMaster()->MoveConfused();
 }
 
-bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
+void PlayerBotAI::StartActivityTravel(float x, float y, float z,
+                                      uint64_t huntGuid, uint8 targetNode)
+{
+    _travelX = x;
+    _travelY = y;
+    _travelZ = z;
+    _travelTimeMs = 45000;
+    _travelActive = true;
+    _travelHuntGuid = huntGuid;
+    _travelFromNode = 255;
+    for (uint8 i = 0; i < _activityNodeCount; ++i)
+        if (me->GetDistance(_activityNodes[i].x, _activityNodes[i].y,
+                            _activityNodes[i].z) < 15.0f)
+        {
+            _travelFromNode = i;
+            break;
+        }
+    _travelTargetNode = targetNode;
+    _travelProgressMs = 5000;
+    _travelLastDistance = me->GetDistance(x, y, z);
+    _travelRecoveryStage = 0;
+    _travelNudging = false;
+    me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+}
+
+void PlayerBotAI::RememberActivityArrival()
+{
+    uint8 reached = 255;
+    for (uint8 i = 0; i < _activityNodeCount; ++i)
+    {
+        float const dx = _activityNodes[i].x - me->GetPositionX();
+        float const dy = _activityNodes[i].y - me->GetPositionY();
+        if (dx * dx + dy * dy < 12.0f * 12.0f)
+        {
+            reached = i;
+            break;
+        }
+    }
+    if (reached == 255 && _activityNodeCount < 12)
+    {
+        reached = _activityNodeCount++;
+        _activityNodes[reached].x = me->GetPositionX();
+        _activityNodes[reached].y = me->GetPositionY();
+        _activityNodes[reached].z = me->GetPositionZ();
+    }
+    if (reached != 255)
+    {
+        bool const newLink = _travelFromNode < _activityNodeCount &&
+            reached != _travelFromNode &&
+            !(_activityNodes[_travelFromNode].links & (1u << reached));
+        if (_travelFromNode < _activityNodeCount && reached != _travelFromNode)
+        {
+            _activityNodes[_travelFromNode].links |= uint16(1u << reached);
+            _activityNodes[reached].links |= uint16(1u << _travelFromNode);
+        }
+        _activityNodes[reached].blockedMs = 0;
+        if (_activityNodes[reached].visits < 255)
+            ++_activityNodes[reached].visits;
+        _activityCurrentNode = reached;
+        if (newLink)
+            sLog.outString("[WorldRoute] learned guid:%u from:%u to:%u nodes:%u",
+                           me->GetGUIDLow(), _travelFromNode, reached,
+                           _activityNodeCount);
+    }
+    _travelActive = false;
+    _travelHuntGuid = 0;
+    _travelNudging = false;
+}
+
+void PlayerBotAI::AbandonActivityTravel()
+{
+    uint32 const failedTarget = _travelHuntGuid
+        ? ObjectGuid(_travelHuntGuid).GetCounter() : 0;
+    if (_travelHuntGuid)
+    {
+        _failedHuntGuid = failedTarget;
+        _failedHuntMs = 60000;
+    }
+    if (_travelTargetNode < _activityNodeCount)
+        _activityNodes[_travelTargetNode].blockedMs = 60000;
+    sLog.outString("[WorldRoute] abandoned guid:%u target:%u stage:%u",
+                   me->GetGUIDLow(), failedTarget, _travelRecoveryStage);
+    if (!MotionIdle())
+        me->GetMotionMaster()->Clear(false);
+    _travelActive = false;
+    _travelHuntGuid = 0;
+    _travelNudging = false;
+    _activityPauseMs = 3000;
+}
+
+bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
 {
     if (!me || !me->IsAlive() || !me->GetMap())
         return false;
@@ -2696,10 +2862,21 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
     {
         _travelActive = false;
         _travelHuntGuid = 0;
+        _travelNudging = false;
         return false;
     }
     if (_targets.corpse)
         return true; // finish the normal loot attempt before walking away
+
+    if (_worldRestUntilMs > WorldTimer::getMSTime())
+    {
+        if (!MotionIdle())
+            me->GetMotionMaster()->Clear(false);
+        _travelActive = false;
+        _travelHuntGuid = 0;
+        _travelNudging = false;
+        return true;
+    }
 
     if (!_activityHomeSet || _activityMap != me->GetMapId() ||
         _activityZone != me->GetZoneId())
@@ -2712,8 +2889,15 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
         _activityHomeZ = me->GetPositionZ();
         _travelActive = false;
         _travelHuntGuid = 0;
+        _travelNudging = false;
         _activityPauseMs = 0;
         _destinationScanMs = 0;
+        _activityNodeCount = 1;
+        _activityCurrentNode = 0;
+        _activityNodes[0] = ActivityNode();
+        _activityNodes[0].x = _activityHomeX;
+        _activityNodes[0].y = _activityHomeY;
+        _activityNodes[0].z = _activityHomeZ;
     }
 
     _destinationScanMs = _destinationScanMs > diff ? _destinationScanMs - diff : 0;
@@ -2723,9 +2907,12 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
         if (!_failedHuntMs)
             _failedHuntGuid = 0;
     }
+    for (uint8 i = 0; i < _activityNodeCount; ++i)
+        _activityNodes[i].blockedMs = _activityNodes[i].blockedMs > diff
+            ? _activityNodes[i].blockedMs - diff : 0;
 
-    // The scan is cheap at four citizens but still paced independently of
-    // the world tick. Low health makes the citizen rest instead of pulling.
+    // Pace the scan independently of the world tick even with a larger
+    // citizen roster. Low health makes the bot rest instead of pulling.
     if (_huntScanMs <= diff)
     {
         _huntScanMs = 2000;
@@ -2739,6 +2926,7 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
             {
                 _travelActive = false;
                 _travelHuntGuid = 0;
+                _travelNudging = false;
                 RememberCombatTarget(target);
                 me->Attack(target, true);
                 me->GetMotionMaster()->MoveChase(target);
@@ -2757,6 +2945,7 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
             me->GetMotionMaster()->Clear(false);
         _travelActive = false;
         _travelHuntGuid = 0;
+        _travelNudging = false;
         return true;
     }
 
@@ -2771,6 +2960,7 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
                     me->GetMotionMaster()->Clear(false);
                 _travelActive = false;
                 _travelHuntGuid = 0;
+                _travelNudging = false;
                 _activityPauseMs = 3000;
                 return true;
             }
@@ -2778,28 +2968,72 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
         _travelTimeMs = _travelTimeMs > diff ? _travelTimeMs - diff : 0;
         if (me->GetDistance(_travelX, _travelY, _travelZ) < 4.0f)
         {
-            _travelActive = false;
-            _travelHuntGuid = 0;
+            RememberActivityArrival();
             _activityPauseMs = urand(4000, 9000);
             sLog.outString("[ZoneCitizen] travel reached guid:%u zone:%u",
                            me->GetGUIDLow(), _activityZone);
         }
-        else if (_travelTimeMs && !MotionIdle())
-            return true;
         else
         {
-            if (_travelHuntGuid)
+            if (_travelNudging &&
+                me->GetDistance(_travelNudgeX, _travelNudgeY, _travelNudgeZ) < 3.0f)
             {
-                _failedHuntGuid = ObjectGuid(_travelHuntGuid).GetCounter();
-                _failedHuntMs = 60000;
-                sLog.outString("[ZoneCitizen] travel failed guid:%u target:%u",
-                               me->GetGUIDLow(), _failedHuntGuid);
+                _travelNudging = false;
+                _travelProgressMs = 5000;
+                _travelLastDistance = me->GetDistance(_travelX, _travelY, _travelZ);
+                me->GetMotionMaster()->MovePoint(0, _travelX, _travelY, _travelZ,
+                                                 MOVE_PATHFINDING);
+                return true;
             }
-            if (!MotionIdle())
-                me->GetMotionMaster()->Clear(false);
-            _travelActive = false;
-            _travelHuntGuid = 0;
-            _activityPauseMs = 3000;
+            _travelProgressMs = _travelProgressMs > diff ? _travelProgressMs - diff : 0;
+            if (!_travelTimeMs)
+            {
+                AbandonActivityTravel();
+                return true;
+            }
+            if (!_travelProgressMs || (MotionIdle() && _travelRecoveryStage == 0))
+            {
+                float const remaining = me->GetDistance(_travelX, _travelY, _travelZ);
+                if (!_travelNudging && _travelLastDistance - remaining >= 2.0f)
+                    _travelRecoveryStage = 0;
+                else if (_travelRecoveryStage == 0)
+                {
+                    _travelRecoveryStage = 1;
+                    me->GetMotionMaster()->MovePoint(0, _travelX, _travelY, _travelZ,
+                                                     MOVE_PATHFINDING);
+                    sLog.outString("[WorldRoute] repath guid:%u", me->GetGUIDLow());
+                }
+                else if (_travelRecoveryStage == 1)
+                {
+                    float x = me->GetPositionX();
+                    float y = me->GetPositionY();
+                    float z = me->GetPositionZ();
+                    if (me->GetMap()->GetWalkRandomPosition(nullptr, x, y, z, 8.0f) &&
+                        me->GetDistance(x, y, z) >= 2.0f &&
+                        (x - _activityHomeX) * (x - _activityHomeX) +
+                        (y - _activityHomeY) * (y - _activityHomeY) <= 240.0f * 240.0f &&
+                        me->GetMap()->GetTerrain()->GetZoneId(x, y, z) == _activityZone)
+                    {
+                        _travelRecoveryStage = 2;
+                        _travelNudging = true;
+                        _travelNudgeX = x;
+                        _travelNudgeY = y;
+                        _travelNudgeZ = z;
+                        me->GetMotionMaster()->MovePoint(1, x, y, z, MOVE_PATHFINDING);
+                        sLog.outString("[WorldRoute] nudge guid:%u", me->GetGUIDLow());
+                    }
+                    else
+                        _travelRecoveryStage = 2;
+                }
+                else
+                {
+                    AbandonActivityTravel();
+                    return true;
+                }
+                _travelLastDistance = remaining;
+                _travelProgressMs = 5000;
+            }
+            return true;
         }
     }
     if (_activityPauseMs > diff)
@@ -2820,18 +3054,46 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
         Cell::VisitGridObjects(me, searcher, 110.0f);
         if (Creature* ground = scan.Best())
         {
-            _travelX = ground->GetPositionX();
-            _travelY = ground->GetPositionY();
-            _travelZ = ground->GetPositionZ();
-            _travelTimeMs = 30000;
-            _travelActive = true;
-            _travelHuntGuid = ground->GetObjectGuid().GetRawValue();
-            me->GetMotionMaster()->MovePoint(0, _travelX, _travelY, _travelZ,
-                                             MOVE_PATHFINDING);
+            StartActivityTravel(ground->GetPositionX(), ground->GetPositionY(),
+                                ground->GetPositionZ(), ground->GetObjectGuid().GetRawValue());
             sLog.outString("[ZoneCitizen] travel guid:%u zone:%u purpose:hunt target:%u to:%.1f/%.1f",
                            me->GetGUIDLow(), _activityZone, ground->GetGUIDLow(),
                            _travelX, _travelY);
             return true;
+        }
+    }
+    if (_activityNodeCount > 1 && urand(0, 2) == 0)
+    {
+        uint8 nearest = 255;
+        for (uint8 i = 0; i < _activityNodeCount; ++i)
+            if (me->GetDistance(_activityNodes[i].x, _activityNodes[i].y,
+                                _activityNodes[i].z) < 15.0f)
+            {
+                nearest = i;
+                break;
+            }
+        if (nearest != 255)
+        {
+            _activityCurrentNode = nearest;
+            uint8 best = 255;
+            for (uint8 i = 0; i < _activityNodeCount; ++i)
+            {
+                if (!(_activityNodes[nearest].links & (1u << i)) ||
+                    _activityNodes[i].blockedMs ||
+                    me->GetDistance(_activityNodes[i].x, _activityNodes[i].y,
+                                    _activityNodes[i].z) < 30.0f)
+                    continue;
+                if (best == 255 || _activityNodes[i].visits < _activityNodes[best].visits)
+                    best = i;
+            }
+            if (best != 255)
+            {
+                StartActivityTravel(_activityNodes[best].x, _activityNodes[best].y,
+                                    _activityNodes[best].z, 0, best);
+                sLog.outString("[WorldRoute] replay guid:%u from:%u to:%u",
+                               me->GetGUIDLow(), nearest, best);
+                return true;
+            }
         }
     }
     for (uint32 attempt = 0; attempt < 8; ++attempt)
@@ -2846,16 +3108,10 @@ bool ZoneCitizenAI::UpdateIndependentActivity(uint32 diff)
         float const hx = x - _activityHomeX;
         float const hy = y - _activityHomeY;
         if (dx * dx + dy * dy < 30.0f * 30.0f ||
-            hx * hx + hy * hy > 180.0f * 180.0f ||
+            hx * hx + hy * hy > 240.0f * 240.0f ||
             map->GetTerrain()->GetZoneId(x, y, z) != _activityZone)
             continue;
-        _travelX = x;
-        _travelY = y;
-        _travelZ = z;
-        _travelTimeMs = 30000;
-        _travelActive = true;
-        _travelHuntGuid = 0;
-        me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+        StartActivityTravel(x, y, z, 0);
         sLog.outString("[ZoneCitizen] travel guid:%u zone:%u purpose:patrol to:%.1f/%.1f",
                        me->GetGUIDLow(), _activityZone, x, y);
         return true;
@@ -2984,6 +3240,11 @@ void PlayerBotAI::ReleaseToWorld()
     _assistTargetGuid = 0;
     _defendTargetGuid = 0;
     _independentHomeSet = false;
+    _activityHomeSet = false;
+    _travelActive = false;
+    _travelHuntGuid = 0;
+    _travelNudging = false;
+    _activityNodeCount = 0;
     if (!me->IsInCombat())
         ClearTarget();
 }
@@ -3163,8 +3424,15 @@ void PlayerBotAI::PlannerRoundStep(uint32 diff)
     // player owner to plan for. An unowned roster entry (the lab owner
     // fixture) is still a player for planning purposes.
     PlayerBotEntry* leaderEntry = sPlayerBotMgr.FindBotByGuid(leaderLow);
-    if (!leaderLow || (leaderEntry && leaderEntry->ownerAccountId))
+    if (!leaderLow || (leaderEntry &&
+        (leaderEntry->ownerAccountId ||
+         (leaderEntry->ai && leaderEntry->ai->IsZoneCitizen()))))
         return; // bot-led: no player owner to plan for
+    Player* leader = sObjectAccessor.FindPlayer(group->GetLeaderGuid());
+    uint32 const leaderAccount = leader && leader->GetSession()
+        ? leader->GetSession()->GetAccountId() : 0;
+    if (!leaderAccount)
+        return;
     Companion::Planner::PlannerTransport& transport =
         sPlayerBotMgr.PlannerTransport();
     if (groupId != _plannerGroupId || leaderLow != _plannerLeaderGuid)
@@ -3179,7 +3447,8 @@ void PlayerBotAI::PlannerRoundStep(uint32 diff)
         _plannerLastSubmitMs = 0; // fresh session: immediate first round
     }
     uint32 const nowMs = WorldTimer::getMSTime();
-    // Collect the party's owned companions; the lowest-GUID one submits.
+    // Collect owned companions and citizens actively leased to this leader;
+    // the lowest-GUID participant submits the shared party round.
     uint32 submitterLow = 0;
     uint32 botCount = 0;
     uint32 botLows[Companion::Planner::kMaxPartyBots] = {};
@@ -3189,7 +3458,11 @@ void PlayerBotAI::PlannerRoundStep(uint32 diff)
         uint32 const slotLow = slot.guid.GetCounter();
         Player* member = sObjectAccessor.FindPlayer(ObjectGuid(slotLow));
         PlayerBotEntry* be = member ? sPlayerBotMgr.FindBotByGuid(slotLow) : nullptr;
-        if (!be || !be->ownerAccountId)
+        bool const ownedCompanion = be && be->ownerAccountId == leaderAccount;
+        bool const leasedCitizen = be && be->ai && be->ai->IsZoneCitizen() &&
+            be->recruiterAccountId == leaderAccount &&
+            be->recruiterGuid == leaderLow && member->GetGroup() == group;
+        if (!ownedCompanion && !leasedCitizen)
             continue;
         if (!submitterLow || slotLow < submitterLow)
             submitterLow = slotLow;
@@ -3306,7 +3579,8 @@ void PlayerBotAI::ApplyPlannerPreference(uint32_t nowMs)
 
 void PlayerBotAI::WorldIntentStep()
 {
-    if (!IsOwnedCompanion() || !me)
+    if ((!IsOwnedCompanion() && !IsZoneCitizen()) || !me ||
+        !botEntry || !botEntry->persistent)
         return;
     if (!sPlayerBotMgr.IsWorldIntentEnabled())
         return;
@@ -3350,7 +3624,7 @@ void PlayerBotAI::WorldIntentStep()
         }
     }
     if (_worldIntentPending || nowMs < _worldIntentNextMs ||
-        !FindOwnerByAccount())
+        (!IsZoneCitizen() && !FindOwnerByAccount()))
         return;
 
     // Persistent names are letters-only, but re-check at this boundary so
@@ -4703,7 +4977,13 @@ void PlayerBotAI::PresenceStep(uint32 diff)
 bool PlayerBotAI::IsPresenceSpeaker(Player const* owner) const
 {
     if (!me || !owner || !me->GetGroup() || owner->GetGroup() != me->GetGroup() ||
-        !botEntry || !botEntry->ownerAccountId)
+        !owner->GetSession() || !botEntry)
+        return false;
+    uint32 const account = owner->GetSession()->GetAccountId();
+    bool const eligible = botEntry->ownerAccountId == account ||
+        (IsZoneCitizen() && botEntry->recruiterAccountId == account &&
+         botEntry->recruiterGuid == owner->GetGUIDLow());
+    if (!eligible)
         return false;
     uint32 speakerLow = 0;
     for (Group::MemberSlot const& slot : me->GetGroup()->GetMemberSlots())
@@ -4711,8 +4991,11 @@ bool PlayerBotAI::IsPresenceSpeaker(Player const* owner) const
         uint32 const low = slot.guid.GetCounter();
         Player* member = sObjectAccessor.FindPlayer(slot.guid);
         PlayerBotEntry* entry = member ? sPlayerBotMgr.FindBotByGuid(low) : nullptr;
-        if (!member || !entry || !entry->ai ||
-            entry->ownerAccountId != botEntry->ownerAccountId ||
+        bool const samePartyOwner = entry && entry->ai &&
+            (entry->ownerAccountId == account ||
+             (entry->ai->IsZoneCitizen() && entry->recruiterAccountId == account &&
+              entry->recruiterGuid == owner->GetGUIDLow()));
+        if (!member || !samePartyOwner ||
             !member->IsInWorld() || member->GetGroup() != me->GetGroup() ||
             member->GetMap() != me->GetMap() || !member->IsAlive() ||
             entry->ai->_held || !entry->ai->_following ||

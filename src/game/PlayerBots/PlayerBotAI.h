@@ -52,6 +52,10 @@ class PlayerBotAI: public PlayerAI
                            bool periodic, bool targetDied) override;
         void OnDamageTaken(Unit* attacker, uint32 effectiveDamage, uint32 spellId,
                            bool periodic, bool victimDied) override;
+        // Record one real shared encounter with a nearby persistent bot.
+        // A dedicated bot table is the durable acquaintance store; chat is
+        // bounded and only emitted for a shared kill.
+        void RecordSocialEncounter(Unit* target, bool targetDied);
         virtual void OnPlayerLogin();
         // TW-014 (KAP-557): owner-directed follow/stop goal. While active
         // the follow state machine preempts normal behavior; a goal whose
@@ -70,7 +74,11 @@ class PlayerBotAI: public PlayerAI
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         virtual bool IsZoneCitizen() const { return false; }
-        virtual bool UpdateIndependentActivity(uint32 /*diff*/) { return false; }
+        bool UpdateIndependentActivity(uint32 diff);
+        void StartActivityTravel(float x, float y, float z, uint64_t huntGuid,
+                                 uint8 targetNode = 255);
+        void RememberActivityArrival();
+        void AbandonActivityTravel();
         virtual void PrepareZoneSpawn(uint32, uint32, uint32, float, float, float) {}
         virtual void ClearZoneSpawn() {}
         // Helpers
@@ -169,6 +177,41 @@ class PlayerBotAI: public PlayerAI
         uint32 _worldIntentSubmitMs = 0;
         uint32 _worldIntentNextMs = 0;
         uint32 _worldRestUntilMs = 0;
+        // Shared off-duty job state for owned companions and zone citizens.
+        bool _activityHomeSet = false;
+        uint32 _activityMap = 0;
+        uint32 _activityZone = 0;
+        float _activityHomeX = 0.0f, _activityHomeY = 0.0f, _activityHomeZ = 0.0f;
+        bool _travelActive = false;
+        float _travelX = 0.0f, _travelY = 0.0f, _travelZ = 0.0f;
+        uint32 _travelTimeMs = 0;
+        uint64_t _travelHuntGuid = 0;
+        uint32 _destinationScanMs = 0;
+        uint32 _failedHuntGuid = 0;
+        uint32 _failedHuntMs = 0;
+        uint32 _activityPauseMs = 0;
+        uint32 _huntScanMs = 0;
+        // Small, session-scoped graph of successfully walked same-zone legs.
+        // It is rebuilt after a map/zone change or a party release; no SQL or
+        // route files are trusted as movement instructions.
+        struct ActivityNode
+        {
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            uint16 links = 0;
+            uint8 visits = 0;
+            uint32 blockedMs = 0;
+        };
+        ActivityNode _activityNodes[12] = {};
+        uint8 _activityNodeCount = 0;
+        uint8 _activityCurrentNode = 0;
+        uint8 _travelFromNode = 0;
+        uint8 _travelTargetNode = 255;
+        // Bounded progress watchdog: reissue, small walkable nudge, abandon.
+        uint32 _travelProgressMs = 0;
+        float _travelLastDistance = 0.0f;
+        uint8 _travelRecoveryStage = 0;
+        bool _travelNudging = false;
+        float _travelNudgeX = 0.0f, _travelNudgeY = 0.0f, _travelNudgeZ = 0.0f;
         // PORT-018 (KAP-558): shared party planner round state (the
         // transport lives in PlayerBotMgr; disabled unless a service
         // URL is configured).
@@ -184,6 +227,7 @@ class PlayerBotAI: public PlayerAI
         // them and Reset() returns the deterministic baseline.
         float _personalityChaseDist = kOwnerFollowChaseDist;
         uint32 _personalityLastExprMs = 0;
+        uint32 _socialCooldownMs = 0;
         uint8 _lastLevel = 0;
         bool TryLootDefeatedTarget();
         void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
@@ -371,7 +415,6 @@ class ZoneCitizenAI: public PlayerBotAI
     public:
         explicit ZoneCitizenAI(Player* player = nullptr) : PlayerBotAI(player) {}
         bool IsZoneCitizen() const override { return true; }
-        bool UpdateIndependentActivity(uint32 diff) override;
         void PrepareZoneSpawn(uint32 map, uint32 zone, uint32 team,
                               float x, float y, float z) override;
         void ClearZoneSpawn() override { _spawnPrepared = false; }
@@ -382,18 +425,5 @@ class ZoneCitizenAI: public PlayerBotAI
         uint32 _spawnZone = 0;
         uint32 _spawnTeam = 0;
         float _spawnX = 0.0f, _spawnY = 0.0f, _spawnZ = 0.0f;
-        bool _activityHomeSet = false;
-        uint32 _activityMap = 0;
-        uint32 _activityZone = 0;
-        float _activityHomeX = 0.0f, _activityHomeY = 0.0f, _activityHomeZ = 0.0f;
-        bool _travelActive = false;
-        float _travelX = 0.0f, _travelY = 0.0f, _travelZ = 0.0f;
-        uint32 _travelTimeMs = 0;
-        uint64_t _travelHuntGuid = 0;
-        uint32 _destinationScanMs = 0;
-        uint32 _failedHuntGuid = 0;
-        uint32 _failedHuntMs = 0;
-        uint32 _activityPauseMs = 0;
-        uint32 _huntScanMs = 0;
 };
 #endif

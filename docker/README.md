@@ -39,8 +39,14 @@ independent citizens from `Name,race,class,gender` specs. Only Alliance races
 are accepted; these characters have no owner binding and are never included in
 `.botinit`. `PLAYERBOT_ZONE_PROVISION_LEVEL` sets their initial level at native
 creation (default 1); it does not change existing characters. Set
-`PLAYERBOT_ZONE_WORLD_TARGET` to opt into same-zone presence. The owned-world
-target and local-model intent do not create characters.
+`PLAYERBOT_ZONE_WORLD_TARGET` to opt into same-zone presence. Four-field human
+citizen specs receive a name-derived, persistent appearance at first creation; explicit
+nine-field specs keep their stated appearance. Citizens receive varied,
+level-appropriate common gear rather than the ambient bots' best eligible kit.
+On login, the controller spreads citizens across walkable creature-spawn areas
+of the human's current zone, falling back to the configured nearby radius if
+none are usable. The radius setting is a fallback, not a zone-wide bound.
+The owned-world target and local-model intent do not create characters.
 The build explicitly enables `-DALLOW_TURTLE_ADDONS=ON` for Turtle client addon
 support, as required for this installation.
 

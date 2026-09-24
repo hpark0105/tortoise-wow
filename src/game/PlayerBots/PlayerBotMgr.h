@@ -251,6 +251,9 @@ class PlayerBotMgr
         uint32 confZoneProvisionLevel = 1; // initial level of newly created citizens only
         uint32 m_lastZoneWorldRefresh = 0;
         uint32 m_zoneWorldCursor = 0;
+        // Static creature locations provide zone-wide spawn candidates. Build
+        // each map/zone list once rather than scanning the world per login.
+        std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>> m_zoneSpawnAnchors;
         void UpdateZoneWorldPopulation();
         bool confWorldIntentEnabled = false;
         uint32 confWorldIntentIntervalMs = 600000;
