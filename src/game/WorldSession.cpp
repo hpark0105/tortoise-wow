@@ -769,9 +769,11 @@ void WorldSession::LogoutPlayer(bool Save)
         _player->UninviteFromGroup();
 
         // TW-OWNER-PARTY-LOGOUT: disband a party made only of this owner and
-        // their owned companions, preventing stale bot-only groups on relogin.
+        // their owned companions, including socketless disconnect logouts.
+        // The ordinary RemoveFromGroup path below intentionally still checks
+        // m_Socket; that rule must not leave a companion-only party behind.
         if (_player->GetGroup() && !_player->GetGroup()->isRaidGroup()
-            && !_player->GetGroup()->isBGGroup() && m_Socket
+            && !_player->GetGroup()->isBGGroup()
             && sPlayerBotMgr.IsOwnedCompanionGroup(_player->GetGroup(),
                                                    _player->GetGUIDLow(),
                                                    GetAccountId()))

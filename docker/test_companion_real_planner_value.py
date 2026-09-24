@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -48,6 +49,14 @@ class PrimerTests(unittest.TestCase):
         import re
         self.assertIsNone(re.search(r"\d{6,}", text))
         self.assertNotIn("http", text.lower())
+
+    def test_windows_line_endings_keep_the_pinned_primer(self):
+        text, digest = rp.load_primer()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "primer-v1.txt")
+            with open(path, "wb") as output:
+                output.write(text.replace("\n", "\r\n").encode("utf-8"))
+            self.assertEqual(rp.load_primer(path), (text, digest))
 
 
 class PromptTests(unittest.TestCase):

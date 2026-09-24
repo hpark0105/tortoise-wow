@@ -248,6 +248,17 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(delay_ms / 1000.0)
             self._send(status, payload)
             return
+        if self.path.startswith("/world-intent"):
+            # Deterministic lab-only stand-in for the shared local model.
+            try:
+                import world_intent as wi
+                valid = wi.build_messages("none", raw.decode("ascii")) is not None
+            except (UnicodeDecodeError, ValueError):
+                valid = False
+            print("[fake-planner] POST /world-intent valid:%d" % valid,
+                  flush=True)
+            self._send(200 if valid else 400, b"rest" if valid else b"")
+            return
         if self.path != "/plan":
             self._send(404, b"")
             return

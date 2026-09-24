@@ -28,7 +28,7 @@ static int g_failures = 0;
 int main()
 {
     // Budgets and layout pins.
-    CHECK(CC::kMaxBots == 8);
+    CHECK(CC::kMaxBots == 256);
     CHECK(CC::kRoundTimeoutMs == 4000);
     CHECK(CC::kReplyAgeMs == 10000);
     CHECK(CC::kMaxTextBytes == 200);
@@ -49,6 +49,18 @@ int main()
     CHECK(r.submitStamp == 1);
     CHECK(r.submitClockMs == 1000);
     CHECK(r.reply.empty());
+
+    // World-intent rounds use the same bounded state machine with a
+    // distinct mode and no party signature.
+    CC::ConvRound world;
+    CHECK(world.Submit(610003, 0, 0, 2, "Worldbota|roam", 1000, 5,
+                       CC::ConvKind::WorldIntent)
+          == CC::ConvRound::SubmitResult::Accepted);
+    CHECK(world.kind == CC::ConvKind::WorldIntent);
+    CHECK(world.OnResult(5, true, "rest", 1100) == CC::ConvRound::Result::Applied);
+    std::string worldReply;
+    CHECK(world.Poll(0, 0, 1101, worldReply));
+    CHECK(worldReply == "rest");
 
     // Empty or oversize text: rejected fail-closed, state untouched.
     CC::ConvRound r2;

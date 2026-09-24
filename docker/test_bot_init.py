@@ -21,13 +21,12 @@ SEC_PLAYER .botinit):
            botinit deferred -> after login: recruit + deferred setup)
   t=+45s  intruder: .botinit   (reports ready:0 deferred:0 skipped:0)
 
-Phase 2 (stale-group recovery): the world is stopped with the live party
-persisted, then the owner's group membership row is deleted and the
-leadership row moved to a bot - exactly the state a real session leaves
-behind when the human owner logs out while the bots stay online (classic
-rules keep the group alive, leadership drifts to a bot, the shutdown save
-persists the bot-only group). The world is started again and the same
-follow script fires: the bots online in the stale group must be made to
+Phase 2 (stale-group recovery): after the world stops, the fixture
+reconstructs a bot-only stale party from the phase-1 group snapshot. Normal
+owner logout now disbands companion-only parties, so this is deliberately
+synthetic legacy-state recovery, not a claim about current logout behavior.
+The world is started again and the same follow script fires: the bots online
+in the stale group must be made to
 leave it (disbanding it when it is the last online member), and the
 deferred bot must be recruited cleanly whether its stale membership was
 still attached at login or already deleted by that disband.
@@ -75,16 +74,6 @@ OWNER_SUMMARY = ("botinit complete issuer:%d acc:%d ready:2 deferred:1 skipped:0
                  % (OWNER_GUID, OWNER_ACC))
 INTRUDER_SUMMARY = ("botinit complete issuer:%d acc:%d ready:0 deferred:0 skipped:0"
                     % (INTRUDER_GUID, INTRUDER_ACC))
-
-# Phase 2: simulate the real owner-logout end state of the persisted group:
-# the owner's membership row is gone (deleted on its own logout) and the
-# leadership drifted to a bot.
-PHASE2_DB_FIX = (
-    "DELETE FROM tw_char.group_member WHERE memberGuid = %d;"
-    " UPDATE tw_char.groups SET leaderGuid = %d WHERE leaderGuid = %d;"
-    % (OWNER_GUID, FAST_A, OWNER_GUID)
-)
-
 
 def _seed_sql():
     return """
@@ -185,8 +174,26 @@ class BotInitTests(unittest.TestCase):
             end = time.monotonic() + 30
             while time.monotonic() < end:
                 time.sleep(3)
+            # Capture the disposable phase-1 party before clean shutdown
+            # disbands it, then reconstruct a bot-led stale roster below.
+            group_row = p.db_exec(cls.base, cls.env,
+                                  "SELECT * FROM tw_char.groups WHERE leaderGuid = %d"
+                                  % OWNER_GUID).strip().splitlines()
+            if len(group_row) != 1:
+                raise AssertionError("expected one disposable phase-1 party")
+            group_fields = [int(value) for value in group_row[0].split("\t")]
+            if len(group_fields) != 16:
+                raise AssertionError("unexpected group schema in disposable lab")
+            group_fields[1] = FAST_A
             p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
-            p.db_exec(cls.base, cls.env, PHASE2_DB_FIX)
+            stale_group = group_fields[0]
+            p.db_exec(cls.base, cls.env,
+                      "REPLACE INTO tw_char.groups VALUES (%s);"
+                      " DELETE FROM tw_char.group_member WHERE groupId = %d;"
+                      " INSERT INTO tw_char.group_member (groupId,memberGuid,assistant,subgroup)"
+                      " VALUES (%d,%d,0,0),(%d,%d,0,0),(%d,%d,0,0);"
+                      % (",".join(str(value) for value in group_fields), stale_group,
+                         stale_group, FAST_A, stale_group, FAST_B, stale_group, LATE))
             p.command(["docker", "compose"] + cls.base + ["up", "-d", "--no-deps", "world"],
                       env=cls.env)
             # Phase-2 script: the owner summary and the intruder summary each
@@ -203,15 +210,8 @@ class BotInitTests(unittest.TestCase):
             end = time.monotonic() + 60
             while time.monotonic() < end:
                 time.sleep(3)
-            p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
-            (cls.evidence / "world.log").write_text(
-                p.command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
-                          env=cls.env, timeout=60),
-                encoding="utf-8")
-            cls.ownership = p.db_exec(cls.base, cls.env,
-                                      "SELECT char_guid, account_id, owner_account_id, "
-                                      "provision_version FROM bot_ownership ORDER BY char_guid")
-            (cls.evidence / "ownership.txt").write_text(cls.ownership, encoding="utf-8")
+            # Inspect the live party before clean shutdown: owner logout
+            # now correctly disbands companion-only groups on stop.
             cls.group_state = p.db_exec(cls.base, cls.env,
                                         "SELECT g.groupId, g.leaderGuid, "
                                         "COUNT(m.memberGuid) AS members "
@@ -221,6 +221,15 @@ class BotInitTests(unittest.TestCase):
                                         "GROUP BY g.groupId, g.leaderGuid "
                                         "ORDER BY g.groupId")
             (cls.evidence / "groups.txt").write_text(cls.group_state, encoding="utf-8")
+            p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
+            (cls.evidence / "world.log").write_text(
+                p.command(["docker", "compose"] + cls.base + ["logs", "--no-color", "world"],
+                          env=cls.env, timeout=60),
+                encoding="utf-8")
+            cls.ownership = p.db_exec(cls.base, cls.env,
+                                      "SELECT char_guid, account_id, owner_account_id, "
+                                      "provision_version FROM bot_ownership ORDER BY char_guid")
+            (cls.evidence / "ownership.txt").write_text(cls.ownership, encoding="utf-8")
             p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
             cls.base = None
         except BaseException:
@@ -288,6 +297,16 @@ class BotInitTests(unittest.TestCase):
             self.logs.count(
                 "follow accepted bot:Initlate guid:%d leader:%d seq:1" % (LATE, OWNER_GUID)),
             2)
+
+    def test_recruited_companions_have_live_group_links(self):
+        # A roster row alone is insufficient: bot-first taps require the
+        # registered bot Player to point at the same live group as the owner.
+        for name in ("Initfasta", "Initfastb", "Initlate"):
+            recruit_lines = [line for line in self.logs.splitlines()
+                             if "party recruit accepted bot:%s " % name in line]
+            self.assertEqual(len(recruit_lines), 2)
+            for line in recruit_lines:
+                self.assertIn(" live:1", line)
 
     def test_stale_group_abandoned_in_phase2(self):
         # The two bots that were online in the stale group at recruit time

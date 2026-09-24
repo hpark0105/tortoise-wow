@@ -43,13 +43,14 @@ namespace Companion
 namespace Conversation
 {
 
-inline constexpr uint32_t kMaxBots = 8;           // companions held at once
+inline constexpr uint32_t kMaxBots = 256;         // bounded shared table for party + world bots
 inline constexpr uint32_t kRoundTimeoutMs = 4000; // hard per-round I/O deadline
 inline constexpr uint64_t kReplyAgeMs = 10000;    // reply freshness budget
 inline constexpr uint32_t kMaxTextBytes = 200;    // sanitized inbound text
 inline constexpr uint32_t kMaxReplyBytes = 120;   // sanitized outbound reply
 
 enum class ConvState { Idle, InFlight, Ready };
+enum class ConvKind { Party, WorldIntent };
 
 // One companion's conversation round. Value-only: no engine pointers, no
 // I/O, no threads - the same code runs under the transport lock and
@@ -63,6 +64,7 @@ struct ConvRound
     uint64_t submitStamp = 0;
     uint64_t submitClockMs = 0;
     uint32_t profileCode = 0;  // Personality::Profile at submit
+    ConvKind kind = ConvKind::Party;
     std::string text;          // sanitized inbound message
     std::string reply;         // sanitized outbound reply (Ready only)
     uint64_t replyClockMs = 0;
@@ -74,7 +76,8 @@ struct ConvRound
     // drop the newer message). Empty or oversize text is Rejected.
     SubmitResult Submit(uint32_t botLowIn, uint32_t group, uint32_t leader,
                         uint32_t profileCodeIn, std::string const& textIn,
-                        uint64_t nowMs, uint64_t stamp)
+                        uint64_t nowMs, uint64_t stamp,
+                        ConvKind kindIn = ConvKind::Party)
     {
         if (textIn.empty() || textIn.size() > kMaxTextBytes)
             return SubmitResult::Rejected;
@@ -85,6 +88,7 @@ struct ConvRound
         partyGroup = group;
         partyLeader = leader;
         profileCode = profileCodeIn;
+        kind = kindIn;
         text = textIn;
         submitStamp = stamp;
         submitClockMs = nowMs;
@@ -171,7 +175,7 @@ class ConversationTransport
         // World-thread API (no I/O, no blocking).
         bool Submit(uint32_t botLow, uint32_t partyGroup, uint32_t partyLeader,
                     uint32_t profileCode, std::string const& text,
-                    uint64_t nowMs);
+                    uint64_t nowMs, ConvKind kind = ConvKind::Party);
         bool Poll(uint32_t botLow, uint32_t partyGroup, uint32_t partyLeader,
                   uint64_t nowMs, std::string& outReply);
         void Invalidate(uint32_t botLow);

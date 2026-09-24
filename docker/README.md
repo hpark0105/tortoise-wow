@@ -13,6 +13,16 @@ companion implementation. Defaults keep bots disabled:
 PLAYERBOT_ENABLE=1
 PLAYERBOT_MIN_BOTS=1
 PLAYERBOT_MAX_BOTS=1
+PLAYERBOT_OWNED_WORLD_TARGET=0
+PLAYERBOT_OWNED_WORLD_PACE_MS=5000
+PLAYERBOT_ZONE_WORLD_TARGET=0
+PLAYERBOT_ZONE_WORLD_PACE_MS=5000
+PLAYERBOT_ZONE_WORLD_RADIUS_YD=250
+PLAYERBOT_ZONE_PROVISION=
+PLAYERBOT_ZONE_PROVISION_LEVEL=1
+PLAYERBOT_WORLD_INTENT_ENABLE=0
+PLAYERBOT_WORLD_INTENT_INTERVAL_MS=600000
+PLAYERBOT_WORLD_INTENT_GLOBAL_PACE_MS=10000
 PLAYERBOT_PROVISION=Companion
 PLAYERBOT_DEBUG=1
 PLAYERBOT_QUEST_ID=0
@@ -22,6 +32,15 @@ PLAYER_SAVE_INTERVAL=60000
 `PLAYERBOT_PROVISION` is a new bot character name. It must differ from an
 existing player character name. Keep `PLAYERBOT_QUEST_ID=0` for ordinary play;
 quest 456 is the single bounded automated quest used by the MVP lab.
+The owned-world target and shared local-model intent are independent opt-ins;
+see [living-world scale](../docs/bots/living-world-scale.md) for scope, limits,
+and disposable validation. The separate `PLAYERBOT_ZONE_PROVISION` list creates
+independent citizens from `Name,race,class,gender` specs. Only Alliance races
+are accepted; these characters have no owner binding and are never included in
+`.botinit`. `PLAYERBOT_ZONE_PROVISION_LEVEL` sets their initial level at native
+creation (default 1); it does not change existing characters. Set
+`PLAYERBOT_ZONE_WORLD_TARGET` to opt into same-zone presence. The owned-world
+target and local-model intent do not create characters.
 The build explicitly enables `-DALLOW_TURTLE_ADDONS=ON` for Turtle client addon
 support, as required for this installation.
 

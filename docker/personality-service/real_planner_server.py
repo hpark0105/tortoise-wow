@@ -18,6 +18,7 @@ Environment:
   REAL_PLANNER_TICK_MS     default 10000 (world tick for the capture
                            policy; lab fixtures set 1000)
   REAL_PLANNER_MAX_TOKENS  default 64
+  REAL_PLANNER_WORLD_INTENT_TIMEOUT_MS  default 1500, capped at 3000
 """
 import json
 import os
@@ -31,6 +32,7 @@ import fake_planner as fp
 import model_client as mc
 import real_planner as rp
 import converse as cv
+import world_intent as wi
 
 def _chat_template_kwargs():
     """Provider-specific template options. The default disables Qwen3
@@ -61,6 +63,8 @@ CFG = {
     # one model call per tick window so it stops pinning the shared
     # model and starving /converse.
     "plan_timeout_ms": int(os.environ.get("REAL_PLANNER_PLAN_TIMEOUT_MS", "1500")),
+    "world_intent_timeout_ms": max(100, min(3000, int(os.environ.get(
+        "REAL_PLANNER_WORLD_INTENT_TIMEOUT_MS", "1500")))),
     "converse_lock_wait_ms": int(
         os.environ.get("REAL_PLANNER_CONVERSE_LOCK_WAIT_MS", "1000")),
     "converse_timeout_ms": int(os.environ.get(
@@ -111,6 +115,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         if self.path.startswith("/converse"):
             self._handle_converse(raw)
+            return
+        if self.path.startswith("/world-intent"):
+            self._handle_world_intent(raw)
             return
         if self.path != "/plan":
             self._send(404, b"")
@@ -249,6 +256,65 @@ class Handler(BaseHTTPRequestHandler):
             print("[real-planner] converse profile:%s fallback reason:%s "
                   "ms:%d" % (profile, reason, round_ms), flush=True)
             self._send(500, b"")
+
+    def _handle_world_intent(self, raw):
+        # Lower priority than player conversation. This endpoint has a
+        # closed two-choice vocabulary and never returns gameplay commands.
+        profile = "none"
+        if "?profile=" in self.path:
+            candidate = self.path.split("?profile=", 1)[1].split("&", 1)[0]
+            if candidate in wi.PROFILES:
+                profile = candidate
+        if len(raw) > 64:
+            self._send(400, b"")
+            return
+        try:
+            messages = wi.build_messages(profile, raw.decode("ascii"))
+        except UnicodeDecodeError:
+            messages = None
+        if messages is None:
+            self._send(400, b"")
+            return
+        t0 = time.monotonic()
+        if not MODEL_LOCK.acquire(blocking=False):
+            print("[real-planner] world-intent fallback reason:busy ms:0",
+                  flush=True)
+            self._send(503, b"")
+            return
+        intent = None
+        reason = None
+        meta = None
+        try:
+            key = mc.read_api_key(CFG["key_file"] or None)
+            if MODEL_ID["id"] is None:
+                MODEL_ID["id"] = mc.fetch_model_id(CFG["model_url"], key,
+                                                    timeout_s=0.5)
+            answer, meta = mc.chat(
+                CFG["model_url"], key, MODEL_ID["id"], messages,
+                CFG["world_intent_timeout_ms"] / 1000.0,
+                max_tokens=32,
+                extra={"chat_template_kwargs": CFG["chat_template_kwargs"]}
+                if CFG["chat_template_kwargs"] else None)
+            intent = wi.parse_intent(answer)
+            if intent is None:
+                reason = "bad-schema"
+        except mc.ModelError as exc:
+            reason = exc.reason
+            if reason in ("no-key-file", "no-model", "http-error", "bad-json"):
+                MODEL_ID["id"] = None
+        finally:
+            MODEL_LOCK.release()
+        round_ms = int((time.monotonic() - t0) * 1000)
+        if intent:
+            print("[real-planner] world-intent accepted intent:%s ms:%d "
+                  "tokens:%d/%d" % (intent, round_ms,
+                                   meta.get("prompt_tokens", 0),
+                                   meta.get("completion_tokens", 0)), flush=True)
+            self._send(200, intent.encode("ascii"))
+        else:
+            print("[real-planner] world-intent fallback reason:%s ms:%d" %
+                  (reason, round_ms), flush=True)
+            self._send(503, b"")
 
 
 def main():

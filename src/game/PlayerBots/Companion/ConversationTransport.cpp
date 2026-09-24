@@ -139,7 +139,8 @@ ConversationTransport::Slot* ConversationTransport::FindSlot(Slot* slots, uint32
 
 bool ConversationTransport::Submit(uint32_t botLow, uint32_t partyGroup,
                                    uint32_t partyLeader, uint32_t profileCode,
-                                   std::string const& text, uint64_t nowMs)
+                                   std::string const& text, uint64_t nowMs,
+                                   ConvKind kind)
 {
     std::lock_guard<std::mutex> lk(m_lock);
     if (!m_enabled.load())
@@ -166,7 +167,7 @@ bool ConversationTransport::Submit(uint32_t botLow, uint32_t partyGroup,
         return false;
     }
     ConvRound::SubmitResult const r =
-        s->round.Submit(botLow, partyGroup, partyLeader, profileCode, text, nowMs, m_nextStamp++);
+        s->round.Submit(botLow, partyGroup, partyLeader, profileCode, text, nowMs, m_nextStamp++, kind);
     if (r == ConvRound::SubmitResult::Rejected)
     {
         sLog.outError("[Conversation] submit rejected bot:%u len:%u", botLow, (uint32)text.size());
@@ -246,16 +247,33 @@ void ConversationTransport::WorkerLoop()
             // The oldest waiting round: InFlight means a message is stored
             // and the worker has not serviced it yet (the worker is the only
             // sender).
-            uint64_t oldest = 0;
+            uint64_t oldestParty = 0;
+            uint64_t oldestWorld = 0;
+            uint32_t worldBotLow = 0;
+            uint64_t worldStamp = 0;
             for (auto const& s : m_slots)
             {
-                if (s.inUse && s.round.state == ConvState::InFlight &&
-                    (!oldest || s.round.submitStamp < oldest))
+                if (!s.inUse || s.round.state != ConvState::InFlight)
+                    continue;
+                if (s.round.kind == ConvKind::Party &&
+                    (!oldestParty || s.round.submitStamp < oldestParty))
                 {
-                    oldest = s.round.submitStamp;
+                    oldestParty = s.round.submitStamp;
                     botLow = s.round.botLow;
                     stamp = s.round.submitStamp;
                 }
+                else if (s.round.kind == ConvKind::WorldIntent &&
+                         (!oldestWorld || s.round.submitStamp < oldestWorld))
+                {
+                    oldestWorld = s.round.submitStamp;
+                    worldBotLow = s.round.botLow;
+                    worldStamp = s.round.submitStamp;
+                }
+            }
+            if (!botLow)
+            {
+                botLow = worldBotLow;
+                stamp = worldStamp;
             }
             if (!botLow)
             {
@@ -270,7 +288,8 @@ void ConversationTransport::WorkerLoop()
             // it is the only request content placed in the URL path.
             char const* profileName =
                 Personality::ProfileName((Personality::Profile)s->round.profileCode);
-            path = std::string("/converse?profile=") + profileName;
+            path = std::string(s->round.kind == ConvKind::Party ?
+                               "/converse?profile=" : "/world-intent?profile=") + profileName;
         }
         // Bounded I/O off the world thread; the deadline is hard.
         std::string reply;
@@ -288,7 +307,7 @@ void ConversationTransport::WorkerLoop()
         }
         if (r == ConvRound::Result::Failed)
         {
-            if (s->attempt < 2)
+            if (s->round.kind == ConvKind::Party && s->attempt < 2)
             {
                 // PORT-031 (KAP-558): one bounded retry. A single lost
                 // race (service busy, model timeout) must not silence an

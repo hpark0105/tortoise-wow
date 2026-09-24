@@ -162,7 +162,10 @@ bool Group::Create(ObjectGuid guid, const char * name)
         return false;
 
     if (!isBGGroup())
-        CharacterDatabase.CommitTransaction();
+        // The first recruit can be added immediately after Create returns.
+        // Flush the initial group/leader rows before its separate async
+        // member insert, or the pending groupId cleanup can erase that row.
+        CharacterDatabase.CommitTransactionDirect();
 
     _updateLeaderFlag();
 

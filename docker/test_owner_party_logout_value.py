@@ -6,8 +6,8 @@ Verifies the source invariants without a running server:
 - The predicate checks FindBotByGuid + ownerAccountId for each
   non-logout member.
 - WorldSession::LogoutPlayer calls the predicate with the correct
-  guards (not raid, not BG, m_Socket, GetAccountId) before the
-  normal RemoveFromGroup path.
+  guards (not raid, not BG, GetAccountId) before the normal
+  RemoveFromGroup path, even when a disconnected player has no socket.
 - Disband is called when the predicate is true.
 """
 import os
@@ -78,7 +78,7 @@ class OwnerPartyLogoutStaticTest(unittest.TestCase):
 
     def test_worldsession_guards(self):
         src = _read("src/game/WorldSession.cpp")
-        # The disband block must check: not raid, not BG, m_Socket
+        # The disband block must check party type, not socket presence.
         block_re = re.compile(
             r"TW-OWNER-PARTY-LOGOUT.*?_player->GetGroup\(\)->Disband\(\);",
             re.DOTALL)
@@ -90,8 +90,8 @@ class OwnerPartyLogoutStaticTest(unittest.TestCase):
                       "must guard against raid groups")
         self.assertIn("isBGGroup", block,
                       "must guard against battleground groups")
-        self.assertIn("m_Socket", block,
-                      "must check m_Socket (normal logout)")
+        self.assertNotIn("m_Socket", block[block.find("if ("):],
+                         "disconnect logout must disband without a socket")
         self.assertIn("GetAccountId", block,
                       "must pass the session account ID")
 
@@ -104,6 +104,8 @@ class OwnerPartyLogoutStaticTest(unittest.TestCase):
                             "RemoveFromGroup not found after disband block")
         self.assertLess(disband_pos, remove_pos,
                         "Disband must come before RemoveFromGroup in the logout path")
+        self.assertIn("m_Socket", src[disband_pos:remove_pos].split("// remove player from the group")[1],
+                      "ordinary group removal must keep its socket guard")
 
     def test_no_raid_or_bg_disband(self):
         """The disband path must NOT apply to raid or BG groups."""

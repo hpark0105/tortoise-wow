@@ -102,6 +102,9 @@ def load_primer(path=None):
         raise PrimerError("primer missing: %s" % os.path.basename(path))
     if len(raw) > PRIMER_MAX_BYTES:
         raise PrimerError("primer oversized: %d bytes" % len(raw))
+    # Git may check this text file out as CRLF on Windows. Pin the logical
+    # versioned primer, not the host's newline convention.
+    raw = raw.replace(b"\r\n", b"\n")
     text = raw.decode("utf-8")
     first = text.splitlines()[0] if text else ""
     if ("primer" not in first.lower() or

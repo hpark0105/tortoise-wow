@@ -41,6 +41,8 @@ struct PlayerBotEntry
     uint32 loginGeneration; // increments on every session creation (TW-009, AC2)
     uint32 followSeq; // TW-014: monotonic follow-goal sequence (0 = no goal yet)
     uint32 ownerAccountId; // TW-014: human account allowed to command this bot (0 = unowned)
+    uint32 recruiterAccountId; // transient party lease; never persisted as ownership
+    uint32 recruiterGuid;
     bool defendEnabled; // PORT-006: owner-enabled reactive defend (session-scoped)
     uint32 partySeq; // CMP-010: invalidates pending recruit/recall work
     uint32 pendingPartySeq; // sequence captured by an asynchronous recall
@@ -48,10 +50,12 @@ struct PlayerBotEntry
     uint32 botInitLeaderGuid; // PORT-035: leader for deferred .botinit setup (0 = none)
     uint8 personalitySchemaVersion; // PORT-020: 0 = no row yet; 1 = current; >1 = unknown (fail-closed)
     uint8 personalityProfile; // PORT-020: 0 = none/baseline, 1 = reckless, 2 = cautious
+    uint32 ownedWorldRetryAfterMs; // paced auto-login failure backoff (session-scoped)
+    uint32 zoneWorldRetryAfterMs; // independent zone-citizen login backoff
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), recruiterAccountId(0), recruiterGuid(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0), ownedWorldRetryAfterMs(0), zoneWorldRetryAfterMs(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), recruiterAccountId(0), recruiterGuid(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0), ownedWorldRetryAfterMs(0), zoneWorldRetryAfterMs(0)
     {}
 };
 
@@ -87,11 +91,11 @@ class PlayerBotMgr
         // provisioning of one persistent test bot, keyed on its stable identity
         // (character name). Safe to run more than once; completes an interrupted
         // run without touching unrelated records.
-        void ProvisionPersistentBot(const std::string& name);
+        void ProvisionPersistentBot(const std::string& name, bool zoneCitizen = false);
         // KAP-558 review (finding 1): idempotent ownership publication;
         // binds the configured owner (confOwnerAccount) at provision time
         // and never silently replaces a pre-existing owner binding.
-        bool PublishBotOwnership(uint32 guid, uint32 account);
+        bool PublishBotOwnership(uint32 guid, uint32 account, bool zoneCitizen = false);
 
         void Update(uint32 diff);
         bool AddOrRemoveBot();
@@ -111,6 +115,7 @@ class PlayerBotMgr
         void OnBotLogin(PlayerBotEntry *e);
     void SyncPersonality(PlayerBotEntry *e); // PORT-020: seed the persisted personality identity
         void OnPlayerInWorld(Player* pPlayer);
+        void OnPlayerRegistered(Player* pPlayer);
         void AddTempBot(uint32 account, uint32 time);
         void RefreshTempBot(uint32 account);
 
@@ -136,6 +141,9 @@ class PlayerBotMgr
         // PORT-022 (KAP-558): bounded nonblocking companion-conversation
         // transport (disabled when PlayerBot.ConversationServiceURL is empty).
         Companion::Conversation::ConversationTransport& ConversationTransport() { return m_conversationTransport; }
+        uint32 GetWorldIntentIntervalMs() const { return confWorldIntentIntervalMs; }
+        bool IsWorldIntentEnabled() const { return confWorldIntentEnabled; }
+        bool SubmitWorldIntent(PlayerBotEntry* entry, std::string const& context, uint32 nowMs);
         // BL-003 (KAP-558): bounded async encounter-summary persistence.
         Companion::Learning::Store& LearningStore() { return m_learningStore; }
         bool QueueLearningRollback(uint32 charGuid);
@@ -199,10 +207,11 @@ class PlayerBotMgr
         // persistent companion into the issuer's party, enable reactive
         // defend, and arm owner-follow. Online companions are set up
         // immediately; offline ones queue their login (BotRecall) and finish
-        // the setup in OnPlayerInWorld via botInitLeaderGuid. Outcome counts
+        // the setup after ObjectAccessor registration via botInitLeaderGuid. Outcome counts
         // are out params so the chat handler reports them without re-walking
         // the roster.
-        bool BotInit(Player* issuer, uint32& readyCount, uint32& deferredCount, uint32& skippedCount);
+        bool BotInit(Player* issuer, uint32& readyCount, uint32& deferredCount, uint32& skippedCount,
+                     const std::string& botName = "");
 
         uint32 GenBotAccountId() { return ++_maxAccountId; }
         PlayerBotStats& GetStats(){ return m_stats; }
@@ -229,10 +238,29 @@ class PlayerBotMgr
 
         uint32 confMinBots;
         uint32 confMaxBots;
+        uint32 confOwnedWorldTarget; // opt-in global owned roster warm count
+        uint32 confOwnedWorldPaceMs; // one owned login attempt per interval
+        uint32 m_lastOwnedWorldRefresh = 0;
+        uint32 m_lastOwnedWorldDiagnosticMs = 0;
+        uint32 m_ownedWorldCursor = 0;
+        void UpdateOwnedWorldPopulation();
+        uint32 confZoneWorldTarget = 0; // opt-in independent population count
+        uint32 confZoneWorldPaceMs = 5000;
+        float confZoneWorldRadiusYd = 250.0f;
+        uint32 confZoneWorldTestAnchorGuid = 0; // disposable socketless fixture only
+        uint32 confZoneProvisionLevel = 1; // initial level of newly created citizens only
+        uint32 m_lastZoneWorldRefresh = 0;
+        uint32 m_zoneWorldCursor = 0;
+        void UpdateZoneWorldPopulation();
+        bool confWorldIntentEnabled = false;
+        uint32 confWorldIntentIntervalMs = 600000;
+        uint32 confWorldIntentGlobalPaceMs = 10000;
+        uint32 m_lastWorldIntentSubmitMs = 0;
         uint32 confBotsRefresh;
         uint32 confUpdateDiff;
         bool confDebug;
         std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
+        std::string confZoneProvisionName; // Alliance-only independent citizens
         uint32 confOwnerAccount; // KAP-558 review: human account bound to new provisions (0 = unowned)
         bool confMirrorMarkerBackfill; // KAP-558 review: one-shot legacy mirror-marker backfill at login (default on)
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)

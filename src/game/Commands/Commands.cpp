@@ -19521,7 +19521,21 @@ bool ChatHandler::HandleBotRecallCommand(char* args)
 // ---------------------------------------------------------------------------
 bool ChatHandler::HandleBotInitCommand(char* args)
 {
-    (void)args;
+    std::string botName(args ? args : "");
+    size_t const begin = botName.find_first_not_of(" \t\r\n");
+    if (begin != std::string::npos)
+    {
+        botName = botName.substr(begin);
+        size_t const end = botName.find_first_of(" \t\r\n");
+        if (end != std::string::npos)
+        {
+            SendSysMessage("Usage: .botinit [botname]");
+            SetSentErrorMessage(true);
+            return false;
+        }
+    }
+    else
+        botName.clear();
     Player* p = GetPlayer();
     if (!p)
     {
@@ -19530,10 +19544,11 @@ bool ChatHandler::HandleBotInitCommand(char* args)
         return false;
     }
     uint32 ready = 0, deferred = 0, skipped = 0;
-    bool const ok = sPlayerBotMgr.BotInit(p, ready, deferred, skipped);
+    bool const ok = sPlayerBotMgr.BotInit(p, ready, deferred, skipped, botName);
     if (!ok)
     {
-        SendSysMessage("No owned companions found.");
+        SendSysMessage(botName.empty() ? "No owned companions found." :
+                       "Owned companion not found or could not be initialized.");
         SetSentErrorMessage(true);
     }
     else

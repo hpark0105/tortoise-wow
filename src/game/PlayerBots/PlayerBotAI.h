@@ -58,6 +58,7 @@ class PlayerBotAI: public PlayerAI
         // seq is at or below the current one is stale and never resumes.
         void FollowGoal(uint32 leaderGuid, uint32 seq);
         void FollowStop();
+        void ReleaseToWorld(); // clear owner orders when dismissed from party
         void Hold(uint32 seq); // invalidate prior orders; persist until a new order
         // PORT-005 (KAP-558): owner-selected assist target. The manager
         // validated ownership, party membership and the target before
@@ -68,6 +69,10 @@ class PlayerBotAI: public PlayerAI
         void AssistTarget(uint64_t targetGuid, uint32 seq);
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
+        virtual bool IsZoneCitizen() const { return false; }
+        virtual bool UpdateIndependentActivity(uint32 /*diff*/) { return false; }
+        virtual void PrepareZoneSpawn(uint32, uint32, uint32, float, float, float) {}
+        virtual void ClearZoneSpawn() {}
         // Helpers
         bool SpawnNewPlayer(WorldSession* sess, uint8 _class, uint32 _race, uint32 mapId, uint32 instanceId, float dx, float dy, float dz, float o);
         PlayerBotEntry* botEntry;
@@ -154,6 +159,16 @@ class PlayerBotAI: public PlayerAI
         uint32 _followGroupId = 0; // zero preserves legacy ungrouped follow
         bool _followReached = false;
         uint32 _followDebugTimer = 0;
+        // An ungrouped owned bot roams around its release point instead of
+        // shadowing its owner. Reset when it returns to a party.
+        bool _independentHomeSet = false;
+        float _independentHomeX = 0.0f;
+        float _independentHomeY = 0.0f;
+        float _independentHomeZ = 0.0f;
+        bool _worldIntentPending = false;
+        uint32 _worldIntentSubmitMs = 0;
+        uint32 _worldIntentNextMs = 0;
+        uint32 _worldRestUntilMs = 0;
         // PORT-018 (KAP-558): shared party planner round state (the
         // transport lives in PlayerBotMgr; disabled unless a service
         // URL is configured).
@@ -192,6 +207,7 @@ class PlayerBotAI: public PlayerAI
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
+        void WorldIntentStep();
         void PresenceStep(uint32 diff); // bounded party event cues
         bool IsPresenceSpeaker(Player const* owner) const;
         void SayPresenceCue(Companion::Presence::Cue cue);
@@ -345,5 +361,39 @@ class PopulateAreaBotAI: public PlayerBotAI
         float _x, _y, _z;
         float _radius;
         uint32 _team;
+};
+
+// An independently owned-by-its-own-account roster character. Placement is
+// prepared from a live human's zone before login and consumed once, before
+// the player is added to the map. Ordinary saved-position login is unchanged.
+class ZoneCitizenAI: public PlayerBotAI
+{
+    public:
+        explicit ZoneCitizenAI(Player* player = nullptr) : PlayerBotAI(player) {}
+        bool IsZoneCitizen() const override { return true; }
+        bool UpdateIndependentActivity(uint32 diff) override;
+        void PrepareZoneSpawn(uint32 map, uint32 zone, uint32 team,
+                              float x, float y, float z) override;
+        void ClearZoneSpawn() override { _spawnPrepared = false; }
+        void BeforeAddToMap(Player* player) override;
+    private:
+        bool _spawnPrepared = false;
+        uint32 _spawnMap = 0;
+        uint32 _spawnZone = 0;
+        uint32 _spawnTeam = 0;
+        float _spawnX = 0.0f, _spawnY = 0.0f, _spawnZ = 0.0f;
+        bool _activityHomeSet = false;
+        uint32 _activityMap = 0;
+        uint32 _activityZone = 0;
+        float _activityHomeX = 0.0f, _activityHomeY = 0.0f, _activityHomeZ = 0.0f;
+        bool _travelActive = false;
+        float _travelX = 0.0f, _travelY = 0.0f, _travelZ = 0.0f;
+        uint32 _travelTimeMs = 0;
+        uint64_t _travelHuntGuid = 0;
+        uint32 _destinationScanMs = 0;
+        uint32 _failedHuntGuid = 0;
+        uint32 _failedHuntMs = 0;
+        uint32 _activityPauseMs = 0;
+        uint32 _huntScanMs = 0;
 };
 #endif

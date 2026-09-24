@@ -19,6 +19,7 @@
 #include "Group.h"
 #include "MasterPlayer.h"
 #include "PlayerBotAI.h"
+#include "Map.h"
 #include "Anticheat.h"
 #include <cctype>
 #include <cstdlib>
@@ -123,11 +124,32 @@ void PlayerBotMgr::LoadConfig()
     enable = sConfig.GetBoolDefault("PlayerBot.Enable", false);
     confMinBots = sConfig.GetIntDefault("PlayerBot.MinBots", 3);
     confMaxBots = sConfig.GetIntDefault("PlayerBot.MaxBots", 10);
+    // Separate from the ambient Min/Max controller and disabled by default.
+    int32 const ownedTarget = sConfig.GetIntDefault("PlayerBot.OwnedWorldTarget", 0);
+    confOwnedWorldTarget = ownedTarget > 0 ? std::min<uint32>((uint32)ownedTarget, 200u) : 0;
+    int32 const ownedPace = sConfig.GetIntDefault("PlayerBot.OwnedWorldPaceMs", 5000);
+    confOwnedWorldPaceMs = std::max<uint32>(1000u, ownedPace > 0 ? (uint32)ownedPace : 0u);
+    int32 const zoneTarget = sConfig.GetIntDefault("PlayerBot.ZoneWorldTarget", 0);
+    confZoneWorldTarget = zoneTarget > 0 ? std::min<uint32>((uint32)zoneTarget, 200u) : 0;
+    int32 const zonePace = sConfig.GetIntDefault("PlayerBot.ZoneWorldPaceMs", 5000);
+    confZoneWorldPaceMs = std::max<uint32>(1000u, zonePace > 0 ? (uint32)zonePace : 0u);
+    confZoneWorldRadiusYd = std::max(80.0f, std::min(500.0f,
+        sConfig.GetFloatDefault("PlayerBot.ZoneWorldRadiusYd", 250.0f)));
+    confZoneWorldTestAnchorGuid = (uint32)std::max<int32>(0,
+        sConfig.GetIntDefault("PlayerBot.ZoneWorldTestAnchorGuid", 0));
+    confZoneProvisionLevel = std::min<uint32>(60u, std::max<int32>(1,
+        sConfig.GetIntDefault("PlayerBot.ZoneProvisionLevel", 1)));
+    confWorldIntentEnabled = sConfig.GetBoolDefault("PlayerBot.WorldIntentEnable", false);
+    int32 const intentInterval = sConfig.GetIntDefault("PlayerBot.WorldIntentIntervalMs", 600000);
+    confWorldIntentIntervalMs = std::max<uint32>(60000u, intentInterval > 0 ? (uint32)intentInterval : 0u);
+    int32 const intentPace = sConfig.GetIntDefault("PlayerBot.WorldIntentGlobalPaceMs", 10000);
+    confWorldIntentGlobalPaceMs = std::max<uint32>(5000u, intentPace > 0 ? (uint32)intentPace : 0u);
     confBotsRefresh = sConfig.GetIntDefault("PlayerBot.Refresh", 60000);
     confDebug = sConfig.GetBoolDefault("PlayerBot.Debug", false);
     confUpdateDiff = sConfig.GetIntDefault("PlayerBot.UpdateMs", 10000);
     forceLogoutDelay = sConfig.GetBoolDefault("PlayerBot.ForceLogoutDelay", true);
     confProvisionName = sConfig.GetStringDefault("PlayerBot.Provision", "");
+    confZoneProvisionName = sConfig.GetStringDefault("PlayerBot.ZoneProvision", "");
     // KAP-558 review (finding 1): the human account bound to every new
     // provision at publish time (0 = unowned legacy behavior); and the
     // one-shot legacy mirror-marker backfill at bot login.
@@ -404,6 +426,11 @@ void PlayerBotMgr::Load()
     m_bots.clear();
     m_tempBots.clear();
     totalChance = 0;
+    m_lastOwnedWorldRefresh = 0;
+    m_lastZoneWorldRefresh = 0;
+    m_lastOwnedWorldDiagnosticMs = 0;
+    m_ownedWorldCursor = 0;
+    m_lastWorldIntentSubmitMs = 0;
 
     // 2- Configuration
     LoadConfig();
@@ -443,6 +470,24 @@ void PlayerBotMgr::Load()
         }
     }
 
+
+    if (!confZoneProvisionName.empty())
+    {
+        size_t from = 0;
+        while (from <= confZoneProvisionName.size())
+        {
+            size_t sep = confZoneProvisionName.find(';', from);
+            size_t to = sep == std::string::npos ? confZoneProvisionName.size() : sep;
+            std::string spec = confZoneProvisionName.substr(from, to - from);
+            size_t begin = spec.find_first_not_of(" \t");
+            if (begin != std::string::npos)
+            {
+                size_t end = spec.find_last_not_of(" \t");
+                ProvisionPersistentBot(spec.substr(begin, end - begin + 1), true);
+            }
+            from = sep == std::string::npos ? confZoneProvisionName.size() + 1 : sep + 1;
+        }
+    }
 
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
     // Roster rows without a valid bot_ownership binding are quarantined: logged and skipped.
@@ -559,12 +604,40 @@ void PlayerBotMgr::Load()
     // request into 0..1 and could produce a target above capacity.
       uint32 capacity = 0;
     for (auto const& entry : m_bots)
-        if (!entry.second->customBot && !entry.second->isChatBot && !entry.second->ownerAccountId)
+        if (!entry.second->customBot && !entry.second->isChatBot &&
+            !entry.second->ownerAccountId && !entry.second->ai->IsZoneCitizen())
             ++capacity;
     confMinBots = std::min(confMinBots, capacity);
     confMaxBots = std::min(confMaxBots, capacity);
     if (confMaxBots < confMinBots)
         confMaxBots = confMinBots;
+    uint32 ownedCapacity = 0;
+    for (auto const& entry : m_bots)
+        if (entry.second->persistent && entry.second->ownerAccountId &&
+            !entry.second->customBot && !entry.second->isChatBot)
+            ++ownedCapacity;
+    if (confOwnedWorldTarget > ownedCapacity)
+    {
+        sLog.outString("Playerbot: owned world target %u clamped to roster capacity %u",
+                       confOwnedWorldTarget, ownedCapacity);
+        confOwnedWorldTarget = ownedCapacity;
+    }
+
+    if (confDebug)
+        sLog.outString("[OwnedWorld] roster:%u target:%u pace_ms:%u",
+                       ownedCapacity, confOwnedWorldTarget, confOwnedWorldPaceMs);
+    uint32 zoneCapacity = 0;
+    for (auto const& entry : m_bots)
+        if (entry.second->persistent && !entry.second->ownerAccountId &&
+            !entry.second->customBot && !entry.second->isChatBot &&
+            entry.second->ai->IsZoneCitizen())
+            ++zoneCapacity;
+    if (confZoneWorldTarget > zoneCapacity)
+        confZoneWorldTarget = zoneCapacity;
+    if (confDebug)
+        sLog.outString("[ZoneCitizen] roster:%u target:%u pace_ms:%u radius:%.0f",
+                       zoneCapacity, confZoneWorldTarget, confZoneWorldPaceMs,
+                       confZoneWorldRadiusYd);
 
     // 6- Start initial bots
     if (enable)
@@ -656,6 +729,9 @@ void PlayerBotMgr::SyncPersonality(PlayerBotEntry *e)
 void PlayerBotMgr::OnBotLogout(PlayerBotEntry *e)
 {
     e->state = PB_STATE_OFFLINE;
+    e->recruiterAccountId = 0;
+    e->recruiterGuid = 0;
+    e->defendEnabled = false;
     // TW-009 (AC2): the session is being dropped; clear the identity so a
     // later login starts from a clean state.
     e->session = nullptr;
@@ -710,10 +786,21 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
     e->ai->OnPlayerLogin();
 
     // Preserve saved death state; recovery must use normal game paths.
+  }
+
+void PlayerBotMgr::OnPlayerRegistered(Player* player)
+{
+    WorldSession* sess = player ? player->GetSession() : nullptr;
+    PlayerBotEntry* e = sess ? sess->GetBot() : nullptr;
+    if (!e || e->session != sess || e->state != PB_STATE_ONLINE ||
+        sObjectAccessor.FindPlayer(player->GetObjectGuid()) != player)
+        return;
 
     // CMP-010: a recall may have queued this login. Revalidate every mutable
-    // condition after the bot is actually in-world; a newer dismiss/recruit
-    // changes partySeq and makes this completion stale.
+    // condition after ObjectAccessor registration. Map::Add invokes
+    // OnPlayerInWorld before registration; recruiting there writes the group
+    // roster but Group::AddMember cannot link the bot's live Player, so a
+    // bot-first tap has no group XP recipient.
     if (e->pendingPartyLeaderGuid)
     {
         uint32 const leaderGuid = e->pendingPartyLeaderGuid;
@@ -882,6 +969,30 @@ void PlayerBotMgr::Update(uint32 diff)
     }
 
     m_elapsedTime += diff;
+    UpdateOwnedWorldPopulation();
+    UpdateZoneWorldPopulation();
+    for (auto const& item : m_bots)
+    {
+        PlayerBotEntry* e = item.second;
+        if (!e->recruiterGuid || !e->ai || !e->ai->IsZoneCitizen())
+            continue;
+        Player* bot = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, (uint32)e->playerGUID));
+        Player* recruiter = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, e->recruiterGuid));
+        Group* group = bot ? bot->GetGroup() : nullptr;
+        if (bot && recruiter && recruiter->GetSession() &&
+            recruiter->GetSession()->GetAccountId() == e->recruiterAccountId &&
+            group && group == recruiter->GetGroup() &&
+            group->IsMember(recruiter->GetObjectGuid()))
+            continue;
+        if (bot && e->ai)
+            e->ai->ReleaseToWorld();
+        e->defendEnabled = false;
+        e->recruiterAccountId = 0;
+        e->recruiterGuid = 0;
+        if (group && bot)
+            group->RemoveMember(bot->GetObjectGuid(), GROUP_LEAVE);
+        sLog.outString("[ZoneCitizen] party lease ended bot:%s guid:%u", e->name.c_str(), (uint32)e->playerGUID);
+    }
     // BL-003 (KAP-558): bounded async learning-store pump (never blocks).
     m_learningStore.Pump();
     // BL-003: bounded retention pace (10 minutes) through the store.
@@ -1107,6 +1218,7 @@ bool PlayerBotMgr::AddOrRemoveBot()
     uint32 active = 0;
     for (auto const& entry : m_bots)
         if (!entry.second->customBot && !entry.second->isChatBot && !entry.second->ownerAccountId &&
+            !entry.second->ai->IsZoneCitizen() &&
             (entry.second->state == PB_STATE_ONLINE || entry.second->state == PB_STATE_LOADING))
             ++active;
     /*
@@ -1119,6 +1231,185 @@ bool PlayerBotMgr::AddOrRemoveBot()
     if (target < active)
         return DeleteRandomBot();
     return false;
+}
+
+// Opt-in owned world presence. This is an activation target, not a party
+// command: existing manual companions count toward it, and one offline
+// identity is queued per interval. The manager never removes a companion
+// merely because the target changes; configuration is applied on restart.
+void PlayerBotMgr::UpdateOwnedWorldPopulation()
+{
+    if (!enable || !confOwnedWorldTarget ||
+        m_elapsedTime - m_lastOwnedWorldRefresh < confOwnedWorldPaceMs)
+        return;
+    m_lastOwnedWorldRefresh = m_elapsedTime;
+
+    uint32 active = 0;
+    for (auto const& item : m_bots)
+    {
+        PlayerBotEntry const* e = item.second;
+        if (e->persistent && e->ownerAccountId && !e->customBot && !e->isChatBot &&
+            (e->state == PB_STATE_LOADING || e->state == PB_STATE_ONLINE))
+            ++active;
+    }
+    if (active >= confOwnedWorldTarget || m_bots.empty())
+        return;
+
+    // Round-robin GUID order prevents one bad identity from starving the
+    // rest. A failed login is retried no sooner than one minute later.
+    auto it = m_bots.upper_bound(m_ownedWorldCursor);
+    for (size_t seen = 0; seen < m_bots.size(); ++seen)
+    {
+        if (it == m_bots.end())
+            it = m_bots.begin();
+        PlayerBotEntry* e = it->second;
+        ++it;
+        if (!e->persistent || !e->ownerAccountId || e->customBot || e->isChatBot ||
+            e->state != PB_STATE_OFFLINE ||
+            (e->ownedWorldRetryAfterMs && m_elapsedTime < e->ownedWorldRetryAfterMs))
+            continue;
+        WorldSession* ownerSession = sWorld.FindSession(e->ownerAccountId);
+        Player* owner = ownerSession ? ownerSession->GetPlayer() : nullptr;
+        if (!owner || !owner->IsInWorld())
+        {
+            if (confDebug && m_elapsedTime - m_lastOwnedWorldDiagnosticMs >= 10000)
+            {
+                m_lastOwnedWorldDiagnosticMs = m_elapsedTime;
+                sLog.outString("[OwnedWorld] waiting owner bot:%u session:%u player:%u inworld:%u",
+                               (uint32)e->playerGUID, ownerSession ? 1 : 0,
+                               owner ? 1 : 0, owner && owner->IsInWorld() ? 1 : 0);
+            }
+            continue;
+        }
+
+        m_ownedWorldCursor = (uint32)e->playerGUID;
+        if (!AddBot((uint32)e->playerGUID, false))
+        {
+            e->ownedWorldRetryAfterMs = m_elapsedTime + 60000;
+            sLog.outError("Playerbot: owned world login rejected guid:%u active:%u target:%u",
+                          (uint32)e->playerGUID, active, confOwnedWorldTarget);
+            return;
+        }
+        e->ownedWorldRetryAfterMs = 0;
+        sLog.outString("Playerbot: owned world login queued guid:%u active:%u target:%u",
+                       (uint32)e->playerGUID, active + 1, confOwnedWorldTarget);
+        return;
+    }
+}
+
+// Zone citizens are a separate, opt-in population. They are full persistent
+// characters, never spawned by the legacy ambient Min/Max controller. A
+// human must be in a continent zone before one login is queued. Candidate
+// positions come from the map's walkable-position query and are checked
+// against the same zone before the AI receives a one-use pre-map placement.
+void PlayerBotMgr::UpdateZoneWorldPopulation()
+{
+    if (!enable || !confZoneWorldTarget ||
+        m_elapsedTime - m_lastZoneWorldRefresh < confZoneWorldPaceMs)
+        return;
+    m_lastZoneWorldRefresh = m_elapsedTime;
+
+    uint32 active = 0;
+    for (auto const& item : m_bots)
+    {
+        PlayerBotEntry const* e = item.second;
+        if (e->persistent && !e->ownerAccountId && e->ai->IsZoneCitizen() &&
+            (e->state == PB_STATE_LOADING || e->state == PB_STATE_ONLINE))
+            ++active;
+    }
+    if (active >= confZoneWorldTarget || m_bots.empty())
+        return;
+
+    Player* anchor = nullptr;
+    for (auto const& item : sObjectAccessor.GetPlayers())
+    {
+        Player* p = item.second;
+        if (!p || !p->GetSession() ||
+            (p->GetSession()->GetBot() &&
+             p->GetGUIDLow() != confZoneWorldTestAnchorGuid) ||
+            !p->IsInWorld() || !p->IsAlive() || p->IsInCombat() ||
+            !p->GetMap() || (p->GetMapId() != 0 && p->GetMapId() != 1) ||
+            !p->GetZoneId())
+            continue;
+        if (!anchor || p->GetGUIDLow() < anchor->GetGUIDLow())
+            anchor = p;
+    }
+    if (!anchor)
+        return;
+
+    auto it = m_bots.upper_bound(m_zoneWorldCursor);
+    for (size_t seen = 0; seen < m_bots.size(); ++seen)
+    {
+        if (it == m_bots.end())
+            it = m_bots.begin();
+        PlayerBotEntry* e = it->second;
+        ++it;
+        if (!e->persistent || e->ownerAccountId || e->customBot || e->isChatBot ||
+            !e->ai->IsZoneCitizen() || e->state != PB_STATE_OFFLINE ||
+            (e->zoneWorldRetryAfterMs && m_elapsedTime < e->zoneWorldRetryAfterMs))
+            continue;
+        PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)e->playerGUID);
+        if (!data || Player::TeamForRace(data->uiRace) != anchor->GetTeam())
+            continue;
+
+        Map* map = anchor->GetMap();
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        bool placed = false;
+        float const minDistance = std::min(80.0f, confZoneWorldRadiusYd / 3.0f);
+        for (uint32 attempt = 0; attempt < 12; ++attempt)
+        {
+            x = anchor->GetPositionX();
+            y = anchor->GetPositionY();
+            z = anchor->GetPositionZ();
+            if (!map->GetWalkRandomPosition(nullptr, x, y, z, confZoneWorldRadiusYd))
+                continue;
+            float const dx = x - anchor->GetPositionX();
+            float const dy = y - anchor->GetPositionY();
+            if (dx * dx + dy * dy < minDistance * minDistance ||
+                map->GetTerrain()->GetZoneId(x, y, z) != anchor->GetZoneId())
+                continue;
+            placed = true;
+            break;
+        }
+        m_zoneWorldCursor = (uint32)e->playerGUID;
+        if (!placed)
+        {
+            e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
+            sLog.outError("[ZoneCitizen] no walkable same-zone point guid:%u zone:%u",
+                          (uint32)e->playerGUID, anchor->GetZoneId());
+            return;
+        }
+        e->ai->PrepareZoneSpawn(anchor->GetMapId(), anchor->GetZoneId(),
+                                anchor->GetTeam(), x, y, z);
+        if (!AddBot((uint32)e->playerGUID, false))
+        {
+            e->ai->ClearZoneSpawn();
+            e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
+            sLog.outError("[ZoneCitizen] login rejected guid:%u zone:%u",
+                          (uint32)e->playerGUID, anchor->GetZoneId());
+            return;
+        }
+        e->zoneWorldRetryAfterMs = 0;
+        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u active:%u target:%u",
+                       (uint32)e->playerGUID, anchor->GetZoneId(), active + 1,
+                       confZoneWorldTarget);
+        return;
+    }
+}
+
+bool PlayerBotMgr::SubmitWorldIntent(PlayerBotEntry* e, std::string const& context,
+                                     uint32 nowMs)
+{
+    if (!confWorldIntentEnabled || !e || !e->persistent || !e->ownerAccountId ||
+        e->state != PB_STATE_ONLINE || !m_conversationTransport.Enabled() ||
+        nowMs - m_lastWorldIntentSubmitMs < confWorldIntentGlobalPaceMs)
+        return false;
+    if (!m_conversationTransport.Submit((uint32)e->playerGUID, 0, 0,
+            (uint32)e->personalityProfile, context, nowMs,
+            Companion::Conversation::ConvKind::WorldIntent))
+        return false;
+    m_lastWorldIntentSubmitMs = nowMs;
+    return true;
 }
 
 bool PlayerBotMgr::AddBot(PlayerBotAI* ai)
@@ -1259,7 +1550,8 @@ bool PlayerBotMgr::AddRandomBot()
 {
     uint32 availableChance = 0;
     for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
-        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot && it->second->ownerAccountId == 0)  // PORT-002
+        if (it->second->state == PB_STATE_OFFLINE && !it->second->customBot &&
+            it->second->ownerAccountId == 0 && !it->second->ai->IsZoneCitizen())
             availableChance += it->second->chance;
     if (!availableChance)
         return false;
@@ -1272,7 +1564,8 @@ bool PlayerBotMgr::AddRandomBot()
         if (it->second->state != PB_STATE_OFFLINE)
             continue;
 
-        if (it->second->customBot || it->second->ownerAccountId != 0)
+        if (it->second->customBot || it->second->ownerAccountId != 0 ||
+            it->second->ai->IsZoneCitizen())
             continue;  // PORT-002: owned companions managed by recruit/recall only
 
         uint32 chance = it->second->chance;
@@ -1327,7 +1620,8 @@ bool PlayerBotMgr::DeleteRandomBot()
     // that are online. Owned companions are managed exclusively by recruit/recall.
     uint32 eligibleCount = 0;
     for (std::map<uint32, PlayerBotEntry*>::const_iterator it = m_bots.begin(); it != m_bots.end(); ++it)
-        if (!it->second->customBot && !it->second->isChatBot && it->second->ownerAccountId == 0 && it->second->state == PB_STATE_ONLINE)
+        if (!it->second->customBot && !it->second->isChatBot && it->second->ownerAccountId == 0 &&
+            !it->second->ai->IsZoneCitizen() && it->second->state == PB_STATE_ONLINE)
             eligibleCount++;
     if (eligibleCount < 1)
         return false;
@@ -1337,7 +1631,8 @@ bool PlayerBotMgr::DeleteRandomBot()
     std::map<uint32, PlayerBotEntry*>::iterator iter;
     for (iter = m_bots.begin(); iter != m_bots.end(); iter++)
     {
-        if (!iter->second->customBot && !iter->second->isChatBot && iter->second->ownerAccountId == 0 && iter->second->state == PB_STATE_ONLINE)
+        if (!iter->second->customBot && !iter->second->isChatBot && iter->second->ownerAccountId == 0 &&
+            !iter->second->ai->IsZoneCitizen() && iter->second->state == PB_STATE_ONLINE)
         {
             onlinePassed++;
             if (onlinePassed == idDelete)
@@ -1456,8 +1751,9 @@ uint32 PlayerBotMgr::AllocateReservedBotAccount()
 // an owner binding that already exists for this guid wins over the
 // configured value - an operator's manual binding is reported, never
 // silently replaced.
-bool PlayerBotMgr::PublishBotOwnership(uint32 guid, uint32 account)
+bool PlayerBotMgr::PublishBotOwnership(uint32 guid, uint32 account, bool zoneCitizen)
 {
+    uint32 const ownerAccount = zoneCitizen ? 0 : confOwnerAccount;
     QueryResult *existing = CharacterDatabase.PQuery(
         "SELECT owner_account_id FROM bot_ownership WHERE char_guid = %u", guid);
     if (existing)
@@ -1465,20 +1761,22 @@ bool PlayerBotMgr::PublishBotOwnership(uint32 guid, uint32 account)
         Field *f = existing->Fetch();
         uint32 bound = (f && !f->IsNULL()) ? f->GetUInt32() : 0;
         delete existing;
-        if (bound && bound != confOwnerAccount)
+        if (bound && bound != ownerAccount)
         {
             sLog.outError("Playerbot provisioning: guid %u already bound to owner account %u; keeping the existing binding (configured owner %u not applied)",
-                          guid, bound, confOwnerAccount);
+                          guid, bound, ownerAccount);
+            if (zoneCitizen)
+                return false;
         }
         return true; // the binding row already exists and is settled
     }
-    if (confOwnerAccount)
+    if (ownerAccount)
     {
         if (!CharacterDatabase.DirectPExecute(
                 "INSERT INTO bot_ownership (char_guid, account_id, bot_type, provision_version, owner_account_id) VALUES (%u, %u, 1, 2, %u)",
-                guid, account, confOwnerAccount))
+                guid, account, ownerAccount))
             return false;
-        sLog.outString("Playerbot provisioning: guid %u owner-bound to account %u at provision", guid, confOwnerAccount);
+        sLog.outString("Playerbot provisioning: guid %u owner-bound to account %u at provision", guid, ownerAccount);
         return true;
     }
     return CharacterDatabase.DirectPExecute(
@@ -1486,7 +1784,7 @@ bool PlayerBotMgr::PublishBotOwnership(uint32 guid, uint32 account)
         guid, account);
 }
 
-void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
+void PlayerBotMgr::ProvisionPersistentBot(const std::string& name, bool zoneCitizen)
 {
     BotIdentitySpec spec;
     if (!ParseBotIdentitySpec(name, spec))
@@ -1499,6 +1797,11 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         (spec.gender != GENDER_MALE && spec.gender != GENDER_FEMALE))
     {
         sLog.outError("Playerbot provisioning: identity spec for '%s' has an invalid race/class/gender combination", characterName.c_str());
+        return;
+    }
+    if (zoneCitizen && Player::TeamForRace(spec.race) != ALLIANCE)
+    {
+        sLog.outError("Playerbot zone provisioning: '%s' is not Alliance; rejected", characterName.c_str());
         return;
     }
     // Identity sanity: WoW 1.x character names are letters-only (2..12). Digits
@@ -1601,11 +1904,18 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         delete bq;
     }
     bool hasRoster = false;
-    QueryResult *rq = CharacterDatabase.PQuery("SELECT COUNT(*) FROM playerbot WHERE char_guid = %u", guid);
+    std::string rosterAI;
+    QueryResult *rq = CharacterDatabase.PQuery("SELECT ai FROM playerbot WHERE char_guid = %u", guid);
     if (rq)
     {
-        hasRoster = rq->Fetch()[0].GetUInt32() > 0;
+        hasRoster = true;
+        rosterAI = rq->Fetch()[0].GetString();
         delete rq;
+    }
+    if (zoneCitizen && hasRoster && rosterAI != "ZoneCitizenAI")
+    {
+        sLog.outError("Playerbot zone provisioning: '%s' has a non-citizen roster; rejected", characterName.c_str());
+        return;
     }
 
     // Any existing binding is validated before any write, regardless of roster
@@ -1618,13 +1928,26 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
             sLog.outError("Playerbot provisioning: '%s' (guid %u) has an inconsistent binding (bound=%u owner=%u version=%u); rejected, nothing modified (fail closed)", characterName.c_str(), guid, boundAccount, account, provisionVersion);
             return;
         }
+        if (zoneCitizen)
+        {
+            QueryResult* owner = CharacterDatabase.PQuery(
+                "SELECT owner_account_id FROM bot_ownership WHERE char_guid = %u", guid);
+            bool const owned = owner && !owner->Fetch()[0].IsNULL() && owner->Fetch()[0].GetUInt32() != 0;
+            delete owner;
+            if (owned)
+            {
+                sLog.outError("Playerbot zone provisioning: '%s' is owner-bound; rejected", characterName.c_str());
+                return;
+            }
+        }
         if (hasRoster)
         {
             sLog.outString("Playerbot provisioning: '%s' (guid %u account %u) already provisioned; idempotent no-op", characterName.c_str(), guid, account);
             return;
         }
         // Consistent binding but a missing roster row: complete the roster only.
-        if (!CharacterDatabase.PExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid))
+        if (!CharacterDatabase.PExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, '%s')",
+                guid, zoneCitizen ? "ZoneCitizenAI" : "Default"))
         {
             sLog.outError("Playerbot provisioning: roster completion failed for '%s' (guid %u); not provisioned", characterName.c_str(), guid);
             return;
@@ -1733,6 +2056,12 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         nativePlayer.SetAtLoginFlag(AT_LOGIN_FIRST);
         MasterPlayer nativeMaster(&provisionSession);
         nativeMaster.Create(&nativePlayer);
+        if (zoneCitizen && confZoneProvisionLevel > 1)
+        {
+            nativePlayer.GiveLevel(confZoneProvisionLevel);
+            nativePlayer.InitTalentForLevel();
+            nativePlayer.SetUInt32Value(PLAYER_XP, 0);
+        }
         if (!nativePlayer.SaveToDB(false, true, true))
         {
             sLog.outError("Playerbot provisioning: native save failed for '%s'; incomplete marker retained, no roster published", characterName.c_str());
@@ -1762,28 +2091,30 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name)
         // Publish ownership only after native state is complete (the
         // configured owner is bound here, KAP-558 review). MyISAM means
         // this remains resumable rather than cross-table atomic.
-        if (!PublishBotOwnership(guid, account) ||
-            !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid))
+        if (!PublishBotOwnership(guid, account, zoneCitizen) ||
+            !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, '%s')",
+                guid, zoneCitizen ? "ZoneCitizenAI" : "Default"))
         {
             sLog.outError("Playerbot provisioning: native character '%s' saved but roster publication failed; retry will resume", characterName.c_str());
             return;
         }
         sObjectMgr.InsertPlayerInCache(&nativePlayer);
         sObjectMgr.UpdatePlayerCachedPosition(&nativePlayer);
-        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u owner %u); bound (provision_version=2)", characterName.c_str(), guid, account, confOwnerAccount);
+        sLog.outString("Playerbot provisioning: created native character '%s' (guid %u account %u owner %u); bound (provision_version=2)", characterName.c_str(), guid, account, zoneCitizen ? 0 : confOwnerAccount);
         return;
     }
 
     // Native-ready orphan resume: complete it in place (same identity).
-    if (!PublishBotOwnership(guid, account) ||
-        (!hasRoster && !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, 'Default')", guid)))
+    if (!PublishBotOwnership(guid, account, zoneCitizen) ||
+        (!hasRoster && !CharacterDatabase.DirectPExecute("INSERT INTO playerbot (char_guid, chance, ai) VALUES (%u, 100, '%s')",
+            guid, zoneCitizen ? "ZoneCitizenAI" : "Default")))
     {
         sLog.outError("Playerbot provisioning: native-ready orphan completion failed for '%s' (guid %u); retryable", characterName.c_str(), guid);
         return;
     }
     if (!sObjectMgr.GetPlayerDataByGUID(guid))
         sObjectMgr.LoadPlayerCacheData(guid);
-    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u owner %u) completed (native-ready character); bound (provision_version=2)", characterName.c_str(), guid, account, confOwnerAccount);
+    sLog.outString("Playerbot provisioning: '%s' (guid %u account %u owner %u) completed (native-ready character); bound (provision_version=2)", characterName.c_str(), guid, account, zoneCitizen ? 0 : confOwnerAccount);
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,7 +2171,10 @@ bool PlayerBotMgr::IsOwnedCompanionGroup(Group const* group, uint32 logoutGuid, 
             continue;
         }
         PlayerBotEntry* entry = FindBotByGuid(slot.guid.GetCounter());
-        if (!entry || entry->ownerAccountId != accountId)
+        if (!entry || (entry->ownerAccountId != accountId &&
+            !(entry->ai && entry->ai->IsZoneCitizen() &&
+              entry->recruiterAccountId == accountId &&
+              entry->recruiterGuid == logoutGuid)))
             return false;
         companionFound = true;
     }
@@ -2405,6 +2739,10 @@ bool PlayerBotMgr::ValidatePartyOwner(Player* issuer, PlayerBotEntry* e, const c
     if (!issuer || !issuer->GetSession() || !e)
         return false;
     uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
+    if (e->ai && e->ai->IsZoneCitizen() && e->recruiterAccountId == issuerAcc &&
+        e->recruiterGuid == issuer->GetGUIDLow() && issuer->GetGroup() &&
+        issuer->GetGroup()->IsMember(ObjectGuid(HIGHGUID_PLAYER, (uint32)e->playerGUID)))
+        return true;
     if (!e->ownerAccountId)
     {
         sLog.outError("party %s rejected unowned bot:%s issuer:%u", action, e->name.c_str(), issuer->GetGUIDLow());
@@ -2438,6 +2776,11 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
     if (!bot || bot->GetSession() != e->session)
     {
         sLog.outError("party recruit rejected missing in-world bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
+        return false;
+    }
+    if (sObjectAccessor.FindPlayer(bot->GetObjectGuid()) != bot)
+    {
+        sLog.outError("party recruit rejected unregistered bot:%s issuer:%u", e->name.c_str(), issuer->GetGUIDLow());
         return false;
     }
     // KAP-558 hardening: no combat gate. The UI-invite settlement path
@@ -2517,8 +2860,9 @@ bool PlayerBotMgr::CompletePartyRecruit(Player* issuer, PlayerBotEntry* e, uint3
         return false;
     }
     group->BroadcastGroupUpdate();
-    sLog.outString("party recruit accepted bot:%s guid:%u leader:%u seq:%u group:%u",
-                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), sequence, group->GetId());
+    sLog.outString("party recruit accepted bot:%s guid:%u leader:%u seq:%u group:%u live:%u",
+                   e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), sequence, group->GetId(),
+                   bot->GetGroup() == group && sObjectMgr.GetGroupById(group->GetId()) == group ? 1 : 0);
     return true;
 }
 
@@ -2571,26 +2915,43 @@ bool PlayerBotMgr::BotRecall(Player* issuer, const std::string& botName)
 // (CompletePartyRecruit reports already-member and returns true), so a
 // re-run only re-arms defend and follow. Offline companions queue their
 // login through BotRecall; the botInitLeaderGuid marker carries the
-// defend+follow setup into OnPlayerInWorld when that login completes.
+// defend+follow setup after ObjectAccessor registration when login completes.
 // Every outcome is logged; the counts are reported through out params for
 // the chat handler summary.
 // ---------------------------------------------------------------------------
-bool PlayerBotMgr::BotInit(Player* issuer, uint32& readyCount, uint32& deferredCount, uint32& skippedCount)
+bool PlayerBotMgr::BotInit(Player* issuer, uint32& readyCount, uint32& deferredCount, uint32& skippedCount,
+                           const std::string& botName)
 {
     readyCount = 0;
     deferredCount = 0;
     skippedCount = 0;
     if (!issuer || !issuer->GetSession())
         return false;
+    PlayerBotEntry* selected = botName.empty() ? nullptr : FindBotByName(botName);
+    if (!botName.empty() && (!selected || !selected->persistent ||
+                            selected->ownerAccountId != issuer->GetSession()->GetAccountId()))
+        return false;
     uint32 const issuerAcc = issuer->GetSession()->GetAccountId();
     uint32 const issuerGuid = issuer->GetGUIDLow();
+    uint32 pendingSlots = 0;
     for (std::map<uint32, PlayerBotEntry*>::iterator it = m_bots.begin(); it != m_bots.end(); ++it)
     {
         PlayerBotEntry* e = it->second;
+        if (selected && e != selected)
+            continue;
         if (!e->persistent || e->ownerAccountId != issuerAcc)
             continue;
         if (uint32(e->playerGUID) == issuerGuid)
             continue; // defensive: a human issuer is never its own companion
+        Group* group = issuer->GetGroup();
+        bool const alreadyMember = group &&
+            group->IsMember(ObjectGuid(HIGHGUID_PLAYER, uint32(e->playerGUID)));
+        uint32 const occupied = group ? group->GetMembersCount() : 1;
+        if (!alreadyMember && occupied + pendingSlots >= MAX_GROUP_SIZE)
+        {
+            ++skippedCount;
+            continue; // .botinit all never queues a roster-sized party burst
+        }
         if (!BotRecall(issuer, e->name))
         {
             ++skippedCount;
@@ -2609,6 +2970,8 @@ bool PlayerBotMgr::BotInit(Player* issuer, uint32& readyCount, uint32& deferredC
         }
         else
         {
+            if (!alreadyMember)
+                ++pendingSlots;
             e->botInitLeaderGuid = issuerGuid;
             sLog.outString("botinit deferred bot:%s guid:%u leader:%u",
                            e->name.c_str(), e->playerGUID, issuerGuid);
@@ -2649,12 +3012,11 @@ bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
     }
     ObjectGuid const botGuid(HIGHGUID_PLAYER, uint32(e->playerGUID));
     Player* bot = sObjectAccessor.FindPlayer(botGuid);
-    // KAP-558 hardening: no combat gate (same rationale as recruit), and
-    // dismiss no longer benches the bot: it stays online and returns to
-    // its default owner-follow (the command reference promises "stays
-    // online"). DeleteBot here forced a .botrecall after every dismiss.
+    // Dismiss keeps the durable bot online, but clears party orders so it
+    // can roam locally instead of shadowing the owner.
     if (bot && e->ai)
-        e->ai->FollowStop();
+        e->ai->ReleaseToWorld();
+    e->defendEnabled = false;
     // Owner authority covers both leadership cases: if the issuer leads,
     // the bot is kicked; if the bot holds leadership (classic rules
     // transfer it to the bot on owner logout), the bot leaves itself.
@@ -2664,6 +3026,11 @@ bool PlayerBotMgr::BotDismiss(Player* issuer, const std::string& botName)
         group->RemoveMember(botGuid, GROUP_KICK);
     else
         group->RemoveMember(botGuid, GROUP_LEAVE);
+    if (e->ai && e->ai->IsZoneCitizen())
+    {
+        e->recruiterAccountId = 0;
+        e->recruiterGuid = 0;
+    }
     sLog.outString("party dismiss accepted bot:%s guid:%u leader:%u seq:%u method:%s",
                    e->name.c_str(), e->playerGUID, issuer->GetGUIDLow(), e->partySeq,
                    issuerLeads ? "kick" : "leave");
@@ -2768,7 +3135,15 @@ void PlayerBotMgr::HandlePartyInvite(Player* issuer, Player* invitee)
 
     uint32 const inviterAcc = issuer->GetSession() ? issuer->GetSession()->GetAccountId() : 0;
 
-    if (bot->ownerAccountId && inviterAcc == bot->ownerAccountId)
+    bool const citizenInvite = bot->ai && bot->ai->IsZoneCitizen() &&
+        !bot->ownerAccountId && !bot->recruiterAccountId && inviterAcc &&
+        (!issuer->GetSession()->GetBot() ||
+         issuer->GetGUIDLow() == confZoneWorldTestAnchorGuid) && issuer->IsInWorld() &&
+        invitee->IsInWorld() && invitee->IsAlive() &&
+        issuer->GetTeam() == ALLIANCE && invitee->GetTeam() == ALLIANCE &&
+        issuer->GetMapId() == invitee->GetMapId() &&
+        issuer->GetZoneId() == invitee->GetZoneId();
+    if ((bot->ownerAccountId && inviterAcc == bot->ownerAccountId) || citizenInvite)
     {
         // Accept: mirror of WorldSession::HandleGroupAcceptOpcode.
         if (group->GetLeaderGuid() == invitee->GetObjectGuid())
@@ -2815,6 +3190,16 @@ void PlayerBotMgr::HandlePartyInvite(Player* issuer, Player* invitee)
                           bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
                           group->GetLeaderGuid().GetCounter());
             return;
+        }
+        if (citizenInvite)
+        {
+            bot->recruiterAccountId = inviterAcc;
+            bot->recruiterGuid = issuer->GetGUIDLow();
+            bot->defendEnabled = true;
+            bot->ai->FollowGoal(bot->recruiterGuid, ++bot->followSeq);
+            sLog.outString("[ZoneCitizen] recruited bot:%s guid:%u player:%u account:%u",
+                           bot->name.c_str(), (uint32)bot->playerGUID,
+                           bot->recruiterGuid, inviterAcc);
         }
         group->BroadcastGroupUpdate();
         sLog.outString("party invite accepted bot:%s guid:%u leader:%u group:%u inviter-acc:%u",

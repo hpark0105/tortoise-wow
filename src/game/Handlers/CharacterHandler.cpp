@@ -818,7 +818,12 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder *holder)
     if (alreadyOnline)
         pCurrChar->GetMap()->ExistingPlayerLogin(pCurrChar); // SendInitSelf ...
     else
+    {
         sObjectAccessor.AddObject(pCurrChar);
+        // Deferred companion recruitment needs ObjectAccessor registration:
+        // Group::AddMember resolves the live Player through that registry.
+        sPlayerBotMgr.OnPlayerRegistered(pCurrChar);
+    }
 
     //DEBUG_LOG("Player %s added to Map.",pCurrChar->GetName());
     pCurrChar->GetSocial()->SendFriendList();

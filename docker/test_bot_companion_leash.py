@@ -269,6 +269,8 @@ class BotCompanionLeashTests(unittest.TestCase):
         self.assertLessEqual(float(reached[-1][2]), 2.0)
         # While the owner is absent: no companion offensive lines at all.
         window = self.logs[ilogout:irelogin]
+        self.assertIn("TW-OWNER-PARTY-LOGOUT: disband companion-only party ", window,
+                      "socketless owner logout must disband the companion party")
         for line in window.splitlines():
             if ("GUID:%d" % C) not in line:
                 continue
