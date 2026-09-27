@@ -43,14 +43,14 @@ namespace Companion
 namespace Conversation
 {
 
-inline constexpr uint32_t kMaxBots = 256;         // bounded shared table for party + world bots
+inline constexpr uint32_t kMaxBots = 512;         // bounded shared table for party + world bots
 inline constexpr uint32_t kRoundTimeoutMs = 4000; // hard per-round I/O deadline
 inline constexpr uint64_t kReplyAgeMs = 10000;    // reply freshness budget
 inline constexpr uint32_t kMaxTextBytes = 200;    // sanitized inbound text
 inline constexpr uint32_t kMaxReplyBytes = 120;   // sanitized outbound reply
 
 enum class ConvState { Idle, InFlight, Ready };
-enum class ConvKind { Party, WorldIntent };
+enum class ConvKind { Party, CombatReview, WorldIntent };
 
 // One companion's conversation round. Value-only: no engine pointers, no
 // I/O, no threads - the same code runs under the transport lock and

@@ -49,6 +49,9 @@ UPDATE tw_char.bot_ownership SET owner_account_id=NULL WHERE char_guid={d.COMP_G
             cls.ownership = p.db_exec(
                 cls.base, cls.env,
                 f"SELECT COALESCE(owner_account_id,0) FROM bot_ownership WHERE char_guid={d.COMP_GUID}")
+            cls.learning_mode = p.db_exec(
+                cls.base, cls.env,
+                f"SELECT mode FROM bot_learning_profile WHERE char_guid={d.COMP_GUID}")
             (cls.evidence / "world.log").write_text(cls.logs, encoding="utf-8")
             p.teardown_lab(cls.base, cls.env, cls.project, cls.evidence)
             cls.base = None
@@ -59,6 +62,7 @@ UPDATE tw_char.bot_ownership SET owner_account_id=NULL WHERE char_guid={d.COMP_G
 
     def test_unowned_citizen_follows_and_defends_only_during_invite(self):
         self.assertEqual(self.ownership.strip(), "0")
+        self.assertEqual(self.learning_mode.strip(), "1")  # observe-only, auto-enrolled
         self.assertIn(f"[ZoneCitizen] recruited bot:Defendcomp guid:{d.COMP_GUID}", self.logs)
         self.assertIn(f"[PlayerBot][Follow] path GUID:{d.COMP_GUID} leader:{d.OWNER_GUID}", self.logs)
         self.assertIn(f"[PlayerBot][Defend] fighting GUID:{d.COMP_GUID} target:{d.ATTACKER_GUID}", self.logs)

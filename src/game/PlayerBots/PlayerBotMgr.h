@@ -52,10 +52,15 @@ struct PlayerBotEntry
     uint8 personalityProfile; // PORT-020: 0 = none/baseline, 1 = reckless, 2 = cautious
     uint32 ownedWorldRetryAfterMs; // paced auto-login failure backoff (session-scoped)
     uint32 zoneWorldRetryAfterMs; // independent zone-citizen login backoff
+    // Repeated deaths request an allocator-driven move.  This is transient
+    // runtime state: the durable danger journal remains the source of truth.
+    bool zoneWorldSafetyRelocation;
+    uint32 zoneWorldSafetyExcludeMap;
+    uint32 zoneWorldSafetyExcludeZone;
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), recruiterAccountId(0), recruiterGuid(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0), ownedWorldRetryAfterMs(0), zoneWorldRetryAfterMs(0)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 _chance): playerGUID(guid), accountId(account), chance(_chance), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), recruiterAccountId(0), recruiterGuid(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0), ownedWorldRetryAfterMs(0), zoneWorldRetryAfterMs(0), zoneWorldSafetyRelocation(false), zoneWorldSafetyExcludeMap(0), zoneWorldSafetyExcludeZone(0)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), recruiterAccountId(0), recruiterGuid(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0), ownedWorldRetryAfterMs(0), zoneWorldRetryAfterMs(0)
+    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), ai(nullptr), loadingSinceMs(0), persistent(false), session(nullptr), loginQueued(false), loginGeneration(0), followSeq(0), ownerAccountId(0), recruiterAccountId(0), recruiterGuid(0), defendEnabled(false), partySeq(0), pendingPartySeq(0), pendingPartyLeaderGuid(0), botInitLeaderGuid(0), personalitySchemaVersion(0), personalityProfile(0), ownedWorldRetryAfterMs(0), zoneWorldRetryAfterMs(0), zoneWorldSafetyRelocation(false), zoneWorldSafetyExcludeMap(0), zoneWorldSafetyExcludeZone(0)
     {}
 };
 
@@ -82,6 +87,7 @@ struct PlayerBotStats
 class PlayerBotMgr
 {
     public:
+        static uint32 const CitizenZoneMinimumProductiveSharePercent = 15;
         PlayerBotMgr();
         ~PlayerBotMgr();
 
@@ -144,6 +150,22 @@ class PlayerBotMgr
         uint32 GetWorldIntentIntervalMs() const { return confWorldIntentIntervalMs; }
         bool IsWorldIntentEnabled() const { return confWorldIntentEnabled; }
         bool SubmitWorldIntent(PlayerBotEntry* entry, std::string const& context, uint32 nowMs);
+        // Select one same-continent, level-appropriate anchor for a citizen
+        // that has outgrown its current zone. The AI still walks every leg;
+        // this method never moves, logs out, or teleports a character.
+        bool SelectCitizenProgressionDestination(Player const* citizen, uint32& zone,
+                                                 float& x, float& y, float& z) const;
+        // Creature-spawn difficulty is the authoritative fallback where the
+        // client AreaTable has a zero or missing level. It is derived once
+        // from ordinary, non-NPC creature spawns when map anchors are built.
+        uint32 GetCitizenZoneDifficulty(uint32 mapId, uint32 zoneId) const;
+        uint32 GetCitizenZoneProductiveSharePercent(uint32 mapId, uint32 zoneId,
+                                                    uint32 minimumLevel,
+                                                    uint32 maximumLevel) const;
+        // Persist only a pathfinding-confirmed, same-zone arrival edge. This
+        // is world evidence for later route selection, never a movement order.
+        void RecordCitizenRouteEdge(Player const* citizen, float fromX, float fromY,
+                                    float toX, float toY) const;
         // BL-003 (KAP-558): bounded async encounter-summary persistence.
         Companion::Learning::Store& LearningStore() { return m_learningStore; }
         bool QueueLearningRollback(uint32 charGuid);
@@ -245,15 +267,26 @@ class PlayerBotMgr
         uint32 m_ownedWorldCursor = 0;
         void UpdateOwnedWorldPopulation();
         uint32 confZoneWorldTarget = 0; // opt-in independent population count
+        uint32 confZoneProvisionCount = 0; // deterministic generated citizens
         uint32 confZoneWorldPaceMs = 5000;
+        uint32 confZoneWorldLoginBatch = 4; // bounded citizens queued per pace interval
         float confZoneWorldRadiusYd = 250.0f;
         uint32 confZoneWorldTestAnchorGuid = 0; // disposable socketless fixture only
+        bool confZoneWorldBackgroundSeed = false; // opt-in unattended bootstrap
+        std::map<std::pair<uint32, uint32>, uint32> confZoneWorldZoneTargets;
         uint32 confZoneProvisionLevel = 1; // initial level of newly created citizens only
         uint32 m_lastZoneWorldRefresh = 0;
         uint32 m_zoneWorldCursor = 0;
         // Static creature locations provide zone-wide spawn candidates. Build
         // each map/zone list once rather than scanning the world per login.
         std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>> m_zoneSpawnAnchors;
+        struct CitizenZoneDifficulty
+        {
+            uint32 samples = 0;
+            uint32 totalLevel = 0;
+            uint32 levelWeight[61] = {};
+        };
+        std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty> m_zoneSpawnDifficulty;
         void UpdateZoneWorldPopulation();
         bool confWorldIntentEnabled = false;
         uint32 confWorldIntentIntervalMs = 600000;

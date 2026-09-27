@@ -74,11 +74,20 @@ class PlayerBotAI: public PlayerAI
         virtual void OnLevelUp();
         virtual void BeforeAddToMap(Player* player) {} // me=nullptr at call
         virtual bool IsZoneCitizen() const { return false; }
+        bool IsLootEligibleBot() const;
+        bool ShouldNeedLoot(ItemPrototype const* proto) const;
+        virtual uint32 GetProgressionDestinationZone() const { return 0; }
+        // Recompute the citizen's durable level-band intent from the
+        // character level and current world zone.  The character level/XP
+        // remains the source of truth; this intent is only a bounded cue for
+        // the population/travel systems and never teleports a live player.
+        void RefreshCitizenProgression(bool forceLog = false);
         bool UpdateIndependentActivity(uint32 diff);
         void StartActivityTravel(float x, float y, float z, uint64_t huntGuid,
-                                 uint8 targetNode = 255);
+                                 uint8 targetNode = 255, bool progressionLeg = false);
         void RememberActivityArrival();
         void AbandonActivityTravel();
+        void UpdateCombatPursuit(Unit* target, uint32 diff);
         virtual void PrepareZoneSpawn(uint32, uint32, uint32, float, float, float) {}
         virtual void ClearZoneSpawn() {}
         // Helpers
@@ -95,6 +104,10 @@ class PlayerBotAI: public PlayerAI
         Companion::Combat::TargetSlots _targets;
         Companion::Encounter::Recorder _encounter; // BL-002: observe-only encounter recorder (value-only)
         uint32 _learningEncounterSeq = 0; // BL-003: per-session encounter sequence (1-based)
+        uint32 _combatReviewLastMs = 0; // party-only model review pace; encounter evidence persists separately
+        uint32 _combatCautionUntilMs = 0; // BL-009: validated, bounded lesson effect
+        uint8 _partyMemoryLesson = 0; // BL-009: one short-lived party memory
+        uint32 _activitySpeechUntilMs = 0; // low-frequency citizen purpose cue
         uint8 _lootRetryCount = 0;
         uint32 _lootWindowMs = 0; // PORT-007: remaining (ms) of the bounded corpse-loot attempt; 0 = armed
         uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
@@ -113,6 +126,17 @@ class PlayerBotAI: public PlayerAI
         float _followPathY = 0.0f;
         float _followPathZ = 0.0f;
         uint32 _followPathAgeMs = 0; // PORT-008: age (ms) of the last issued follow path
+        // Keep the core chase path alive between combat decisions. If the
+        // target is blocked by uneven terrain, bounded local nudges let the
+        // navmesh pursue a new approach instead of resetting the same path.
+        uint32 _combatPursuitTargetGuid = 0;
+        float _combatPursuitLastDistance = 0.0f;
+        uint32 _combatPursuitStalledMs = 0;
+        bool _combatPursuitNudging = false;
+        float _combatPursuitNudgeX = 0.0f;
+        float _combatPursuitNudgeY = 0.0f;
+        float _combatPursuitNudgeZ = 0.0f;
+        uint32 _combatPursuitNudgeMs = 0;
         bool _obsAlive = true;
         uint32 _obsTimer = 0;
         // MVP-006: one declared supported quest progressed through the
@@ -229,6 +253,26 @@ class PlayerBotAI: public PlayerAI
         uint32 _personalityLastExprMs = 0;
         uint32 _socialCooldownMs = 0;
         uint8 _lastLevel = 0;
+        uint8 _progressionBand = 0;
+        uint32 _progressionZone = 0;
+        int32 _progressionZoneLevel = 0;
+        bool _progressionOverleveled = false;
+        uint32 _progressionReportMs = 0;
+        bool _progressionTravelActive = false;
+        uint32 _progressionRetryMs = 0;
+        uint32 _progressionTargetZone = 0;
+        float _progressionFinalX = 0.0f, _progressionFinalY = 0.0f, _progressionFinalZ = 0.0f;
+        uint32 _citizenVisitedZones = 0;
+        uint8 _citizenActivityIntent = 0; // durable: idle/progression/hunt/patrol/rest
+        uint8 _citizenDeathsAtSpot = 0;
+        uint32 _citizenDeathMap = 0, _citizenDeathZone = 0;
+        float _citizenDeathX = 0.0f, _citizenDeathY = 0.0f;
+        uint32 _citizenDangerZoneUntilMs = 0;
+        // Set only after repeated deaths at one observed location.  The
+        // manager consumes this as a request to re-place an ungrouped
+        // citizen, rather than leaving it to rest beside the same threat.
+        bool _citizenSafetyRelocationRequested = false;
+        bool TryCitizenDisengage(Unit* threat);
         bool TryLootDefeatedTarget();
         void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
         bool CorpseLootStep(Creature* creature);
@@ -248,6 +292,13 @@ class PlayerBotAI: public PlayerAI
         // BL-003: persist a completed encounter summary to the learning store
         // (owned companions only; no-op otherwise).
         void TryPersistLearningSummary();
+        void ApplyValidatedCombatLesson(Companion::Encounter::Recorder::Summary const& summary,
+                                        uint32 nowMs);
+        bool BeginProgressionTravel();
+        bool AdvanceProgressionTravel();
+        void LoadCitizenJournal();
+        void PersistCitizenJournal(uint8 intent, bool recordVisit = false);
+        void SetCitizenActivityIntent(uint8 intent, char const* reason);
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);
@@ -322,6 +373,10 @@ class PlayerBotAI: public PlayerAI
         // Repair owned-companion equipment in memory at login.
         void RepairBrokenEquipment();
         uint32 SelectOffensiveSpell(Unit* target) const;
+        // Independent citizens use this only for a real low-health solo
+        // emergency; party healing continues through the declared triage
+        // policy below.
+        bool TryCitizenEmergencySelfHeal();
         // Hardening (KAP-558): cast-or-attack step; arms _abilityTimer only
         // on a successful cast (see TryOffensiveCastOrAttack).
         bool TryOffensiveCastOrAttack(Unit* target);
@@ -415,6 +470,16 @@ class ZoneCitizenAI: public PlayerBotAI
     public:
         explicit ZoneCitizenAI(Player* player = nullptr) : PlayerBotAI(player) {}
         bool IsZoneCitizen() const override { return true; }
+        bool WantsSafetyRelocation() const { return _citizenSafetyRelocationRequested; }
+        void AcknowledgeSafetyRelocation() { _citizenSafetyRelocationRequested = false; }
+        void GetSafetyRelocationExclusion(uint32& map, uint32& zone) const
+        {
+            map = _citizenDeathMap;
+            zone = _citizenDeathZone;
+        }
+        uint32 GetProgressionDestinationZone() const override { return _spawnZone; }
+        uint32 GetPreparedSpawnMap() const { return _spawnPrepared ? _spawnMap : 0; }
+        uint32 GetPreparedSpawnZone() const { return _spawnPrepared ? _spawnZone : 0; }
         void PrepareZoneSpawn(uint32 map, uint32 zone, uint32 team,
                               float x, float y, float z) override;
         void ClearZoneSpawn() override { _spawnPrepared = false; }

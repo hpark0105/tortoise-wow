@@ -449,7 +449,7 @@ static void TestMaintenanceOrdering()
     Wire(store, db);
     store.MarkStaleInterrupted();
     store.QueueRetention();
-    CHECK(store.MaintenancePending() == 3);
+    CHECK(store.MaintenancePending() == 4);
     CHECK(store.Enqueue(MakeSummary(100)));
 
     // Maintenance runs before summary writes, one per tick, and shares
@@ -471,14 +471,18 @@ static void TestMaintenanceOrdering()
 
     store.Pump();
     CHECK(db.pending.size() == 1);
-    CHECK(db.pending[0].sql.rfind("INSERT IGNORE INTO bot_learning_encounter", 0) == 0);
+    CHECK(db.pending[0].sql.rfind("DELETE FROM bot_learning_lesson", 0) == 0);
     db.FireNext(true);
 
+    store.Pump();
+    CHECK(db.pending.size() == 1);
+    CHECK(db.pending[0].sql.rfind("INSERT IGNORE INTO bot_learning_encounter", 0) == 0);
+    db.FireNext(true);
     store.Pump();
     CHECK(db.pending.empty());
     CHECK(store.MaintenancePending() == 0);
     CHECK(!store.WriterDisabled());
-    CHECK(db.submitted == 4);
+    CHECK(db.submitted == 5);
 }
 
 static void TestStaleRetryOnSubmitFailure()
@@ -528,7 +532,11 @@ static void TestMaintenanceFailureDoesNotDisableStore()
     CHECK(db.pending.size() == 1);
     CHECK(db.pending[0].sql.rfind("UPDATE bot_learning_profile SET mode = 4", 0) == 0);
     db.FireNext(true);
-    store.Pump(); // reap: success; the summary is submitted in the same tick
+    store.Pump(); // reap: success; lesson retention is submitted next
+    CHECK(db.pending.size() == 1);
+    CHECK(db.pending[0].sql.rfind("DELETE FROM bot_learning_lesson", 0) == 0);
+    db.FireNext(true);
+    store.Pump();
     CHECK(db.pending.size() == 1);
     CHECK(db.pending[0].sql.rfind("INSERT IGNORE INTO bot_learning_encounter", 0) == 0);
     db.FireNext(true);
@@ -641,6 +649,15 @@ static void TestLearningControlQueue()
 
     CHECK(!store.QueueControl(CL::ControlAction::Rollback, 42));
     CHECK(db.pending.empty()); // fail closed: no partial audit or rollback
+
+    CHECK(store.QueueLesson(42, 1, 3, 7, 12000, 80, 220, 6));
+    store.Pump();
+    CHECK(db.pending.size() == 1);
+    CHECK(db.pending[0].sql.find("INSERT INTO bot_learning_lesson") == 0);
+    CHECK(db.pending[0].sql.find("SELECT 42,1,3,7,12000,80,220,6,1") != std::string::npos);
+    db.FireNext(true); store.Pump();
+    CHECK(db.pending.empty());
+    CHECK(!store.QueueLesson(42, 9, 4, 0, 0, 0, 0, 0));
 }
 
 static void TestExternalControlReservation()

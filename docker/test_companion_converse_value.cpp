@@ -28,7 +28,7 @@ static int g_failures = 0;
 int main()
 {
     // Budgets and layout pins.
-    CHECK(CC::kMaxBots == 256);
+    CHECK(CC::kMaxBots == 512);
     CHECK(CC::kRoundTimeoutMs == 4000);
     CHECK(CC::kReplyAgeMs == 10000);
     CHECK(CC::kMaxTextBytes == 200);
@@ -61,6 +61,19 @@ int main()
     std::string worldReply;
     CHECK(world.Poll(0, 0, 1101, worldReply));
     CHECK(worldReply == "rest");
+
+    // A combat debrief carries the party signature and remains advisory
+    // text; a changed party discards it before anyone can hear it.
+    CC::ConvRound review;
+    CHECK(review.Submit(610004, 42, 610001, 2, "duration_ms=1000", 1000, 6,
+                        CC::ConvKind::CombatReview)
+          == CC::ConvRound::SubmitResult::Accepted);
+    CHECK(review.kind == CC::ConvKind::CombatReview);
+    CHECK(review.OnResult(6, true, "I can time that better.", 1100)
+          == CC::ConvRound::Result::Applied);
+    std::string reviewReply;
+    CHECK(!review.Poll(43, 610001, 1101, reviewReply));
+    CHECK(review.state == CC::ConvState::Idle);
 
     // Empty or oversize text: rejected fail-closed, state untouched.
     CC::ConvRound r2;

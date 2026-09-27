@@ -40,6 +40,7 @@
 #include "Chat.h"
 #include "Logging/DatabaseLogger.hpp"
 #include "ScriptObjects.h"
+#include "PlayerBots/PlayerBotAI.h"
 
 #include <array>
 
@@ -1009,7 +1010,11 @@ void Group::StartLootRoll(Creature* lootTarget, LootMethod method, Loot* loot, u
         if (!playerToRoll || !playerToRoll->GetSession() || !playerToRoll->IsInWorld())
             continue;
 
-        if ((method != NEED_BEFORE_GREED || playerToRoll->CanUseItem(item) == EQUIP_ERR_OK) &&
+        PlayerBotAI* botAI = playerToRoll->AI() ? dynamic_cast<PlayerBotAI*>(playerToRoll->AI()) : nullptr;
+        bool const autoRollBot = botAI && playerToRoll->GetSession()->GetBot() &&
+                                 botAI->IsLootEligibleBot();
+        bool const canNeed = playerToRoll->CanUseItem(item) == EQUIP_ERR_OK;
+        if ((method != NEED_BEFORE_GREED || canNeed || autoRollBot) &&
             lootItem.AllowedForPlayer(playerToRoll, lootTarget) &&
             loot->IsAllowedLooter(playerToRoll->GetObjectGuid(), false) &&
             playerToRoll->IsWithinLootXPDist(lootTarget))
@@ -1028,6 +1033,23 @@ void Group::StartLootRoll(Creature* lootTarget, LootMethod method, Loot* loot, u
         loot->items[itemSlot].is_blocked = true;
         lootTarget->StartGroupLoot(this, LOOT_ROLL_TIMEOUT);
         RollId.push_back(r);
+
+        // Bots participate in the authoritative roll exactly once. Need is
+        // reserved for an item the class can equip; otherwise a citizen or
+        // owned companion greed-rolls. CountTheRoll remains responsible for
+        // winner selection and inventory storage.
+        for (GroupReference *itr = GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* playerToRoll = itr->getSource();
+            if (!playerToRoll || !playerToRoll->GetSession() || !playerToRoll->GetSession()->GetBot())
+                continue;
+            PlayerBotAI* botAI = playerToRoll->AI() ? dynamic_cast<PlayerBotAI*>(playerToRoll->AI()) : nullptr;
+            if (!botAI || !botAI->IsLootEligibleBot())
+                continue;
+            RollVote const vote = botAI->ShouldNeedLoot(item)
+                ? ROLL_NEED : ROLL_GREED;
+            CountRollVote(playerToRoll, lootTarget->GetObjectGuid(), itemSlot, vote);
+        }
     }
     else                                            // no looters??
         delete r;

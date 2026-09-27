@@ -22,6 +22,7 @@
 #include "Map.h"
 #include "Anticheat.h"
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 
@@ -156,13 +157,66 @@ void PlayerBotMgr::LoadConfig()
     int32 const ownedPace = sConfig.GetIntDefault("PlayerBot.OwnedWorldPaceMs", 5000);
     confOwnedWorldPaceMs = std::max<uint32>(1000u, ownedPace > 0 ? (uint32)ownedPace : 0u);
     int32 const zoneTarget = sConfig.GetIntDefault("PlayerBot.ZoneWorldTarget", 0);
-    confZoneWorldTarget = zoneTarget > 0 ? std::min<uint32>((uint32)zoneTarget, 200u) : 0;
+    confZoneWorldTarget = zoneTarget > 0 ? std::min<uint32>((uint32)zoneTarget, 500u) : 0;
+    confZoneWorldZoneTargets.clear();
+    std::string const zoneTargets = sConfig.GetStringDefault("PlayerBot.ZoneWorldZoneTargets", "");
+    uint32 zoneTargetTotal = 0;
+    bool zoneTargetsValid = !zoneTargets.empty();
+    size_t zoneTargetFrom = 0;
+    while (zoneTargetsValid && zoneTargetFrom <= zoneTargets.size())
+    {
+        size_t const separator = zoneTargets.find(';', zoneTargetFrom);
+        size_t const end = separator == std::string::npos ? zoneTargets.size() : separator;
+        std::string const spec = zoneTargets.substr(zoneTargetFrom, end - zoneTargetFrom);
+        size_t const first = spec.find(':');
+        size_t const second = first == std::string::npos ? first : spec.find(':', first + 1);
+        if (first == std::string::npos || second == std::string::npos ||
+            spec.find(':', second + 1) != std::string::npos)
+        {
+            zoneTargetsValid = false;
+            break;
+        }
+        auto parseNumber = [](std::string const& value, uint32& number) -> bool
+        {
+            if (value.empty())
+                return false;
+            char* parseEnd = nullptr;
+            unsigned long const parsed = std::strtoul(value.c_str(), &parseEnd, 10);
+            if (!parseEnd || *parseEnd || parsed > 500u)
+                return false;
+            number = (uint32)parsed;
+            return true;
+        };
+        uint32 mapId = 0, zoneId = 0, count = 0;
+        if (!parseNumber(spec.substr(0, first), mapId) || mapId > 1 ||
+            !parseNumber(spec.substr(first + 1, second - first - 1), zoneId) || !zoneId ||
+            !parseNumber(spec.substr(second + 1), count) || !count ||
+            zoneTargetTotal + count > 500u ||
+            !confZoneWorldZoneTargets.emplace(std::make_pair(mapId, zoneId), count).second)
+        {
+            zoneTargetsValid = false;
+            break;
+        }
+        zoneTargetTotal += count;
+        zoneTargetFrom = separator == std::string::npos ? zoneTargets.size() + 1 : separator + 1;
+    }
+    if (!zoneTargets.empty() && (!zoneTargetsValid || !confZoneWorldTarget ||
+        zoneTargetTotal != confZoneWorldTarget))
+    {
+        sLog.outError("[ZoneCitizen] invalid zone target plan; expected map:zone:count entries totaling target:%u",
+                      confZoneWorldTarget);
+        confZoneWorldZoneTargets.clear();
+    }
     int32 const zonePace = sConfig.GetIntDefault("PlayerBot.ZoneWorldPaceMs", 5000);
     confZoneWorldPaceMs = std::max<uint32>(1000u, zonePace > 0 ? (uint32)zonePace : 0u);
+    int32 const zoneBatch = sConfig.GetIntDefault("PlayerBot.ZoneWorldLoginBatch", 4);
+    confZoneWorldLoginBatch = std::min<uint32>(8u, std::max<int32>(1, zoneBatch));
     confZoneWorldRadiusYd = std::max(80.0f, std::min(500.0f,
         sConfig.GetFloatDefault("PlayerBot.ZoneWorldRadiusYd", 250.0f)));
     confZoneWorldTestAnchorGuid = (uint32)std::max<int32>(0,
         sConfig.GetIntDefault("PlayerBot.ZoneWorldTestAnchorGuid", 0));
+    confZoneWorldBackgroundSeed = sConfig.GetBoolDefault(
+        "PlayerBot.ZoneWorldBackgroundSeed", false);
     confZoneProvisionLevel = std::min<uint32>(60u, std::max<int32>(1,
         sConfig.GetIntDefault("PlayerBot.ZoneProvisionLevel", 1)));
     confWorldIntentEnabled = sConfig.GetBoolDefault("PlayerBot.WorldIntentEnable", false);
@@ -176,6 +230,8 @@ void PlayerBotMgr::LoadConfig()
     forceLogoutDelay = sConfig.GetBoolDefault("PlayerBot.ForceLogoutDelay", true);
     confProvisionName = sConfig.GetStringDefault("PlayerBot.Provision", "");
     confZoneProvisionName = sConfig.GetStringDefault("PlayerBot.ZoneProvision", "");
+    int32 const generatedCitizens = sConfig.GetIntDefault("PlayerBot.ZoneProvisionCount", 0);
+    confZoneProvisionCount = generatedCitizens > 0 ? std::min<uint32>((uint32)generatedCitizens, 500u) : 0;
     // KAP-558 review (finding 1): the human account bound to every new
     // provision at publish time (0 = unowned legacy behavior); and the
     // one-shot legacy mirror-marker backfill at bot login.
@@ -515,6 +571,35 @@ void PlayerBotMgr::Load()
         }
     }
 
+    // Optional deterministic expansion for a large citizen population. Names
+    // are alphabetic and stable, so restart provisioning is idempotent. The
+    // caller supplies the number of generated citizens in addition to any
+    // explicit cohort in ZoneProvision.
+    static char const* const citizenGivenNames[] = {
+        "Alden", "Brina", "Corin", "Della", "Elric", "Fara", "Garrin", "Hessa", "Ilyan", "Joren",
+        "Kessa", "Loran", "Mira", "Nella", "Orin", "Pella", "Quinn", "Ressa", "Soren", "Talia",
+        "Ulric", "Vessa", "Wren", "Yara", "Zorin", "Avel", "Beren", "Cira", "Doran", "Eira",
+        "Fenn", "Garen", "Harlan", "Isolde", "Jessa", "Kalen", "Liora", "Merek", "Neris", "Owyn",
+        "Perrin", "Rylan", "Selene", "Tavin", "Una"
+    };
+    static char const* const citizenNameEndings[] = {
+        "ash", "bell", "brook", "dale", "fen", "glen", "hart", "lane", "moss", "vale"
+    };
+    uint32 const citizenGivenCount = sizeof(citizenGivenNames) / sizeof(citizenGivenNames[0]);
+    uint32 const citizenEndingCount = sizeof(citizenNameEndings) / sizeof(citizenNameEndings[0]);
+    for (uint32 i = 0; i < confZoneProvisionCount; ++i)
+    {
+        std::string name = std::string(citizenGivenNames[(i / citizenEndingCount) % citizenGivenCount]) +
+                           citizenNameEndings[i % citizenEndingCount];
+        uint8 const classes[] = {CLASS_WARRIOR, CLASS_PALADIN, CLASS_HUNTER,
+                                 CLASS_ROGUE, CLASS_MAGE, CLASS_WARLOCK,
+                                 CLASS_PRIEST};
+        uint8 const playerClass = classes[i % (sizeof(classes) / sizeof(classes[0]))];
+        uint8 const gender = (i / 2u) % 2u;
+        ProvisionPersistentBot(name + ",1," + std::to_string(playerClass) + "," +
+                               std::to_string(gender), true);
+    }
+
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
     // Roster rows without a valid bot_ownership binding are quarantined: logged and skipped.
     result = CharacterDatabase.PQuery(
@@ -661,9 +746,9 @@ void PlayerBotMgr::Load()
     if (confZoneWorldTarget > zoneCapacity)
         confZoneWorldTarget = zoneCapacity;
     if (confDebug)
-        sLog.outString("[ZoneCitizen] roster:%u target:%u pace_ms:%u radius:%.0f",
-                       zoneCapacity, confZoneWorldTarget, confZoneWorldPaceMs,
-                       confZoneWorldRadiusYd);
+    sLog.outString("[ZoneCitizen] roster:%u target:%u pace_ms:%u batch:%u radius:%.0f",
+                   zoneCapacity, confZoneWorldTarget, confZoneWorldPaceMs,
+                   confZoneWorldLoginBatch, confZoneWorldRadiusYd);
 
     // 6- Start initial bots
     if (enable)
@@ -1344,6 +1429,46 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             (e->state == PB_STATE_LOADING || e->state == PB_STATE_ONLINE))
             ++active;
     }
+
+    // A danger journal records evidence, while this manager owns the safe
+    // change of world placement.  Process a bounded number at once so a bad
+    // pocket cannot create a logout storm.  The next allocator pass gives
+    // each citizen a verified, level-matched zone other than this one.
+    uint32 safetyQueued = 0;
+    for (auto const& item : m_bots)
+    {
+        PlayerBotEntry* e = item.second;
+        if (!e || !e->persistent || e->ownerAccountId || e->customBot || e->isChatBot ||
+            !e->ai || !e->ai->IsZoneCitizen() ||
+            (e->state != PB_STATE_ONLINE && e->state != PB_STATE_OFFLINE) ||
+            e->recruiterAccountId)
+            continue;
+        ZoneCitizenAI* citizenAI = static_cast<ZoneCitizenAI*>(e->ai);
+        if (!citizenAI->WantsSafetyRelocation())
+            continue;
+        citizenAI->GetSafetyRelocationExclusion(e->zoneWorldSafetyExcludeMap,
+                                                e->zoneWorldSafetyExcludeZone);
+        if (!e->zoneWorldSafetyExcludeMap || !e->zoneWorldSafetyExcludeZone)
+            continue;
+        e->zoneWorldSafetyRelocation = true;
+        citizenAI->AcknowledgeSafetyRelocation();
+        // A fatal hit normally logs a solo citizen out before this periodic
+        // controller runs.  Preserve the request in either state; only a
+        // still-live bot needs an explicit logout.
+        if (e->state == PB_STATE_ONLINE)
+        {
+            if (!DeleteBot((uint32)e->playerGUID))
+                continue;
+            if (active)
+                --active;
+        }
+        ++safetyQueued;
+        sLog.outString("[ZoneCitizen][Survival] relocation queued guid:%u exclude_map:%u exclude_zone:%u batch:%u/%u",
+                       (uint32)e->playerGUID, e->zoneWorldSafetyExcludeMap,
+                       e->zoneWorldSafetyExcludeZone, safetyQueued, confZoneWorldLoginBatch);
+        if (safetyQueued >= confZoneWorldLoginBatch)
+            break;
+    }
     if (active >= confZoneWorldTarget || m_bots.empty())
         return;
 
@@ -1351,10 +1476,15 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
     for (auto const& item : sObjectAccessor.GetPlayers())
     {
         Player* p = item.second;
+        std::map<uint32, PlayerBotEntry*>::const_iterator botEntry = p
+            ? m_bots.find(p->GetGUIDLow()) : m_bots.end();
+        bool const isZoneCitizen = botEntry != m_bots.end() && botEntry->second &&
+            botEntry->second->ai && botEntry->second->ai->IsZoneCitizen();
         if (!p || !p->GetSession() ||
             (p->GetSession()->GetBot() &&
-             p->GetGUIDLow() != confZoneWorldTestAnchorGuid) ||
-            !p->IsInWorld() || !p->IsAlive() || p->IsInCombat() ||
+             p->GetGUIDLow() != confZoneWorldTestAnchorGuid &&
+             (!confZoneWorldBackgroundSeed || !isZoneCitizen)) ||
+            !p->IsInWorld() || !p->IsAlive() || (p->IsInCombat() && !isZoneCitizen) ||
             !p->GetMap() || (p->GetMapId() != 0 && p->GetMapId() != 1) ||
             !p->GetZoneId())
             continue;
@@ -1362,31 +1492,232 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             anchor = p;
     }
     if (!anchor)
+    {
+        // An unattended world still needs one legitimate map instance before
+        // it can build terrain-validated spawn anchors. Bootstrap exactly one
+        // Alliance citizen from its own saved map/zone/position, then let the
+        // normal live-anchor path distribute all remaining citizens. No zone
+        // name, coordinate, or player location is hard-coded here.
+        if (!confZoneWorldBackgroundSeed)
+            return;
+        for (auto const& item : m_bots)
+        {
+            PlayerBotEntry const* pending = item.second;
+            if (pending && pending->persistent && !pending->ownerAccountId &&
+                pending->ai && pending->ai->IsZoneCitizen() &&
+                pending->state == PB_STATE_LOADING)
+                return; // let the current seed enter the map before queuing another
+        }
+        for (auto const& item : m_bots)
+        {
+            PlayerBotEntry* candidate = item.second;
+            if (!candidate || !candidate->persistent || candidate->ownerAccountId ||
+                candidate->customBot || candidate->isChatBot || !candidate->ai ||
+                !candidate->ai->IsZoneCitizen() || candidate->state != PB_STATE_OFFLINE ||
+                candidate->zoneWorldSafetyRelocation)
+                continue;
+            PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)candidate->playerGUID);
+            if (!data || (data->uiMapId != 0 && data->uiMapId != 1) || !data->uiZoneId ||
+                Player::TeamForRace(data->uiRace) != ALLIANCE ||
+                !MaNGOS::IsValidMapCoord(data->fPosX, data->fPosY, data->fPosZ))
+                continue;
+            candidate->ai->PrepareZoneSpawn(data->uiMapId, data->uiZoneId, ALLIANCE,
+                                            data->fPosX, data->fPosY, data->fPosZ);
+            m_zoneWorldCursor = (uint32)candidate->playerGUID;
+            if (!AddBot((uint32)candidate->playerGUID, false))
+                continue;
+            sLog.outString("[ZoneCitizen] background seed queued guid:%u map:%u zone:%u",
+                           (uint32)candidate->playerGUID, data->uiMapId, data->uiZoneId);
+            return;
+        }
         return;
+    }
 
     Map* map = anchor->GetMap();
     auto const zoneKey = std::make_pair(anchor->GetMapId(), anchor->GetZoneId());
-    auto anchorsIt = m_zoneSpawnAnchors.find(zoneKey);
-    if (anchorsIt == m_zoneSpawnAnchors.end())
+    // Build all usable same-map zone anchors in one pass. This gives the
+    // population controller a small, data-derived neighborhood instead of
+    // forcing every new citizen into the player's exact zone.
+    bool haveMapAnchors = false;
+    for (auto const& item : m_zoneSpawnAnchors)
+        if (item.first.first == zoneKey.first)
+        {
+            haveMapAnchors = true;
+            break;
+        }
+    if (!haveMapAnchors)
     {
-        std::vector<WorldLocation> candidates;
+        std::map<uint32, std::vector<WorldLocation>> grouped;
+        std::map<uint32, CitizenZoneDifficulty> difficulty;
         auto collectAnchor = [&](CreatureDataPair const& pair) -> bool
         {
             WorldLocation const& pos = pair.second.position;
-            if (pos.mapId == zoneKey.first &&
-                MaNGOS::IsValidMapCoord(pos.x, pos.y, pos.z) &&
-                map->GetTerrain()->GetZoneId(pos.x, pos.y, pos.z) == zoneKey.second)
-                candidates.push_back(pos);
+            if (pos.mapId != zoneKey.first || !MaNGOS::IsValidMapCoord(pos.x, pos.y, pos.z))
+                return false;
+            uint32 const spawnZone = map->GetTerrain()->GetZoneId(pos.x, pos.y, pos.z);
+            if (spawnZone)
+            {
+                grouped[spawnZone].push_back(pos);
+                // AreaTable levels are absent for several valid outdoor
+                // zones. Use only ordinary, non-NPC creature templates so a
+                // flight master, guard, or quest giver cannot make a hunting
+                // zone look high-level. A spawn with multiple alternatives
+                // contributes each legitimate alternative once.
+                for (uint32 creatureId : pair.second.creature_id)
+                {
+                    CreatureInfo const* info = creatureId ? sObjectMgr.GetCreatureTemplate(creatureId) : nullptr;
+                    if (!info || info->npc_flags || info->civilian || info->rank != 0 ||
+                        !info->xp_multiplier || info->level_min < 1 || info->level_max > 60)
+                        continue;
+                    CitizenZoneDifficulty& profile = difficulty[spawnZone];
+                    profile.totalLevel += (info->level_min + info->level_max) / 2;
+                    ++profile.samples;
+                    uint32 const levelWidth = info->level_max - info->level_min + 1;
+                    uint32 const levelWeight = std::max<uint32>(1, 1000 / levelWidth);
+                    for (uint32 level = info->level_min; level <= info->level_max; ++level)
+                        profile.levelWeight[level] += levelWeight;
+                }
+            }
             return false;
         };
         sObjectMgr.DoCreatureData(collectAnchor);
-        anchorsIt = m_zoneSpawnAnchors.emplace(zoneKey, std::move(candidates)).first;
-        sLog.outString("[ZoneCitizen] zone:%u map:%u has %u spawn anchors",
-                       zoneKey.second, zoneKey.first, (uint32)anchorsIt->second.size());
+        for (auto& item : grouped)
+        {
+            m_zoneSpawnAnchors.emplace(std::make_pair(zoneKey.first, item.first),
+                                       std::move(item.second));
+            std::pair<uint32, uint32> const key(zoneKey.first, item.first);
+            CitizenZoneDifficulty const& profile = difficulty[item.first];
+            if (profile.samples)
+                m_zoneSpawnDifficulty[key] = profile;
+            sLog.outString("[ZoneCitizen] zone:%u map:%u has %u spawn anchors",
+                           item.first, zoneKey.first,
+                           (uint32)m_zoneSpawnAnchors[key].size());
+            if (profile.samples)
+                sLog.outString("[ZoneCitizen][Difficulty] zone:%u map:%u samples:%u level:%u",
+                               item.first, zoneKey.first, profile.samples,
+                               profile.totalLevel / profile.samples);
+        }
     }
 
+    struct ZonePlan
+    {
+        std::pair<uint32, uint32> key;
+        float centerX;
+        float centerY;
+        uint32 active;
+        uint32 desired;
+    };
+    std::vector<ZonePlan> plans;
+    for (auto const& item : m_zoneSpawnAnchors)
+    {
+        if (item.first.first != zoneKey.first || item.second.empty())
+            continue;
+        float centerX = 0.0f, centerY = 0.0f;
+        for (WorldLocation const& pos : item.second)
+        {
+            centerX += pos.x;
+            centerY += pos.y;
+        }
+        centerX /= item.second.size();
+        centerY /= item.second.size();
+        uint32 activeInZone = 0;
+        for (auto const& botItem : m_bots)
+        {
+            PlayerBotEntry const* botEntry = botItem.second;
+            if (!botEntry || !botEntry->ai || !botEntry->ai->IsZoneCitizen() ||
+                (botEntry->state != PB_STATE_ONLINE && botEntry->state != PB_STATE_LOADING))
+                continue;
+            if (botEntry->state == PB_STATE_LOADING)
+            {
+                ZoneCitizenAI const* citizenAI = static_cast<ZoneCitizenAI const*>(botEntry->ai);
+                if (citizenAI->GetPreparedSpawnMap() == item.first.first &&
+                    citizenAI->GetPreparedSpawnZone() == item.first.second)
+                    ++activeInZone;
+                continue;
+            }
+            Player* botPlayer = sObjectAccessor.FindPlayer(
+                ObjectGuid(HIGHGUID_PLAYER, (uint32)botEntry->playerGUID));
+            if (botPlayer && botPlayer->GetMapId() == item.first.first &&
+                botPlayer->GetZoneId() == item.first.second)
+                ++activeInZone;
+        }
+        plans.push_back({item.first, centerX, centerY, activeInZone, 0});
+    }
+    std::sort(plans.begin(), plans.end(), [&](ZonePlan const& left, ZonePlan const& right)
+    {
+        bool const leftCurrent = left.key.second == zoneKey.second;
+        bool const rightCurrent = right.key.second == zoneKey.second;
+        if (leftCurrent != rightCurrent)
+            return leftCurrent;
+        float const leftDx = left.centerX - anchor->GetPositionX();
+        float const leftDy = left.centerY - anchor->GetPositionY();
+        float const rightDx = right.centerX - anchor->GetPositionX();
+        float const rightDy = right.centerY - anchor->GetPositionY();
+        return leftDx * leftDx + leftDy * leftDy < rightDx * rightDx + rightDy * rightDy;
+    });
+    if (plans.empty())
+        return;
+    bool useConfiguredZoneTargets = false;
+    for (auto const& configured : confZoneWorldZoneTargets)
+    {
+        if (configured.first.first != zoneKey.first)
+            continue;
+        useConfiguredZoneTargets = true;
+        bool foundPlan = false;
+        for (ZonePlan const& plan : plans)
+            if (plan.key == configured.first)
+            {
+                foundPlan = true;
+                break;
+            }
+        if (!foundPlan)
+        {
+            sLog.outError("[ZoneCitizen] configured zone target unavailable map:%u zone:%u; using nearby distribution",
+                          configured.first.first, configured.first.second);
+            useConfiguredZoneTargets = false;
+            break;
+        }
+    }
+    if (useConfiguredZoneTargets)
+    {
+        for (ZonePlan& plan : plans)
+        {
+            std::map<std::pair<uint32, uint32>, uint32>::const_iterator const target =
+                confZoneWorldZoneTargets.find(plan.key);
+            plan.desired = target == confZoneWorldZoneTargets.end() ? 0 : target->second;
+        }
+    }
+    else
+    {
+        uint32 const weights[] = {60, 25, 15};
+        size_t const weightedPlanCount = std::min<size_t>(3, plans.size());
+        uint32 weightTotal = 0;
+        for (size_t i = 0; i < weightedPlanCount; ++i)
+            weightTotal += weights[i];
+        for (size_t i = 0; i < weightedPlanCount; ++i)
+            plans[i].desired = (confZoneWorldTarget * weights[i]) / weightTotal;
+        plans[0].desired += confZoneWorldTarget -
+                            (plans[0].desired + (plans.size() > 1 ? plans[1].desired : 0) +
+                             (plans.size() > 2 ? plans[2].desired : 0));
+    }
+
+    uint32 const queueLimit = std::min<uint32>(confZoneWorldLoginBatch,
+                                                confZoneWorldTarget - active);
+    uint32 queued = 0;
+    std::vector<std::pair<float, float>> queuedPositions;
+    bool safetyRelocationWaiting = false;
+    for (auto const& item : m_bots)
+    {
+        PlayerBotEntry const* e = item.second;
+        if (e && e->persistent && !e->ownerAccountId && e->ai && e->ai->IsZoneCitizen() &&
+            e->state == PB_STATE_OFFLINE && e->zoneWorldSafetyRelocation)
+        {
+            safetyRelocationWaiting = true;
+            break;
+        }
+    }
     auto it = m_bots.upper_bound(m_zoneWorldCursor);
-    for (size_t seen = 0; seen < m_bots.size(); ++seen)
+    for (size_t seen = 0; seen < m_bots.size() && queued < queueLimit; ++seen)
     {
         if (it == m_bots.end())
             it = m_bots.begin();
@@ -1396,8 +1727,119 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             !e->ai->IsZoneCitizen() || e->state != PB_STATE_OFFLINE ||
             (e->zoneWorldRetryAfterMs && m_elapsedTime < e->zoneWorldRetryAfterMs))
             continue;
+        // A citizen that has already demonstrated a fatal local failure gets
+        // the next available allocator slots.  Without this priority a 500
+        // character roster can leave it idle behind ordinary repopulation.
+        if (safetyRelocationWaiting && !e->zoneWorldSafetyRelocation)
+            continue;
         PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)e->playerGUID);
         if (!data || Player::TeamForRace(data->uiRace) != anchor->GetTeam())
+            continue;
+
+        uint32 const citizenLevel = data->uiLevel;
+        uint32 const currentMap = e->zoneWorldSafetyRelocation
+            ? e->zoneWorldSafetyExcludeMap : data->uiMapId;
+        uint32 const currentZone = e->zoneWorldSafetyRelocation
+            ? e->zoneWorldSafetyExcludeZone : data->uiZoneId;
+        int32 const currentZoneLevel = GetCitizenZoneDifficulty(currentMap, currentZone);
+        uint32 const productiveMinimum = citizenLevel > 3 ? citizenLevel - 3 : 1;
+        // A danger relocation is first a survival decision.  It may use an
+        // equally difficult verified zone (but never the fatal one); forcing
+        // an immediate level-up zone here can leave a citizen offline when
+        // the local map has no such anchor.
+        uint32 const currentProductiveShare = GetCitizenZoneProductiveSharePercent(
+            currentMap, currentZone, productiveMinimum, citizenLevel);
+        bool const needsProgressionMove = !e->zoneWorldSafetyRelocation && currentZoneLevel > 0 &&
+            currentProductiveShare < CitizenZoneMinimumProductiveSharePercent;
+        auto factionAllowed = [&](uint32 zoneId) -> bool
+        {
+            AreaEntry const* area = AreaEntry::GetById(zoneId);
+            return area &&
+                (area->Team != AREATEAM_ALLY || anchor->GetTeam() == ALLIANCE) &&
+                (area->Team != AREATEAM_HORDE || anchor->GetTeam() == HORDE);
+        };
+        auto zoneLevelAllowed = [&](ZonePlan const& plan) -> bool
+        {
+            if (e->zoneWorldSafetyRelocation &&
+                plan.key.first == e->zoneWorldSafetyExcludeMap &&
+                plan.key.second == e->zoneWorldSafetyExcludeZone)
+                return false;
+            if (!factionAllowed(plan.key.second))
+                return false;
+            uint32 const planLevel = GetCitizenZoneDifficulty(plan.key.first, plan.key.second);
+            // A zero profile means the zone has no verified ordinary-creature
+            // evidence. It may be a city, event space, or inaccessible
+            // sub-area, never a safe autonomous hunting placement. When a
+            // profile exists, its real creature-level range decides whether
+            // the zone has prey in the citizen's productive band.
+            if (!planLevel ||
+                GetCitizenZoneProductiveSharePercent(
+                    plan.key.first, plan.key.second, productiveMinimum, citizenLevel) <
+                    CitizenZoneMinimumProductiveSharePercent)
+                return false;
+            if (needsProgressionMove)
+                return GetCitizenZoneProductiveSharePercent(
+                    plan.key.first, plan.key.second, productiveMinimum, citizenLevel) >
+                    currentProductiveShare;
+            return true;
+        };
+        ZonePlan* targetPlan = nullptr;
+        for (size_t planIndex = 0; planIndex < plans.size(); ++planIndex)
+        {
+            ZonePlan& candidatePlan = plans[planIndex];
+            if (!zoneLevelAllowed(candidatePlan))
+                continue;
+            if (candidatePlan.active < candidatePlan.desired)
+            {
+                if (!targetPlan || targetPlan->active >= targetPlan->desired ||
+                    candidatePlan.active < targetPlan->active)
+                    targetPlan = &candidatePlan;
+            }
+            else if (!targetPlan)
+                targetPlan = &candidatePlan;
+        }
+        if (!targetPlan)
+        {
+            // The three nearest zones can all be unsafe (for example after a
+            // citizen logged out in content far above its level). Recover to
+            // the closest level-matched spawn zone rather than using an
+            // arbitrary nearest plan and repeatedly spawning into danger.
+            uint32 bestGap = std::numeric_limits<uint32>::max();
+            float bestDistance = std::numeric_limits<float>::max();
+            for (auto& candidatePlan : plans)
+            {
+                if (e->zoneWorldSafetyRelocation &&
+                    candidatePlan.key.first == e->zoneWorldSafetyExcludeMap &&
+                    candidatePlan.key.second == e->zoneWorldSafetyExcludeZone)
+                    continue;
+                if (!factionAllowed(candidatePlan.key.second))
+                    continue;
+                uint32 const candidateLevel = GetCitizenZoneDifficulty(
+                    candidatePlan.key.first, candidatePlan.key.second);
+                if (!candidateLevel ||
+                    GetCitizenZoneProductiveSharePercent(
+                        candidatePlan.key.first, candidatePlan.key.second,
+                        productiveMinimum, citizenLevel) < CitizenZoneMinimumProductiveSharePercent)
+                    continue;
+                uint32 const gap = candidateLevel > citizenLevel
+                    ? candidateLevel - citizenLevel : citizenLevel - candidateLevel;
+                float const dx = candidatePlan.centerX - anchor->GetPositionX();
+                float const dy = candidatePlan.centerY - anchor->GetPositionY();
+                float const distance = dx * dx + dy * dy;
+                if (!targetPlan || distance < bestDistance ||
+                    (distance == bestDistance && gap < bestGap))
+                {
+                    targetPlan = &candidatePlan;
+                    bestGap = gap;
+                    bestDistance = distance;
+                }
+            }
+        }
+        if (!targetPlan)
+            continue;
+        std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>>::const_iterator targetAnchorsIt =
+            m_zoneSpawnAnchors.find(targetPlan->key);
+        if (targetAnchorsIt == m_zoneSpawnAnchors.end() || targetAnchorsIt->second.empty())
             continue;
 
         float x = 0.0f, y = 0.0f, z = 0.0f;
@@ -1406,14 +1848,14 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         // Sample the entire zone, not a circle around the player. Favor the
         // candidate furthest from players/citizens already there so a dense
         // spawn cluster does not make the new population look cloned.
-        std::vector<WorldLocation> const& zoneAnchors = anchorsIt->second;
+        std::vector<WorldLocation> const& zoneAnchors = targetAnchorsIt->second;
         for (uint32 attempt = 0; attempt < 24 && !zoneAnchors.empty(); ++attempt)
         {
             WorldLocation const& origin = zoneAnchors[urand(0, zoneAnchors.size() - 1)];
             float candidateX = origin.x, candidateY = origin.y, candidateZ = origin.z;
             if (!map->GetWalkRandomPosition(nullptr, candidateX, candidateY, candidateZ, 25.0f))
                 continue;
-            if (map->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) != anchor->GetZoneId())
+            if (map->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) != targetPlan->key.second)
                 continue;
             float spacing = std::numeric_limits<float>::max();
             for (auto const& playerItem : sObjectAccessor.GetPlayers())
@@ -1426,6 +1868,12 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                 float const dy = candidateY - other->GetPositionY();
                 spacing = std::min(spacing, dx * dx + dy * dy);
             }
+            for (auto const& other : queuedPositions)
+            {
+                float const dx = candidateX - other.first;
+                float const dy = candidateY - other.second;
+                spacing = std::min(spacing, dx * dx + dy * dy);
+            }
             if (spacing < 80.0f * 80.0f || spacing <= bestSpacing)
                 continue;
             x = candidateX; y = candidateY; z = candidateZ;
@@ -1436,13 +1884,13 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         // nearby placement, rather than silently failing to populate.
         for (uint32 attempt = 0; !placed && attempt < 12; ++attempt)
         {
-            x = anchor->GetPositionX(); y = anchor->GetPositionY(); z = anchor->GetPositionZ();
+            x = targetPlan->centerX; y = targetPlan->centerY; z = anchor->GetPositionZ();
             if (!map->GetWalkRandomPosition(nullptr, x, y, z, confZoneWorldRadiusYd))
                 continue;
             float const dx = x - anchor->GetPositionX();
             float const dy = y - anchor->GetPositionY();
             if (dx * dx + dy * dy < 80.0f * 80.0f ||
-                map->GetTerrain()->GetZoneId(x, y, z) != anchor->GetZoneId())
+                map->GetTerrain()->GetZoneId(x, y, z) != targetPlan->key.second)
                 continue;
             placed = true;
         }
@@ -1451,24 +1899,33 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         {
             e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
             sLog.outError("[ZoneCitizen] no walkable same-zone point guid:%u zone:%u",
-                          (uint32)e->playerGUID, anchor->GetZoneId());
-            return;
+                          (uint32)e->playerGUID, targetPlan->key.second);
+            continue;
         }
-        e->ai->PrepareZoneSpawn(anchor->GetMapId(), anchor->GetZoneId(),
+        e->ai->PrepareZoneSpawn(targetPlan->key.first, targetPlan->key.second,
                                 anchor->GetTeam(), x, y, z);
         if (!AddBot((uint32)e->playerGUID, false))
         {
             e->ai->ClearZoneSpawn();
             e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
             sLog.outError("[ZoneCitizen] login rejected guid:%u zone:%u",
-                          (uint32)e->playerGUID, anchor->GetZoneId());
-            return;
+                          (uint32)e->playerGUID, targetPlan->key.second);
+            continue;
         }
         e->zoneWorldRetryAfterMs = 0;
-        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u active:%u target:%u",
-                       (uint32)e->playerGUID, anchor->GetZoneId(), active + 1,
-                       confZoneWorldTarget);
-        return;
+        bool const safetyRelocation = e->zoneWorldSafetyRelocation;
+        e->zoneWorldSafetyRelocation = false;
+        e->zoneWorldSafetyExcludeMap = 0;
+        e->zoneWorldSafetyExcludeZone = 0;
+        queuedPositions.push_back(std::make_pair(x, y));
+        ++queued;
+        ++targetPlan->active;
+        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u level:%u progression:%u relocation:%u active:%u target:%u batch:%u/%u",
+                       (uint32)e->playerGUID, targetPlan->key.second, citizenLevel,
+                       needsProgressionMove ? 1 : 0,
+                       safetyRelocation ? 1 : 0,
+                       active + queued,
+                       confZoneWorldTarget, queued, queueLimit);
     }
 }
 
@@ -1487,6 +1944,134 @@ bool PlayerBotMgr::SubmitWorldIntent(PlayerBotEntry* e, std::string const& conte
         return false;
     m_lastWorldIntentSubmitMs = nowMs;
     return true;
+}
+
+bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
+                                                        uint32& zone,
+                                                        float& x, float& y, float& z) const
+{
+    if (!citizen || !citizen->GetMap() || !citizen->GetZoneId())
+        return false;
+    uint32 const citizenLevel = std::min<uint32>(60, std::max<uint32>(1, citizen->GetLevel()));
+    uint32 const productiveMinimum = citizenLevel > 3 ? citizenLevel - 3 : 1;
+    uint32 const currentProductiveShare = GetCitizenZoneProductiveSharePercent(
+        citizen->GetMapId(), citizen->GetZoneId(), productiveMinimum, citizenLevel);
+    if (!GetCitizenZoneDifficulty(citizen->GetMapId(), citizen->GetZoneId()) ||
+        currentProductiveShare >= CitizenZoneMinimumProductiveSharePercent)
+        return false;
+
+    WorldLocation const* bestAnchor = nullptr;
+    uint32 bestZone = 0;
+    uint32 bestLevelGap = std::numeric_limits<uint32>::max();
+    float bestDistance = std::numeric_limits<float>::max();
+    for (auto const& item : m_zoneSpawnAnchors)
+    {
+        if (item.first.first != citizen->GetMapId() ||
+            item.first.second == citizen->GetZoneId() || item.second.empty())
+            continue;
+        AreaEntry const* candidateArea = AreaEntry::GetById(item.first.second);
+        if (!candidateArea ||
+            (candidateArea->Team == AREATEAM_ALLY && citizen->GetTeam() != ALLIANCE) ||
+            (candidateArea->Team == AREATEAM_HORDE && citizen->GetTeam() != HORDE))
+            continue;
+        uint32 const candidateLevel = GetCitizenZoneDifficulty(item.first.first, item.first.second);
+        if (!candidateLevel ||
+            GetCitizenZoneProductiveSharePercent(item.first.first, item.first.second,
+                productiveMinimum, citizenLevel) < CitizenZoneMinimumProductiveSharePercent)
+            continue;
+        WorldLocation const* closestAnchor = nullptr;
+        float closestDistance = std::numeric_limits<float>::max();
+        for (WorldLocation const& anchor : item.second)
+        {
+            float const dx = anchor.x - citizen->GetPositionX();
+            float const dy = anchor.y - citizen->GetPositionY();
+            float const distance = dx * dx + dy * dy;
+            if (distance < closestDistance)
+            {
+                closestAnchor = &anchor;
+                closestDistance = distance;
+            }
+        }
+        if (!closestAnchor)
+            continue;
+        // Prefer the nearest zone with enough real creature spawns in the
+        // citizen's productive band. Zone averages are diagnostic only: they
+        // must not prevent a valid adjacent destination (or pull a citizen
+        // toward a distant zone merely because its average is a closer match).
+        uint32 const levelGap = candidateLevel > citizenLevel
+            ? candidateLevel - citizenLevel : citizenLevel - candidateLevel;
+        if (!bestAnchor || closestDistance < bestDistance ||
+            (closestDistance == bestDistance && levelGap < bestLevelGap))
+        {
+            bestAnchor = closestAnchor;
+            bestZone = item.first.second;
+            bestLevelGap = levelGap;
+            bestDistance = closestDistance;
+        }
+    }
+    if (!bestAnchor)
+        return false;
+
+    zone = bestZone;
+    x = bestAnchor->x;
+    y = bestAnchor->y;
+    z = bestAnchor->z;
+    return true;
+}
+
+uint32 PlayerBotMgr::GetCitizenZoneDifficulty(uint32 mapId, uint32 zoneId) const
+{
+    std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty>::const_iterator const profile =
+        m_zoneSpawnDifficulty.find(std::make_pair(mapId, zoneId));
+    if (profile != m_zoneSpawnDifficulty.end() && profile->second.samples)
+        return profile->second.totalLevel / profile->second.samples;
+    AreaEntry const* area = AreaEntry::GetById(zoneId);
+    return area && area->AreaLevel > 0 ? (uint32)area->AreaLevel : 0;
+}
+
+uint32 PlayerBotMgr::GetCitizenZoneProductiveSharePercent(
+    uint32 mapId, uint32 zoneId, uint32 minimumLevel, uint32 maximumLevel) const
+{
+    std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty>::const_iterator const profile =
+        m_zoneSpawnDifficulty.find(std::make_pair(mapId, zoneId));
+    if (profile != m_zoneSpawnDifficulty.end() && profile->second.samples)
+    {
+        uint64 totalWeight = 0;
+        uint64 suitableWeight = 0;
+        for (uint32 level = 1; level <= 60; ++level)
+        {
+            totalWeight += profile->second.levelWeight[level];
+            if (level >= minimumLevel && level <= maximumLevel)
+                suitableWeight += profile->second.levelWeight[level];
+        }
+        return totalWeight ? (uint32)(suitableWeight * 100 / totalWeight) : 0;
+    }
+    AreaEntry const* area = AreaEntry::GetById(zoneId);
+    if (!area || area->AreaLevel <= 0)
+        return 0;
+    uint32 const level = (uint32)area->AreaLevel;
+    return level >= minimumLevel && level <= maximumLevel ? 100 : 0;
+}
+
+void PlayerBotMgr::RecordCitizenRouteEdge(Player const* citizen, float fromX, float fromY,
+                                          float toX, float toY) const
+{
+    if (!citizen || !citizen->GetMap() || !citizen->GetZoneId())
+        return;
+    // Quantize to one yard: nearby successful legs converge without storing
+    // high-frequency position traces or any player-controlled coordinates.
+    int32 const fx = int32(std::floor(fromX));
+    int32 const fy = int32(std::floor(fromY));
+    int32 const tx = int32(std::floor(toX));
+    int32 const ty = int32(std::floor(toY));
+    if (fx == tx && fy == ty)
+        return;
+    CharacterDatabase.DirectPExecute(
+        "INSERT INTO bot_citizen_route_edge "
+        "(map_id,zone_id,from_x,from_y,to_x,to_y,successes,last_seen) "
+        "VALUES (%u,%u,%d,%d,%d,%d,1,UNIX_TIMESTAMP()) "
+        "ON DUPLICATE KEY UPDATE successes=successes+1,last_seen=VALUES(last_seen)",
+        citizen->GetMapId(), citizen->GetZoneId(), fx, fy, tx, ty);
 }
 
 bool PlayerBotMgr::AddBot(PlayerBotAI* ai)
@@ -3270,6 +3855,14 @@ void PlayerBotMgr::HandlePartyInvite(Player* issuer, Player* invitee)
                           group->GetLeaderGuid().GetCounter());
             return;
         }
+        // All persistent party bots share the same observe-only learning
+        // enrollment, whether historically owned or recruited as citizens.
+        // Start leaves an already active or paused profile unchanged.
+        if (bot->persistent &&
+            !m_learningStore.QueueControl(Companion::Learning::ControlAction::Start,
+                                          invitee->GetGUIDLow()))
+            sLog.outError("[PlayerBot][Learning] enrollment not queued bot:%s guid:%u",
+                          bot->name.c_str(), invitee->GetGUIDLow());
         if (citizenInvite)
         {
             bot->recruiterAccountId = inviterAcc;

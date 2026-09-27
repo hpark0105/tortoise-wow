@@ -17,9 +17,13 @@ PLAYERBOT_OWNED_WORLD_TARGET=0
 PLAYERBOT_OWNED_WORLD_PACE_MS=5000
 PLAYERBOT_ZONE_WORLD_TARGET=0
 PLAYERBOT_ZONE_WORLD_PACE_MS=5000
+PLAYERBOT_ZONE_WORLD_LOGIN_BATCH=4
 PLAYERBOT_ZONE_WORLD_RADIUS_YD=250
+PLAYERBOT_ZONE_WORLD_BACKGROUND_SEED_ENABLE=0
+PLAYERBOT_ZONE_WORLD_ZONE_TARGETS=
 PLAYERBOT_ZONE_PROVISION=
 PLAYERBOT_ZONE_PROVISION_LEVEL=1
+PLAYERBOT_ZONE_PROVISION_COUNT=0
 PLAYERBOT_WORLD_INTENT_ENABLE=0
 PLAYERBOT_WORLD_INTENT_INTERVAL_MS=600000
 PLAYERBOT_WORLD_INTENT_GLOBAL_PACE_MS=10000
@@ -46,7 +50,16 @@ level-appropriate common gear rather than the ambient bots' best eligible kit.
 On login, the controller spreads citizens across walkable creature-spawn areas
 of the human's current zone, falling back to the configured nearby radius if
 none are usable. The radius setting is a fallback, not a zone-wide bound.
+For a controlled population pilot, `PLAYERBOT_ZONE_WORLD_ZONE_TARGETS` can
+assign exact per-zone citizen counts using `map:zone:count` entries separated
+by semicolons (for example `0:12:4;0:1:4`). The counts must sum to
+`PLAYERBOT_ZONE_WORLD_TARGET`; otherwise the server ignores the plan and uses
+its normal nearby distribution.
 The owned-world target and local-model intent do not create characters.
+`PLAYERBOT_ZONE_PROVISION_COUNT` adds deterministic, WoW-style Alliance names
+(for example `Aldenash` or `Brinabell`) to the explicit cohort; it is capped at
+500 and should be increased gradually. Names remain stable across restarts so
+characters keep their identity and progress.
 The build explicitly enables `-DALLOW_TURTLE_ADDONS=ON` for Turtle client addon
 support, as required for this installation.
 

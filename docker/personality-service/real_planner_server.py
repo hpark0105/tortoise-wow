@@ -32,6 +32,7 @@ import fake_planner as fp
 import model_client as mc
 import real_planner as rp
 import converse as cv
+import combat_review as cr
 import world_intent as wi
 
 def _chat_template_kwargs():
@@ -115,6 +116,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         if self.path.startswith("/converse"):
             self._handle_converse(raw)
+            return
+        if self.path.startswith("/combat-review"):
+            self._handle_combat_review(raw)
             return
         if self.path.startswith("/world-intent"):
             self._handle_world_intent(raw)
@@ -256,6 +260,53 @@ class Handler(BaseHTTPRequestHandler):
             print("[real-planner] converse profile:%s fallback reason:%s "
                   "ms:%d" % (profile, reason, round_ms), flush=True)
             self._send(500, b"")
+
+    def _handle_combat_review(self, raw):
+        """One low-priority, text-only debrief; never a gameplay directive."""
+        profile = "none"
+        if "?profile=" in self.path:
+            prof = self.path.split("?profile=", 1)[1].split("&", 1)[0].strip()
+            if prof in ("none", "reckless", "cautious"):
+                profile = prof
+        try:
+            text = raw.decode("ascii")
+        except UnicodeDecodeError:
+            self._send(400, b"")
+            return
+        messages = cr.build_messages(profile, text)
+        if messages is None:
+            print("[real-planner] combat-review rejected invalid counters", flush=True)
+            self._send(400, b"")
+            return
+        if not MODEL_LOCK.acquire(blocking=False):
+            print("[real-planner] combat-review skipped model busy", flush=True)
+            self._send(503, b"")
+            return
+        reason = "bad-schema"
+        try:
+            key = mc.read_api_key(CFG["key_file"] or None)
+            if MODEL_ID["id"] is None:
+                MODEL_ID["id"] = mc.fetch_model_id(CFG["model_url"], key)
+            model_text, _meta = mc.chat(
+                CFG["model_url"], key, MODEL_ID["id"], messages,
+                CFG["converse_timeout_ms"] / 1000.0,
+                max_tokens=CFG["max_tokens"],
+                extra={"chat_template_kwargs": CFG["chat_template_kwargs"]}
+                if CFG["chat_template_kwargs"] else None)
+            reply = cv.parse_converse_text(model_text)
+        except mc.ModelError as error:
+            reason = error.reason
+            reply = ""
+        finally:
+            MODEL_LOCK.release()
+        if reply:
+            print("[real-planner] combat-review profile:%s model ok len:%d" %
+                  (profile, len(reply)), flush=True)
+            self._send(200, reply.encode("ascii"))
+        else:
+            print("[real-planner] combat-review profile:%s no reply reason:%s" %
+                  (profile, reason), flush=True)
+            self._send(503, b"")
 
     def _handle_world_intent(self, raw):
         # Lower priority than player conversation. This endpoint has a

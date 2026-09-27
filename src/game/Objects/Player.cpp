@@ -22462,6 +22462,12 @@ void Player::AutoStoreLoot(Loot& loot, bool broadcast, uint8 bag, uint8 slot)
     for (uint32 i = 0; i < max_slot; ++i)
     {
         LootItem* lootItem = loot.LootItemInSlot(i, GetGUIDLow());
+        // Loot can be released or partially consumed between the slot-count
+        // snapshot and this iteration (player bots make that window more
+        // likely). Empty slots are a normal transient state, not a reason to
+        // dereference a null item and bring down the world thread.
+        if (!lootItem)
+            continue;
         // Don't bypass conditions
         if (lootItem->conditionId && !lootItem->AllowedForPlayer(this, loot.GetLootTarget()))
             continue;

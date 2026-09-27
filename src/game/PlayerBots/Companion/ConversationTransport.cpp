@@ -166,6 +166,12 @@ bool ConversationTransport::Submit(uint32_t botLow, uint32_t partyGroup,
         sLog.outError("[Conversation] session table full bot:%u; message dropped", botLow);
         return false;
     }
+    // A player's addressed message outranks an autonomous debrief or world
+    // thought. Invalidate its stamp before replacing it; an already-running
+    // worker result is then discarded and cannot speak over the player.
+    if (kind == ConvKind::Party && s->round.state == ConvState::InFlight &&
+        s->round.kind != ConvKind::Party)
+        s->round.Invalidate();
     ConvRound::SubmitResult const r =
         s->round.Submit(botLow, partyGroup, partyLeader, profileCode, text, nowMs, m_nextStamp++, kind);
     if (r == ConvRound::SubmitResult::Rejected)
@@ -210,8 +216,12 @@ void ConversationTransport::Invalidate(uint32_t botLow)
     Slot* s = FindSlot(m_slots, botLow);
     if (!s)
         return;
+    // Independent citizens reach this boundary every AI tick. An already
+    // idle slot has no request to cancel, so logging it would flood a
+    // 500-citizen world and hide real submit/failure evidence.
+    bool const hadPendingRound = s->round.state != ConvState::Idle;
     s->round.Invalidate();
-    if (m_debug)
+    if (m_debug && hadPendingRound)
         sLog.outString("[Conversation] invalidate bot:%u", botLow);
     m_cv.notify_all();
 }
@@ -248,7 +258,10 @@ void ConversationTransport::WorkerLoop()
             // and the worker has not serviced it yet (the worker is the only
             // sender).
             uint64_t oldestParty = 0;
+            uint64_t oldestReview = 0;
             uint64_t oldestWorld = 0;
+            uint32_t reviewBotLow = 0;
+            uint64_t reviewStamp = 0;
             uint32_t worldBotLow = 0;
             uint64_t worldStamp = 0;
             for (auto const& s : m_slots)
@@ -262,6 +275,13 @@ void ConversationTransport::WorkerLoop()
                     botLow = s.round.botLow;
                     stamp = s.round.submitStamp;
                 }
+                else if (s.round.kind == ConvKind::CombatReview &&
+                         (!oldestReview || s.round.submitStamp < oldestReview))
+                {
+                    oldestReview = s.round.submitStamp;
+                    reviewBotLow = s.round.botLow;
+                    reviewStamp = s.round.submitStamp;
+                }
                 else if (s.round.kind == ConvKind::WorldIntent &&
                          (!oldestWorld || s.round.submitStamp < oldestWorld))
                 {
@@ -269,6 +289,11 @@ void ConversationTransport::WorkerLoop()
                     worldBotLow = s.round.botLow;
                     worldStamp = s.round.submitStamp;
                 }
+            }
+            if (!botLow)
+            {
+                botLow = reviewBotLow;
+                stamp = reviewStamp;
             }
             if (!botLow)
             {
@@ -288,8 +313,10 @@ void ConversationTransport::WorkerLoop()
             // it is the only request content placed in the URL path.
             char const* profileName =
                 Personality::ProfileName((Personality::Profile)s->round.profileCode);
-            path = std::string(s->round.kind == ConvKind::Party ?
-                               "/converse?profile=" : "/world-intent?profile=") + profileName;
+            char const* endpoint = s->round.kind == ConvKind::Party ? "/converse?profile=" :
+                s->round.kind == ConvKind::CombatReview ? "/combat-review?profile=" :
+                "/world-intent?profile=";
+            path = std::string(endpoint) + profileName;
         }
         // Bounded I/O off the world thread; the deadline is hard.
         std::string reply;

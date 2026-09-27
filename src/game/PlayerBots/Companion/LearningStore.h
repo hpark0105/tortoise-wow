@@ -311,6 +311,11 @@ static char const* const kControlRollbackProfileSqlTemplate =
 static char const* const kControlStatusSqlTemplate =
     "SELECT mode, active_playbook_version, expected_version FROM bot_learning_profile WHERE char_guid = %u";
 
+static char const* const kLessonInsertSqlTemplate =
+    "INSERT INTO bot_learning_lesson (char_guid, lesson_type, confidence, encounter_sequence, duration_ms, effective_damage, damage_taken, decisions, evidence_count, created_at) SELECT %u,%u,%u,%u,%u,%u,%u,%u,1,UNIX_TIMESTAMP() FROM bot_learning_profile WHERE char_guid=%u AND mode NOT IN (0,4)";
+static char const* const kLessonRetentionSql =
+    "DELETE FROM bot_learning_lesson WHERE id IN (SELECT id FROM (SELECT l.id FROM bot_learning_lesson l WHERE l.created_at < UNIX_TIMESTAMP() - 2592000 OR (SELECT COUNT(*) FROM bot_learning_lesson l2 WHERE l2.char_guid=l.char_guid AND (l2.created_at > l.created_at OR (l2.created_at = l.created_at AND l2.id > l.id))) >= 128) victims)";
+
 // ---------------------------------------------------------------------------
 // A robust nonzero 64-bit process nonce without secrets or persistence.
 // High 32 bits: wall-clock milliseconds at process start (unique across
@@ -565,6 +570,7 @@ public:
     {
         EnqueueMaintenance(kEncounterRetentionSql, /*retryOnSubmitFailure=*/false);
         EnqueueMaintenance(kPlaybookRetentionSql, /*retryOnSubmitFailure=*/false);
+        EnqueueMaintenance(kLessonRetentionSql, /*retryOnSubmitFailure=*/false);
     }
 
     // Queue an owner-authorized learning control mutation through the same
@@ -600,6 +606,28 @@ public:
                 // the transactional/query adapter is added.
                 return false;
         }
+        return n >= 0 && static_cast<size_t>(n) < sizeof(sql) &&
+               EnqueueMaintenance(sql, false);
+    }
+
+    // BL-009: persist one bounded numeric combat lesson. The profile gate
+    // keeps un-enrolled or paused bots out; no model text enters SQL.
+    bool QueueLesson(uint32_t charGuid, uint32_t lessonType,
+                     uint32_t confidence, uint32_t encounterSequence,
+                     uint32_t durationMs,
+                     uint32_t effectiveDamage, uint32_t damageTaken,
+                     uint32_t decisions)
+    {
+        if (!charGuid || lessonType == 0 || lessonType > 3 || confidence > 3 ||
+            m_shutdown.load(std::memory_order_acquire))
+            return false;
+        char sql[1024];
+        int const n = std::snprintf(sql, sizeof(sql), kLessonInsertSqlTemplate,
+            static_cast<unsigned>(charGuid), static_cast<unsigned>(lessonType),
+            static_cast<unsigned>(confidence), static_cast<unsigned>(encounterSequence),
+            static_cast<unsigned>(durationMs),
+            static_cast<unsigned>(effectiveDamage), static_cast<unsigned>(damageTaken),
+            static_cast<unsigned>(decisions), static_cast<unsigned>(charGuid));
         return n >= 0 && static_cast<size_t>(n) < sizeof(sql) &&
                EnqueueMaintenance(sql, false);
     }

@@ -53,6 +53,9 @@ uint32 const kRecoveryReportMs = 30000;
 // companion re-issues the path to the corpse only when its motion is
 // empty and at least this many ms have passed since the last issue.
 uint32 const kRecoveryWalkRetryMs = 5000;
+// A citizen may only begin a destination route it can plausibly traverse
+// during normal play. Longer continent-spanning vectors are kept out of the
+// autonomous loop until a multi-stage route graph exists.
 // PORT-008 (KAP-558): while the companion keeps walking toward the owner,
 // the follow path is re-issued at most this often (ms) unless the owner
 // moved further than 2.0 yd (2D) from the last issued target.
@@ -284,8 +287,15 @@ public:
             !u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
             return false;
         uint32 const level = me->GetLevel();
-        if (u->GetLevel() > level + 1 ||
-            u->GetLevel() + 5 < level)
+        // Keep independent citizens in a productive XP band. A target more
+        // than three levels below the citizen is intentionally skipped, so
+        // an outgrown zone leads to progression travel instead of endless
+        // farming of trivial creatures.
+        // Independent citizens have no player healer or coordinated party
+        // behind them. A same-level solo target is the highest safe default;
+        // tougher content is reserved for an actual player party.
+        if (u->GetLevel() > level ||
+            u->GetLevel() + 3 < level)
             return false;
         return true;
     }
@@ -405,8 +415,10 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (_lastLevel != me->GetLevel())
     {
         _lastLevel = me->GetLevel();
+        RefreshCitizenProgression(true);
         AutoLearnSpellsForLevel();
         AutoEquipForLevel();
+        PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
     }
 
     // Bounded lab observability (MVP-005): alive-state transitions plus a
@@ -495,12 +507,13 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             Unit* victim = me->GetVictim();
             if (victim->GetTypeId() == TYPEID_UNIT)
                 RememberCombatTarget(victim);
+            if (TryCitizenDisengage(victim))
+                return;
             if (sPlayerBotMgr.IsDebugEnabled())
                 sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f",
                                me->GetGUIDLow(), victim->GetGUIDLow(), me->GetDistance(victim));
-            if (!me->CanReachWithMeleeAutoAttack(victim))
-                me->GetMotionMaster()->MoveChase(victim);
-            else
+            UpdateCombatPursuit(victim, diff);
+            if (me->CanReachWithMeleeAutoAttack(victim))
                 me->SetFacingToObject(victim);
 
             if (_abilityTimer == 0)
@@ -512,30 +525,35 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         {
             // A target we picked that stopped being returned by
             // SelectNearestTarget; keep pursuing it directly.
+            if (TryCitizenDisengage(held))
+                return;
             if (me->GetDistance(held) > 35.0f)
             {
                 ClearTarget();
             }
-            else if (me->CanReachWithMeleeAutoAttack(held))
-            {
-                me->SetFacingToObject(held);
-                if (sPlayerBotMgr.IsDebugEnabled())
-                    sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f hp:%u/%u",
-                                   me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
-                                   held->GetHealth(), held->GetMaxHealth());
-                if (_abilityTimer == 0)
-                    TryOffensiveCastOrAttack(held);
-                else
-                    me->Attack(held, true);
-            }
             else
             {
-                if (sPlayerBotMgr.IsDebugEnabled())
-                    sLog.outString("[PlayerBot] pursuing GUID:%u target:%u dist:%.2f hp:%u/%u",
-                                   me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
-                                   held->GetHealth(), held->GetMaxHealth());
-                me->GetMotionMaster()->MoveChase(held);
-                me->Attack(held, true);
+                UpdateCombatPursuit(held, diff);
+                if (me->CanReachWithMeleeAutoAttack(held))
+                {
+                    me->SetFacingToObject(held);
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[PlayerBot] fighting GUID:%u victim:%u dist:%.2f hp:%u/%u",
+                                       me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
+                                       held->GetHealth(), held->GetMaxHealth());
+                    if (_abilityTimer == 0)
+                        TryOffensiveCastOrAttack(held);
+                    else
+                        me->Attack(held, true);
+                }
+                else
+                {
+                    if (sPlayerBotMgr.IsDebugEnabled())
+                        sLog.outString("[PlayerBot] pursuing GUID:%u target:%u dist:%.2f hp:%u/%u",
+                                       me->GetGUIDLow(), held->GetGUIDLow(), me->GetDistance(held),
+                                       held->GetHealth(), held->GetMaxHealth());
+                    me->Attack(held, true);
+                }
             }
         }
         else
@@ -554,7 +572,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                     if (target->GetTypeId() == TYPEID_UNIT)
                         RememberCombatTarget(target);
                     me->Attack(target, true);
-                    me->GetMotionMaster()->MoveChase(target);
+                    UpdateCombatPursuit(target, diff);
                     if (sPlayerBotMgr.IsDebugEnabled())
                         sLog.outString("[PlayerBot] engage GUID:%u target:%u dist:%.2f",
                                        me->GetGUIDLow(), target->GetGUIDLow(), me->GetDistance(target));
@@ -697,6 +715,147 @@ void PlayerBotAI::ClearTarget()
     _targets.ClearAll();
     _lootRetryCount = 0;
     _lootWindowMs = 0;
+    if (_combatPursuitNudging && me && me->GetMotionMaster() &&
+        me->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+        me->GetMotionMaster()->MovementExpired();
+    _combatPursuitTargetGuid = 0;
+    _combatPursuitStalledMs = 0;
+    _combatPursuitNudging = false;
+    _combatPursuitNudgeMs = 0;
+}
+
+void PlayerBotAI::UpdateCombatPursuit(Unit* target, uint32 diff)
+{
+    if (!me || !me->GetMap() || !target || !target->IsInWorld() ||
+        target->GetMap() != me->GetMap() || !target->IsAlive())
+    {
+        if (me && me->GetMotionMaster() && _combatPursuitNudging &&
+            me->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+            me->GetMotionMaster()->MovementExpired();
+        _combatPursuitTargetGuid = 0;
+        _combatPursuitStalledMs = 0;
+        _combatPursuitNudging = false;
+        _combatPursuitNudgeMs = 0;
+        return;
+    }
+
+    MotionMaster* motion = me->GetMotionMaster();
+    if (me->CanReachWithMeleeAutoAttack(target))
+    {
+        if (_combatPursuitNudging &&
+            motion->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+            motion->MovementExpired();
+        else if (motion->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+            motion->MovementExpired();
+        _combatPursuitTargetGuid = 0;
+        _combatPursuitStalledMs = 0;
+        _combatPursuitNudging = false;
+        _combatPursuitNudgeMs = 0;
+        return;
+    }
+
+    uint32 const targetGuid = target->GetGUIDLow();
+    float const distance = me->GetDistance(target);
+    if (_combatPursuitTargetGuid != targetGuid)
+    {
+        _combatPursuitTargetGuid = targetGuid;
+        _combatPursuitLastDistance = distance;
+        _combatPursuitStalledMs = 0;
+        _combatPursuitNudging = false;
+        _combatPursuitNudgeMs = 0;
+        motion->MoveChase(target);
+        return;
+    }
+
+    if (_combatPursuitNudging)
+    {
+        float const nudgeDistance = me->GetDistance(
+            _combatPursuitNudgeX, _combatPursuitNudgeY, _combatPursuitNudgeZ);
+        bool const nudgeExpired = _combatPursuitNudgeMs <= diff ||
+            motion->GetCurrentMovementGeneratorType() == IDLE_MOTION_TYPE;
+        _combatPursuitNudgeMs = _combatPursuitNudgeMs > diff
+            ? _combatPursuitNudgeMs - diff : 0;
+        if (nudgeDistance < 3.0f || nudgeExpired)
+        {
+            _combatPursuitNudging = false;
+            _combatPursuitStalledMs = 0;
+            _combatPursuitLastDistance = distance;
+            motion->MoveChase(target);
+            if (sPlayerBotMgr.IsDebugEnabled())
+                sLog.outString("[PlayerBot][CombatPath] resume GUID:%u target:%u dist:%.1f",
+                               me->GetGUIDLow(), targetGuid, distance);
+        }
+        return;
+    }
+
+    if (_combatPursuitLastDistance - distance >= 1.0f)
+    {
+        _combatPursuitLastDistance = distance;
+        _combatPursuitStalledMs = 0;
+    }
+    else
+        _combatPursuitStalledMs = std::min<uint32>(
+            _combatPursuitStalledMs + diff, 30000u);
+
+    if (motion->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
+    {
+        _combatPursuitStalledMs = 0;
+        motion->MoveChase(target);
+        return;
+    }
+    if (_combatPursuitStalledMs < 8000)
+        return;
+
+    // A chase that makes no progress may be facing a cliff, steep slope, or
+    // awkward navmesh edge. Try a short walkable sidestep, then resume the
+    // normal chase so the core recalculates a route from different ground.
+    float bestX = 0.0f, bestY = 0.0f, bestZ = 0.0f;
+    float bestTargetDistance = distance + 6.0f;
+    bool foundNudge = false;
+    for (uint32 attempt = 0; attempt < 12; ++attempt)
+    {
+        float x = me->GetPositionX();
+        float y = me->GetPositionY();
+        float z = me->GetPositionZ();
+        if (!me->GetMap()->GetWalkRandomPosition(nullptr, x, y, z, 8.0f))
+            continue;
+        float const fromBotX = x - me->GetPositionX();
+        float const fromBotY = y - me->GetPositionY();
+        if (fromBotX * fromBotX + fromBotY * fromBotY < 3.0f * 3.0f)
+            continue;
+        float const dx = x - target->GetPositionX();
+        float const dy = y - target->GetPositionY();
+        float const dz = z - target->GetPositionZ();
+        float const candidateDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (candidateDistance >= bestTargetDistance)
+            continue;
+        bestX = x;
+        bestY = y;
+        bestZ = z;
+        bestTargetDistance = candidateDistance;
+        foundNudge = true;
+    }
+
+    _combatPursuitStalledMs = 0;
+    if (foundNudge)
+    {
+        _combatPursuitNudging = true;
+        _combatPursuitNudgeX = bestX;
+        _combatPursuitNudgeY = bestY;
+        _combatPursuitNudgeZ = bestZ;
+        _combatPursuitNudgeMs = 8000;
+        motion->MovePoint(0, bestX, bestY, bestZ, MOVE_PATHFINDING);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][CombatPath] nudge GUID:%u target:%u dist:%.1f",
+                           me->GetGUIDLow(), targetGuid, distance);
+    }
+    else
+    {
+        motion->MoveChase(target);
+        if (sPlayerBotMgr.IsDebugEnabled())
+            sLog.outString("[PlayerBot][CombatPath] repath GUID:%u target:%u dist:%.1f no-nudge",
+                           me->GetGUIDLow(), targetGuid, distance);
+    }
 }
 
 bool PlayerBotAI::TryLootDefeatedTarget()
@@ -846,6 +1005,26 @@ static Companion::Equipment::ItemStats EquipmentStatsFromProto(ItemPrototype con
         s.quality = proto->Quality;
     }
     return s;
+}
+
+bool PlayerBotAI::ShouldNeedLoot(ItemPrototype const* proto) const
+{
+    if (!me || !proto || !IsLootEligibleBot() ||
+        me->CanUseItem(proto) != EQUIP_ERR_OK)
+        return false;
+
+    uint8 const slot = me->FindEquipSlot(proto, NULL_SLOT, true);
+    if (slot >= EQUIPMENT_SLOT_END)
+        return false;
+
+    uint32 const level = me->GetLevel();
+    uint32_t const candidate = Companion::Equipment::Score(EquipmentStatsFromProto(proto, level));
+    Item const* equipped = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+    uint32_t const current = equipped
+        ? Companion::Equipment::Score(EquipmentStatsFromProto(equipped->GetProto(), level))
+        : 0;
+    return Companion::Equipment::Compare(candidate, current) ==
+        Companion::Equipment::Verdict::Equip;
 }
 
 void PlayerBotAI::EvaluateReceivedEquipment(std::vector<std::pair<uint32, uint32>> const& itemCounts)
@@ -1304,18 +1483,192 @@ void PlayerBotAI::OnPlayerLogin()
 {
     _encounter.Reset(); // BL-002: encounters never span a login
     _lastLevel = me ? me->GetLevel() : 0;
+    LoadCitizenJournal();
+    if (me && IsZoneCitizen())
+    {
+        QueryResult* danger = CharacterDatabase.PQuery(
+            "SELECT map_id,zone_id,deaths,safe_until FROM bot_citizen_danger_memory "
+            "WHERE char_guid=%u AND map_id=%u AND zone_id=%u "
+            "AND safe_until>UNIX_TIMESTAMP() ORDER BY safe_until DESC LIMIT 1",
+            me->GetGUIDLow(), me->GetMapId(), me->GetZoneId());
+        if (danger)
+        {
+            Field* fields = danger->Fetch();
+            _citizenDeathMap = fields[0].GetUInt32();
+            _citizenDeathZone = fields[1].GetUInt32();
+            _citizenDeathsAtSpot = fields[2].GetUInt8();
+            uint32 const remainingSeconds = fields[3].GetUInt32() - (uint32)time(nullptr);
+            _citizenDangerZoneUntilMs = WorldTimer::getMSTime() + remainingSeconds * 1000;
+            // A restarted citizen must not forget an active, durable warning
+            // and immediately return to hunting the same fatal ground.
+            if (!me->GetGroup())
+            {
+                _citizenSafetyRelocationRequested = true;
+                if (botEntry)
+                {
+                    botEntry->zoneWorldSafetyRelocation = true;
+                    botEntry->zoneWorldSafetyExcludeMap = _citizenDeathMap;
+                    botEntry->zoneWorldSafetyExcludeZone = _citizenDeathZone;
+                }
+            }
+            delete danger;
+        }
+    }
+    RefreshCitizenProgression(true);
     RepairBrokenEquipment();
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
     InitQuestState();
     BackfillMirrorQuestMarkers(); // KAP-558 review: legacy in-flight mirrors
+    // A login is one authoritative observation of the citizen's current
+    // zone; level updates and route-leg retries must not inflate this count.
+    PersistCitizenJournal(_progressionTravelActive ? 1 : 0, true);
 }
 
 void PlayerBotAI::OnLevelUp()
 {
     _lastLevel = me ? me->GetLevel() : _lastLevel;
+    RefreshCitizenProgression(true);
     AutoLearnSpellsForLevel();
     AutoEquipForLevel();
+    PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
+}
+
+bool PlayerBotAI::IsLootEligibleBot() const
+{
+    return IsZoneCitizen() || IsOwnedCompanion();
+}
+
+void PlayerBotAI::LoadCitizenJournal()
+{
+    if (!me || !IsZoneCitizen() || !botEntry || !botEntry->persistent)
+        return;
+    QueryResult* result = CharacterDatabase.PQuery(
+        "SELECT intent, current_job, progression_band, last_level, target_map, target_zone, "
+        "target_x, target_y, target_z, visited_zones FROM bot_citizen_journal "
+        "WHERE char_guid = %u", me->GetGUIDLow());
+    if (!result)
+        return;
+    Field* fields = result->Fetch();
+    uint8 const intent = fields[0].GetUInt8();
+    _citizenActivityIntent = fields[1].GetUInt8() <= 4 ? fields[1].GetUInt8() : 0;
+    uint8 const band = fields[2].GetUInt8();
+    uint8 const recordedLevel = fields[3].GetUInt8();
+    uint32 const targetMap = fields[4].GetUInt32();
+    uint32 const targetZone = fields[5].GetUInt32();
+    _progressionFinalX = fields[6].GetFloat();
+    _progressionFinalY = fields[7].GetFloat();
+    _progressionFinalZ = fields[8].GetFloat();
+    _citizenVisitedZones = fields[9].GetUInt32();
+    delete result;
+
+    uint8 const currentBand = static_cast<uint8>((std::max<uint32>(1, me->GetLevel()) - 1) / 10);
+    uint32 const productiveMinimum = me->GetLevel() > 3 ? me->GetLevel() - 3 : 1;
+    uint32 const targetProductiveShare = sPlayerBotMgr.GetCitizenZoneProductiveSharePercent(
+        targetMap, targetZone, productiveMinimum, me->GetLevel());
+    if (intent == 1 && recordedLevel == me->GetLevel() && band == currentBand &&
+        targetMap == me->GetMapId() && targetZone && targetZone != me->GetZoneId() &&
+        targetProductiveShare >= PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent)
+    {
+        _progressionTargetZone = targetZone;
+        _progressionTravelActive = true;
+        sLog.outString("[ZoneCitizen][Journal] resume guid:%u target-zone:%u visits:%u",
+                       me->GetGUIDLow(), targetZone, _citizenVisitedZones);
+    }
+    else if (intent == 1)
+        sLog.outString("[ZoneCitizen][Journal] discarded stale route guid:%u target-zone:%u",
+                       me->GetGUIDLow(), targetZone);
+}
+
+void PlayerBotAI::PersistCitizenJournal(uint8 intent, bool recordVisit)
+{
+    if (!me || !IsZoneCitizen() || !botEntry || !botEntry->persistent)
+        return;
+    CharacterDatabase.DirectPExecute(
+        "INSERT INTO bot_citizen_journal "
+        "(char_guid, intent, current_job, progression_band, last_level, current_map, current_zone, "
+        "target_map, target_zone, target_x, target_y, target_z, visited_zones, updated_at) "
+        "VALUES (%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%f,%f,%u,UNIX_TIMESTAMP()) "
+        "ON DUPLICATE KEY UPDATE intent=VALUES(intent), current_job=VALUES(current_job), progression_band=VALUES(progression_band), "
+        "last_level=VALUES(last_level), current_map=VALUES(current_map), current_zone=VALUES(current_zone), "
+        "target_map=VALUES(target_map), target_zone=VALUES(target_zone), target_x=VALUES(target_x), "
+        "target_y=VALUES(target_y), target_z=VALUES(target_z), visited_zones=VALUES(visited_zones), "
+        "updated_at=VALUES(updated_at)",
+        me->GetGUIDLow(), intent, _citizenActivityIntent, _progressionBand, me->GetLevel(), me->GetMapId(), me->GetZoneId(),
+        intent == 1 ? me->GetMapId() : 0, intent == 1 ? _progressionTargetZone : 0,
+        intent == 1 ? _progressionFinalX : 0.0f, intent == 1 ? _progressionFinalY : 0.0f,
+        intent == 1 ? _progressionFinalZ : 0.0f, _citizenVisitedZones);
+    if (recordVisit)
+        CharacterDatabase.DirectPExecute(
+            "INSERT INTO bot_citizen_zone_visit (char_guid,map_id,zone_id,first_seen,last_seen,visits) "
+            "VALUES (%u,%u,%u,UNIX_TIMESTAMP(),UNIX_TIMESTAMP(),1) "
+            "ON DUPLICATE KEY UPDATE last_seen=VALUES(last_seen), visits=visits+1",
+            me->GetGUIDLow(), me->GetMapId(), me->GetZoneId());
+}
+
+void PlayerBotAI::SetCitizenActivityIntent(uint8 intent, char const* reason)
+{
+    if (!me || !IsZoneCitizen() || intent > 4 || _citizenActivityIntent == intent)
+        return;
+    _citizenActivityIntent = intent;
+    PersistCitizenJournal(intent == 1 ? 1 : 0);
+    sLog.outString("[ZoneCitizen][Job] guid:%u job:%u reason:%s", me->GetGUIDLow(),
+                   intent, reason ? reason : "state");
+}
+
+void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
+{
+    if (!me || !IsZoneCitizen())
+        return;
+
+    uint32 const level = std::max<uint32>(1, me->GetLevel());
+    uint8 const band = static_cast<uint8>((level - 1) / 10);
+    uint32 const zone = me->GetZoneId();
+    int32 const zoneLevel = sPlayerBotMgr.GetCitizenZoneDifficulty(me->GetMapId(), zone);
+    // Use the measured creature-level distribution, not the zone's average,
+    // so a mixed-level zone remains viable when it still has enough productive
+    // prey. The combat filter accepts [level - 3, level] for solo citizens.
+    uint32 const productiveMinimum = level > 3 ? level - 3 : 1;
+    uint32 const productiveShare = sPlayerBotMgr.GetCitizenZoneProductiveSharePercent(
+        me->GetMapId(), zone, productiveMinimum, level);
+    bool const levelCapped = level >= 60;
+    bool const overleveled = !levelCapped && zoneLevel > 0 &&
+        productiveShare < PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent;
+    bool const changed = band != _progressionBand || zone != _progressionZone ||
+                         zoneLevel != _progressionZoneLevel ||
+                         overleveled != _progressionOverleveled;
+
+    _progressionBand = band;
+    _progressionZone = zone;
+    _progressionZoneLevel = zoneLevel;
+    _progressionOverleveled = overleveled;
+    if (forceLog || changed)
+    {
+        char const* status = levelCapped ? "level-cap" : (overleveled ? "outgrowing" : "in-band");
+        sLog.outString("[ZoneCitizen][Progression] guid:%u level:%u band:%u-%u zone:%u zone-level:%d productive:%u%% status:%s",
+                       me->GetGUIDLow(), level, band * 10 + 1,
+                       std::min<uint32>(60, (band + 1) * 10), zone, zoneLevel,
+                       productiveShare, status);
+        if (overleveled && me->IsInWorld())
+        {
+            uint32 destinationZone = 0;
+            float destinationX = 0.0f, destinationY = 0.0f, destinationZ = 0.0f;
+            bool const hasDestination = sPlayerBotMgr.SelectCitizenProgressionDestination(
+                me, destinationZone, destinationX, destinationY, destinationZ);
+            AreaEntry const* destination = AreaEntry::GetById(destinationZone);
+            if (hasDestination && destinationZone != zone && destination &&
+                destination->Name && destination->Name[0])
+            {
+                std::string const line = "These creatures are too low level for me. I am bound for " +
+                    std::string(destination->Name) + ".";
+                me->Say(line.c_str(), LANG_UNIVERSAL);
+            }
+            else
+                me->Say("These creatures are too low level for me. I am moving on to a better hunting ground.",
+                        LANG_UNIVERSAL);
+        }
+        _progressionReportMs = 60000;
+    }
 }
 
 // PORT-029 (KAP-558): repair broken equipment for owned companions
@@ -1543,8 +1896,88 @@ void PlayerBotAI::TryPersistLearningSummary()
         if (!sPlayerBotMgr.LearningStore().Enqueue(s))
             sLog.outError("[PlayerBot][Learning] enqueue dropped GUID:%u reason:%s",
                           me->GetGUIDLow(), Companion::Encounter::EndReasonName(r.endReason));
+
+        if (r.endReason == Companion::Encounter::EndReason::TargetDeath)
+            ApplyValidatedCombatLesson(r, WorldTimer::getMSTime());
+
+        // Offer one advisory, personality-colored debrief after a completed
+        // party kill. This uses the conversation worker: no model or socket
+        // call runs on the world thread, and no reply changes combat policy.
+        // Persisted evidence above is independent of model availability.
+        if (r.endReason == Companion::Encounter::EndReason::TargetDeath &&
+            IsOwnedCompanion() && me->GetGroup() && me->IsAlive())
+        {
+            Group* group = me->GetGroup();
+            Player* leader = sObjectAccessor.FindPlayer(group->GetLeaderGuid());
+            uint32 const nowMs = WorldTimer::getMSTime();
+            static uint32 lastPartyReviewMs = 0; // one voice per burst of shared kills
+            if (leader && leader->GetSession() && !leader->GetSession()->GetBot() &&
+                (!_combatReviewLastMs || uint32(nowMs - _combatReviewLastMs) >= 90000) &&
+                (!lastPartyReviewMs || uint32(nowMs - lastPartyReviewMs) >= 15000))
+            {
+                std::string const evidence =
+                    "duration_ms=" + std::to_string(r.durationMs) +
+                    " damage=" + std::to_string(r.effectiveDamage) +
+                    " taken=" + std::to_string(r.damageTaken) +
+                    " casts_ok=" + std::to_string(r.castsAccepted) +
+                    " casts_rejected=" + std::to_string(r.castsRejected) +
+                    " decisions=" + std::to_string(r.decisions) +
+                    " memory=" + (_partyMemoryLesson == 1 ? "caution" :
+                                    _partyMemoryLesson == 2 ? "timing" :
+                                    _partyMemoryLesson == 3 ? "steady" : "none");
+                if (sPlayerBotMgr.ConversationTransport().Submit(
+                        me->GetGUIDLow(), group->GetId(),
+                        group->GetLeaderGuid().GetCounter(),
+                        (uint32)botEntry->personalityProfile, evidence, nowMs,
+                        Companion::Conversation::ConvKind::CombatReview))
+                {
+                    _combatReviewLastMs = nowMs;
+                    lastPartyReviewMs = nowMs;
+                }
+            }
+        }
     }
     _encounter.Reset(); // BL-003: persist before reset
+}
+
+void PlayerBotAI::ApplyValidatedCombatLesson(
+    Companion::Encounter::Recorder::Summary const& summary, uint32 nowMs)
+{
+    if (!me || !botEntry || !IsOwnedCompanion() || !me->GetGroup())
+        return;
+    Player* leader = sObjectAccessor.FindPlayer(me->GetGroup()->GetLeaderGuid());
+    if (!leader || !leader->GetSession() || leader->GetSession()->GetBot())
+        return;
+
+    uint32 lessonType = 3; // steady
+    uint32 confidence = 1;
+    if (summary.damageTaken >= 20 &&
+        summary.damageTaken >= summary.effectiveDamage * 2)
+    {
+        lessonType = 1; // caution
+        confidence = summary.decisions >= 3 ? 3 : 2;
+        _combatCautionUntilMs = nowMs + 300000;
+        _personalityChaseDist = 30.0f;
+        _partyMemoryLesson = 1;
+    }
+    else if (summary.castsRejected > summary.castsAccepted && summary.decisions >= 3)
+    {
+        lessonType = 2; // timing
+        confidence = 2;
+        _partyMemoryLesson = 2;
+    }
+    else
+        _partyMemoryLesson = 3;
+
+    if (!sPlayerBotMgr.LearningStore().QueueLesson(
+            me->GetGUIDLow(), lessonType, confidence, _learningEncounterSeq,
+            summary.durationMs,
+            summary.effectiveDamage, summary.damageTaken, summary.decisions))
+        sLog.outError("[PlayerBot][Learning] lesson queue dropped GUID:%u type:%u",
+                      me->GetGUIDLow(), lessonType);
+    else if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[PlayerBot][Learning] lesson GUID:%u type:%u confidence:%u",
+                       me->GetGUIDLow(), lessonType, confidence);
 }
 
 void PlayerBotAI::OnDamageDealt(Unit* target, uint32 effectiveDamage, uint32 spellId,
@@ -1614,7 +2047,10 @@ void PlayerBotAI::RecordSocialEncounter(Unit* target, bool targetDied)
     // Only the lower GUID speaks, so one shared kill creates one visible,
     // world-local line rather than a two-bot echo.
     if (me->GetGUIDLow() < partner->GetGUIDLow())
-        me->Say("Good work, friend.", LANG_UNIVERSAL);
+    {
+        std::string const line = "Good work, " + std::string(partner->GetName()) + ".";
+        me->Say(line.c_str(), LANG_UNIVERSAL);
+    }
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[Social] acquaintance GUID:%u partner:%u event:shared-kill",
                        me->GetGUIDLow(), partner->GetGUIDLow());
@@ -1626,11 +2062,58 @@ void PlayerBotAI::OnDamageTaken(Unit* /*attacker*/, uint32 effectiveDamage, uint
     // Direct damage taken by the companion while the encounter is active;
     // the companion's death completes it as a safety outcome.
     _encounter.RecordDamageTaken(effectiveDamage, spellId, periodic, victimDied);
+    if (victimDied && me && IsZoneCitizen())
+    {
+        float const dx = me->GetPositionX() - _citizenDeathX;
+        float const dy = me->GetPositionY() - _citizenDeathY;
+        bool const sameSpot = _citizenDeathMap == me->GetMapId() &&
+            _citizenDeathZone == me->GetZoneId() && dx * dx + dy * dy <= 40.0f * 40.0f;
+        _citizenDeathsAtSpot = sameSpot ? std::min<uint8>(255, _citizenDeathsAtSpot + 1) : 1;
+        _citizenDeathMap = me->GetMapId();
+        _citizenDeathZone = me->GetZoneId();
+        _citizenDeathX = me->GetPositionX();
+        _citizenDeathY = me->GetPositionY();
+        if (_citizenDeathsAtSpot >= 3)
+        {
+            // Escalate from observed repeated failures: three deaths gives a
+            // 4.5-minute withdrawal, then it grows quadratically up to a
+            // 15-minute cap. No zone, mob, or coordinate is special-cased.
+            uint32 const cooldownSeconds = std::min<uint32>(900,
+                30 * uint32(_citizenDeathsAtSpot) * uint32(_citizenDeathsAtSpot));
+            _citizenDangerZoneUntilMs = WorldTimer::getMSTime() + cooldownSeconds * 1000;
+            // Do not make a party member disappear.  Independent citizens
+            // hand this request to the population allocator on its next tick.
+            _citizenSafetyRelocationRequested = !me->GetGroup();
+            if (_citizenSafetyRelocationRequested && botEntry)
+            {
+                // This entry survives the normal death/logout path, so the
+                // allocator cannot lose the evidence between AI updates.
+                botEntry->zoneWorldSafetyRelocation = true;
+                botEntry->zoneWorldSafetyExcludeMap = _citizenDeathMap;
+                botEntry->zoneWorldSafetyExcludeZone = _citizenDeathZone;
+            }
+            int32 const cellX = int32(std::floor(me->GetPositionX() / 40.0f));
+            int32 const cellY = int32(std::floor(me->GetPositionY() / 40.0f));
+            CharacterDatabase.DirectPExecute(
+                "INSERT INTO bot_citizen_danger_memory "
+                "(char_guid,map_id,zone_id,cell_x,cell_y,deaths,safe_until,updated_at) "
+                "VALUES (%u,%u,%u,%d,%d,%u,UNIX_TIMESTAMP()+%u,UNIX_TIMESTAMP()) "
+                "ON DUPLICATE KEY UPDATE deaths=LEAST(255,deaths+1), "
+                "safe_until=GREATEST(safe_until,UNIX_TIMESTAMP()+LEAST(900,30*(deaths+1)*(deaths+1))), "
+                "updated_at=UNIX_TIMESTAMP()",
+                me->GetGUIDLow(), _citizenDeathMap, _citizenDeathZone, cellX, cellY,
+                _citizenDeathsAtSpot, cooldownSeconds);
+            sLog.outString("[ZoneCitizen][Survival] danger-zone guid:%u deaths:%u zone:%u",
+                           me->GetGUIDLow(), _citizenDeathsAtSpot, _citizenDeathZone);
+        }
+    }
     // BL-003: companion death completes the encounter; persist before reset.
     TryPersistLearningSummary();
 }
 bool PlayerBotAI::TryOffensiveCastOrAttack(Unit* target)
 {
+    if (TryCitizenEmergencySelfHeal())
+        return true;
     uint32 const spellId = SelectOffensiveSpell(target);
     // BL-002: the rotation decision boundary (0 = no eligible ability).
     _encounter.RecordDecision(spellId, false);
@@ -2762,13 +3245,98 @@ void PopulateAreaBotAI::OnPlayerLogin()
         me->GetMotionMaster()->MoveConfused();
 }
 
+bool PlayerBotAI::TryCitizenEmergencySelfHeal()
+{
+    if (!me || !IsZoneCitizen() || me->GetGroup() || !me->IsInCombat() ||
+        me->GetHealth() * 100 >= me->GetMaxHealth() * 55 ||
+        me->IsNonMeleeSpellCasted(true))
+        return false;
+
+    uint32 baseSpell = 0;
+    switch (me->GetClass())
+    {
+        case CLASS_PALADIN: baseSpell = 635; break;   // Holy Light
+        case CLASS_PRIEST:  baseSpell = 2050; break;  // Lesser Heal
+        case CLASS_SHAMAN:  baseSpell = 331; break;   // Healing Wave
+        case CLASS_DRUID:   baseSpell = 5185; break;  // Healing Touch
+        default: return false;
+    }
+    uint32 const spellId = GetHighestKnownSpell(baseSpell);
+    if (!spellId || !me->HasSpell(spellId) || me->HasSpellCooldown(spellId))
+        return false;
+    SpellEntry const* const info = sSpellMgr.GetSpellEntry(spellId);
+    if (!info || me->GetPower(static_cast<Powers>(info->powerType)) < info->manaCost)
+        return false;
+    SpellCastResult const result = me->CastSpell(me, spellId, false);
+    if (result != SPELL_CAST_OK)
+        return false;
+    _abilityTimer = 1500;
+    sLog.outString("[ZoneCitizen][Survival] self-heal guid:%u spell:%u hp:%u/%u",
+                   me->GetGUIDLow(), spellId, me->GetHealth(), me->GetMaxHealth());
+    return true;
+}
+
+bool PlayerBotAI::TryCitizenDisengage(Unit* threat)
+{
+    if (!me || !IsZoneCitizen() || me->GetGroup() || !me->GetMaxHealth() ||
+        (me->GetHealth() * 100 > me->GetMaxHealth() * 45 &&
+         _citizenDangerZoneUntilMs <= WorldTimer::getMSTime()))
+        return false;
+
+    // A citizen has no party healer or owner override in this mode. Break
+    // contact before the emergency heal becomes a last, usually fatal cast.
+    // The short leg stays inside its recorded local activity zone and never
+    // teleports or turns into a cross-zone escape.
+    me->AttackStop();
+    me->CombatStop(true);
+    ClearTarget();
+    if (!MotionIdle())
+        me->GetMotionMaster()->Clear(false);
+
+    float x = me->GetPositionX();
+    float y = me->GetPositionY();
+    float z = me->GetPositionZ();
+    bool moved = false;
+    if (_activityHomeSet && _activityMap == me->GetMapId() &&
+        _activityZone == me->GetZoneId())
+    {
+        float const dx = _activityHomeX - x;
+        float const dy = _activityHomeY - y;
+        float const distance = std::sqrt(dx * dx + dy * dy);
+        if (distance > 4.0f)
+        {
+            float const leg = std::min(35.0f, distance);
+            x += dx * leg / distance;
+            y += dy * leg / distance;
+            me->UpdateGroundPositionZ(x, y, z);
+            moved = me->GetMap()->GetWalkHitPosition(nullptr, me->GetPositionX(),
+                                                      me->GetPositionY(), me->GetPositionZ(),
+                                                      x, y, z);
+        }
+    }
+    if (moved)
+        me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+
+    _travelActive = false;
+    _travelHuntGuid = 0;
+    _travelNudging = false;
+    _worldRestUntilMs = WorldTimer::getMSTime() + 45000;
+    _activityPauseMs = 45000;
+    SetCitizenActivityIntent(4, "combat-retreat");
+    sLog.outString("[ZoneCitizen][Survival] retreat guid:%u threat:%u hp:%u/%u moved:%u",
+                   me->GetGUIDLow(), threat ? threat->GetGUIDLow() : 0,
+                   me->GetHealth(), me->GetMaxHealth(), moved ? 1 : 0);
+    return true;
+}
+
 void PlayerBotAI::StartActivityTravel(float x, float y, float z,
-                                      uint64_t huntGuid, uint8 targetNode)
+                                      uint64_t huntGuid, uint8 targetNode,
+                                      bool progressionLeg)
 {
     _travelX = x;
     _travelY = y;
     _travelZ = z;
-    _travelTimeMs = 45000;
+    _travelTimeMs = progressionLeg ? 90000 : 45000;
     _travelActive = true;
     _travelHuntGuid = huntGuid;
     _travelFromNode = 255;
@@ -2785,6 +3353,82 @@ void PlayerBotAI::StartActivityTravel(float x, float y, float z,
     _travelRecoveryStage = 0;
     _travelNudging = false;
     me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+}
+
+bool PlayerBotAI::BeginProgressionTravel()
+{
+    if (!me || !IsZoneCitizen() || me->GetGroup() || me->IsInCombat() ||
+        !_progressionOverleveled || _progressionRetryMs)
+        return false;
+    uint32 targetZone = 0;
+    if (!sPlayerBotMgr.SelectCitizenProgressionDestination(
+            me, targetZone, _progressionFinalX, _progressionFinalY, _progressionFinalZ))
+    {
+        // Do not repeat a full zone scan every AI tick when the current
+        // location has no verified, level-appropriate nearby destination.
+        _progressionRetryMs = 60000;
+        sLog.outString("[ZoneCitizen][Progression] no verified suitable destination guid:%u map:%u zone:%u level:%u",
+                       me->GetGUIDLow(), me->GetMapId(), me->GetZoneId(), me->GetLevel());
+        return false;
+    }
+    _progressionTargetZone = targetZone;
+    _progressionTravelActive = true;
+    PersistCitizenJournal(1);
+    AreaEntry const* target = AreaEntry::GetById(targetZone);
+    sLog.outString("[ZoneCitizen][Progression] route start guid:%u from:%u to:%u (%s)",
+                   me->GetGUIDLow(), me->GetZoneId(), targetZone,
+                   target && target->Name ? target->Name : "unknown");
+    if (_activitySpeechUntilMs <= WorldTimer::getMSTime() && target && target->Name)
+    {
+        std::string const line = "I am taking the road toward " + std::string(target->Name) + ".";
+        me->Say(line.c_str(), LANG_UNIVERSAL);
+        _activitySpeechUntilMs = WorldTimer::getMSTime() + 90000;
+    }
+    return AdvanceProgressionTravel();
+}
+
+bool PlayerBotAI::AdvanceProgressionTravel()
+{
+    if (!me || !_progressionTravelActive || !me->GetMap())
+        return false;
+    float const dx = _progressionFinalX - me->GetPositionX();
+    float const dy = _progressionFinalY - me->GetPositionY();
+    float const distance = std::sqrt(dx * dx + dy * dy);
+    if (me->GetZoneId() == _progressionTargetZone || distance < 12.0f)
+    {
+        sLog.outString("[ZoneCitizen][Progression] route arrived guid:%u zone:%u",
+                       me->GetGUIDLow(), me->GetZoneId());
+        _progressionTravelActive = false;
+        _activityHomeSet = false;
+        ++_citizenVisitedZones;
+        PersistCitizenJournal(0, true);
+        return true;
+    }
+    float const leg = std::min(60.0f, distance);
+    float x = me->GetPositionX() + dx * leg / distance;
+    float y = me->GetPositionY() + dy * leg / distance;
+    // The final anchor's height can be hundreds of yards away from this
+    // short local leg. Resolve terrain at the leg itself; passing the distant
+    // destination Z makes otherwise walkable cross-zone routes look blocked.
+    float z = me->GetPositionZ();
+    me->UpdateGroundPositionZ(x, y, z);
+    if (!me->GetMap()->GetWalkHitPosition(nullptr, me->GetPositionX(), me->GetPositionY(),
+                                           me->GetPositionZ(), x, y, z))
+    {
+        sLog.outError("[ZoneCitizen][Progression] route blocked guid:%u to-zone:%u",
+                      me->GetGUIDLow(), _progressionTargetZone);
+        _progressionTravelActive = false;
+        _progressionTargetZone = 0;
+        _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
+        _progressionRetryMs = 120000;
+        SetCitizenActivityIntent(4, "progression-route-blocked");
+        PersistCitizenJournal(0);
+        return false;
+    }
+    StartActivityTravel(x, y, z, 0, 255, true);
+    sLog.outString("[ZoneCitizen][Progression] route leg guid:%u zone:%u to-zone:%u dist:%.1f",
+                   me->GetGUIDLow(), me->GetZoneId(), _progressionTargetZone, distance);
+    return true;
 }
 
 void PlayerBotAI::RememberActivityArrival()
@@ -2822,9 +3466,15 @@ void PlayerBotAI::RememberActivityArrival()
             ++_activityNodes[reached].visits;
         _activityCurrentNode = reached;
         if (newLink)
+        {
+            sPlayerBotMgr.RecordCitizenRouteEdge(me, _activityNodes[_travelFromNode].x,
+                                                 _activityNodes[_travelFromNode].y,
+                                                 _activityNodes[reached].x,
+                                                 _activityNodes[reached].y);
             sLog.outString("[WorldRoute] learned guid:%u from:%u to:%u nodes:%u",
                            me->GetGUIDLow(), _travelFromNode, reached,
                            _activityNodeCount);
+        }
     }
     _travelActive = false;
     _travelHuntGuid = 0;
@@ -2833,6 +3483,7 @@ void PlayerBotAI::RememberActivityArrival()
 
 void PlayerBotAI::AbandonActivityTravel()
 {
+    bool const abandonedProgression = _progressionTravelActive;
     uint32 const failedTarget = _travelHuntGuid
         ? ObjectGuid(_travelHuntGuid).GetCounter() : 0;
     if (_travelHuntGuid)
@@ -2849,6 +3500,19 @@ void PlayerBotAI::AbandonActivityTravel()
     _travelActive = false;
     _travelHuntGuid = 0;
     _travelNudging = false;
+    _progressionTravelActive = false;
+    if (abandonedProgression)
+    {
+        // A stalled path is evidence against this direct leg. Do not reload
+        // into the same target or restart it every world tick; return to a
+        // normal activity, persist the recovery state, and retry selection
+        // only after a bounded cooldown.
+        _progressionTargetZone = 0;
+        _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
+        _progressionRetryMs = 120000;
+        SetCitizenActivityIntent(4, "progression-route-stalled");
+        PersistCitizenJournal(0);
+    }
     _activityPauseMs = 3000;
 }
 
@@ -2856,6 +3520,16 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
 {
     if (!me || !me->IsAlive() || !me->GetMap())
         return false;
+    uint32 const nowMs = WorldTimer::getMSTime();
+    if (_progressionRetryMs)
+        _progressionRetryMs = _progressionRetryMs > diff ? _progressionRetryMs - diff : 0;
+    if (_progressionReportMs > diff)
+        _progressionReportMs -= diff;
+    else
+    {
+        _progressionReportMs = 60000;
+        RefreshCitizenProgression(false);
+    }
     // An established fight remains with the existing combat/loot executor.
     // A party invite preempts this method before it can choose a new goal.
     if (me->IsInCombat() || me->GetVictim() || GetAliveHeldTarget())
@@ -2870,6 +3544,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
 
     if (_worldRestUntilMs > WorldTimer::getMSTime())
     {
+        SetCitizenActivityIntent(4, "model-or-health-rest");
         if (!MotionIdle())
             me->GetMotionMaster()->Clear(false);
         _travelActive = false;
@@ -2878,8 +3553,47 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         return true;
     }
 
+    if (_citizenDangerZoneUntilMs > WorldTimer::getMSTime() &&
+        _citizenDeathMap == me->GetMapId() && _citizenDeathZone == me->GetZoneId())
+    {
+        // Three deaths at essentially one location is evidence that this
+        // ground is unsafe for this solo citizen.  The normal death path
+        // already uses this safe manager logout; use it here as well rather
+        // than spending the entire warning resting in the same kill pocket.
+        if (botEntry && botEntry->zoneWorldSafetyRelocation && !me->GetGroup())
+        {
+            sLog.outString("[ZoneCitizen][Survival] leaving-danger guid:%u map:%u zone:%u",
+                           me->GetGUIDLow(), _citizenDeathMap, _citizenDeathZone);
+            sPlayerBotMgr.DeleteBot(me->GetGUIDLow());
+            return true;
+        }
+        // A pending handoff has not reached the roster entry yet. Do not
+        // reopen combat while it does; retain the older short retreat only
+        // for that brief handoff window.
+        SetCitizenActivityIntent(4, "danger-zone-retreat");
+        if (MotionIdle() && _activityHomeSet && _activityMap == me->GetMapId() &&
+            _activityZone == me->GetZoneId())
+        {
+            float x = me->GetPositionX(), y = me->GetPositionY(), z = me->GetPositionZ();
+            float const dx = _activityHomeX - x, dy = _activityHomeY - y;
+            float const distance = std::sqrt(dx * dx + dy * dy);
+            if (distance > 4.0f)
+            {
+                float const leg = std::min(35.0f, distance);
+                x += dx * leg / distance;
+                y += dy * leg / distance;
+                me->UpdateGroundPositionZ(x, y, z);
+                if (me->GetMap()->GetWalkHitPosition(nullptr, me->GetPositionX(),
+                                                     me->GetPositionY(), me->GetPositionZ(),
+                                                     x, y, z))
+                    me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+            }
+        }
+        return true;
+    }
+
     if (!_activityHomeSet || _activityMap != me->GetMapId() ||
-        _activityZone != me->GetZoneId())
+        (!_progressionTravelActive && _activityZone != me->GetZoneId()))
     {
         _activityHomeSet = true;
         _activityMap = me->GetMapId();
@@ -2911,12 +3625,26 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         _activityNodes[i].blockedMs = _activityNodes[i].blockedMs > diff
             ? _activityNodes[i].blockedMs - diff : 0;
 
+    // A progression route is made of short path-found legs. Combat, loot,
+    // party commands, death and rest preempt it above; otherwise it has the
+    // first claim on off-duty movement and cannot be replaced by a nearby
+    // low-level hunt.
+    if (_progressionTravelActive)
+    {
+        SetCitizenActivityIntent(1, "progression-route");
+        if (!_travelActive)
+            AdvanceProgressionTravel();
+        return true;
+    }
+    if (IsZoneCitizen() && _progressionOverleveled && BeginProgressionTravel())
+        return true;
+
     // Pace the scan independently of the world tick even with a larger
     // citizen roster. Low health makes the bot rest instead of pulling.
     if (_huntScanMs <= diff)
     {
         _huntScanMs = 2000;
-        if (me->GetHealth() * 100 >= me->GetMaxHealth() * 60)
+        if (me->GetHealth() * 100 >= me->GetMaxHealth() * 80)
         {
             BotCitizenHuntScan scan(me);
             Creature* found = nullptr;
@@ -2929,7 +3657,8 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
                 _travelNudging = false;
                 RememberCombatTarget(target);
                 me->Attack(target, true);
-                me->GetMotionMaster()->MoveChase(target);
+                UpdateCombatPursuit(target, diff);
+                SetCitizenActivityIntent(2, "nearby-target");
                 sLog.outString("[ZoneCitizen] hunt guid:%u target:%u level:%u",
                                me->GetGUIDLow(), target->GetGUIDLow(), target->GetLevel());
                 return true;
@@ -2939,8 +3668,9 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
     else
         _huntScanMs -= diff;
 
-    if (me->GetHealth() * 100 < me->GetMaxHealth() * 50)
+    if (me->GetHealth() * 100 < me->GetMaxHealth() * 75)
     {
+        SetCitizenActivityIntent(4, "low-health");
         if (!MotionIdle())
             me->GetMotionMaster()->Clear(false);
         _travelActive = false;
@@ -2968,10 +3698,23 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         _travelTimeMs = _travelTimeMs > diff ? _travelTimeMs - diff : 0;
         if (me->GetDistance(_travelX, _travelY, _travelZ) < 4.0f)
         {
+            if (_progressionTravelActive)
+            {
+                _travelActive = false;
+                _travelHuntGuid = 0;
+                _travelNudging = false;
+                AdvanceProgressionTravel();
+                return true;
+            }
             RememberActivityArrival();
             _activityPauseMs = urand(4000, 9000);
             sLog.outString("[ZoneCitizen] travel reached guid:%u zone:%u",
                            me->GetGUIDLow(), _activityZone);
+            if (IsZoneCitizen() && nowMs >= _activitySpeechUntilMs)
+            {
+                me->Say("I am checking another part of the area.", LANG_UNIVERSAL);
+                _activitySpeechUntilMs = nowMs + urand(90000, 180000);
+            }
         }
         else
         {
@@ -3056,6 +3799,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         {
             StartActivityTravel(ground->GetPositionX(), ground->GetPositionY(),
                                 ground->GetPositionZ(), ground->GetObjectGuid().GetRawValue());
+            SetCitizenActivityIntent(2, "hunting-ground");
             sLog.outString("[ZoneCitizen] travel guid:%u zone:%u purpose:hunt target:%u to:%.1f/%.1f",
                            me->GetGUIDLow(), _activityZone, ground->GetGUIDLow(),
                            _travelX, _travelY);
@@ -3090,6 +3834,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
             {
                 StartActivityTravel(_activityNodes[best].x, _activityNodes[best].y,
                                     _activityNodes[best].z, 0, best);
+                SetCitizenActivityIntent(3, "learned-route-replay");
                 sLog.outString("[WorldRoute] replay guid:%u from:%u to:%u",
                                me->GetGUIDLow(), nearest, best);
                 return true;
@@ -3112,6 +3857,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
             map->GetTerrain()->GetZoneId(x, y, z) != _activityZone)
             continue;
         StartActivityTravel(x, y, z, 0);
+        SetCitizenActivityIntent(3, "walkable-patrol");
         sLog.outString("[ZoneCitizen] travel guid:%u zone:%u purpose:patrol to:%.1f/%.1f",
                        me->GetGUIDLow(), _activityZone, x, y);
         return true;
@@ -3236,6 +3982,9 @@ void PlayerBotAI::ReleaseToWorld()
     _worldIntentPending = false;
     _worldIntentNextMs = 0;
     _worldRestUntilMs = 0;
+    _combatCautionUntilMs = 0;
+    _partyMemoryLesson = 0;
+    _personalityChaseDist = kOwnerFollowChaseDist;
     _held = false;
     _assistTargetGuid = 0;
     _defendTargetGuid = 0;
@@ -3652,7 +4401,7 @@ void PlayerBotAI::ConversationRoundStep()
     // its worker; here we only consume a reply whose party signature still
     // matches and whose age is within budget, then Say it. A dead
     // companion is silent and an empty reply says nothing.
-    if (!IsOwnedCompanion() || !me)
+    if ((!IsOwnedCompanion() && !IsZoneCitizen()) || !me)
         return;
     Companion::Conversation::ConversationTransport& transport =
         sPlayerBotMgr.ConversationTransport();
@@ -4697,6 +5446,13 @@ void PlayerBotAI::SellJunkToVendor(Creature* vendor)
 
 bool PlayerBotAI::UpdateCompanion(uint32 diff)
 {
+    uint32 const nowMs = WorldTimer::getMSTime();
+    if (_combatCautionUntilMs && nowMs >= _combatCautionUntilMs)
+    {
+        _combatCautionUntilMs = 0;
+        _personalityChaseDist = kOwnerFollowChaseDist;
+        _partyMemoryLesson = 0;
+    }
     // A client-side uninvite bypasses .botdismiss. Drop the old group-bound
     // order here so an owned companion resumes its off-duty world activity
     // instead of holding still behind an unavailable follow leader.
@@ -5444,9 +6200,8 @@ bool PlayerBotAI::ExecuteCombat(Companion::Combat::Request const& req, uint32 di
                 (uint32)me->IsWithinLOSInMap(target),
                 _abilityTimer);
     }
-    if (!me->CanReachWithMeleeAutoAttack(target))
-        me->GetMotionMaster()->MoveChase(target);
-    else
+    UpdateCombatPursuit(target, diff);
+    if (me->CanReachWithMeleeAutoAttack(target))
         me->SetFacingToObject(target);
     // PORT-016 (KAP-558): the damage companion's pull evidence line,
     // sampled on the same 2 s combat pacing: the established-target

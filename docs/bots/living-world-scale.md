@@ -127,6 +127,40 @@ abandoned with a destination cooldown. No recovery step teleports the bot.
 These stages still need a density and obstruction pilot before use on the
 live 50-citizen world.
 
+## Durable, data-driven citizen progression
+
+An independent citizen records its current level band, zone visit, and any
+in-progress progression destination in the character database. On a later
+login it resumes only a compatible same-map destination; combat, party work,
+loot, death, rest, and a failed walk leg retain priority. Arrival records the
+new zone, while ordinary level updates do not inflate visit counts.
+
+Progression now uses each zone's observed ordinary-creature level distribution
+instead of its average alone. A citizen stays while at least 15% of profiled
+creatures fall in its solo-combat band (`level - 3` through its own level).
+Once that share drops below the threshold, it selects the nearest same-map,
+faction-compatible zone whose observed spawns meet the threshold. The rule is
+level-generic rather than a table of destinations for levels 15, 20, 45, or 50;
+those choices follow from the citizen's current map and actual creature data.
+At level 60 it reports `level-cap` and does not pretend there is another
+leveling zone. Travel uses short path-found legs, never teleportation, and
+names the selected destination in local chat. This is not a hand-authored
+road graph: it does not yet know road names, inns, or guaranteed cross-map
+transit. `PLAYERBOT_ZONE_WORLD_ZONE_TARGETS` provides exact per-zone counts for
+bounded pilots; for example, four each in Elwynn Forest and Dun Morogh can be
+set with `0:12:4;0:1:4` while the total citizen target is eight.
+
+Citizens also persist reciprocal shared-kill acquaintances. At most one
+participant speaks per shared event and uses the other citizen's name, which
+keeps the nearby social cue visible without chat floods.
+
+The optional local-model server can be started with the separate
+`qwen3.8-27b-concurrent` preset for four concurrent request slots. It omits
+MTP because the underlying server requires MTP to run at one slot. The normal
+MTP preset remains the preferred single-request configuration. Use the
+included concurrent-server smoke script before enabling it for a larger live
+population; it measures success and latency without logging prompts or keys.
+
 ## Scaling constraints in the current implementation
 
 - The ambient population controller counts only unowned bots; raising its

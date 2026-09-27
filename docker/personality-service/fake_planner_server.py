@@ -248,6 +248,20 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(delay_ms / 1000.0)
             self._send(status, payload)
             return
+        if self.path.startswith("/combat-review"):
+            import combat_review as cr
+            profile = "none"
+            if "?profile=" in self.path:
+                prof = self.path.split("?profile=", 1)[1].split("&", 1)[0].strip()
+                if prof in ("none", "reckless", "cautious"):
+                    profile = prof
+            try:
+                valid = cr.build_messages(profile, raw.decode("ascii")) is not None
+            except UnicodeDecodeError:
+                valid = False
+            self._send(200 if valid else 400,
+                       b"I will watch my timing next fight." if valid else b"")
+            return
         if self.path.startswith("/world-intent"):
             # Deterministic lab-only stand-in for the shared local model.
             try:
