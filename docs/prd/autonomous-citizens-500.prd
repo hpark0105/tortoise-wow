@@ -1,0 +1,311 @@
+---
+id: TW-BOTS-002
+title: Autonomous Citizen Progression and 500 Active Bots
+version: 0.1
+status: draft
+created: 2026-09-27
+owner: hpark
+repository: tortoise-wow
+branch: feature/shared-bot-agency
+baseline_commit: e5648e9
+baseline_scope: autonomous citizen progression pilot checkpoint
+format: Markdown with YAML metadata, stored as .prd
+parent: living-world.prd
+---
+
+# Autonomous citizen progression: technical PRD
+
+## 1. Outcome and scope
+
+Build persistent citizens that independently select achievable work, recover from
+failure, earn progression through normal gameplay, and travel to the nearest
+suitable reachable hunting area. Demonstrate 500 simultaneously active bot
+sessions, including meaningful activity in regions without a human player.
+
+The starting pilot has eight citizens, initially four in Elwynn Forest and four
+in Dun Morogh, according to the prior operator session. This document does not
+revalidate their current online state. Placement quotas initialize the experiment;
+individual progress determines later destinations. Bots need not level together.
+The first pilot validates same-map travel: Elwynn Forest and Dun Morogh are both
+on map 0. It does not require cross-continent transport.
+
+This is the focused technical successor for autonomous citizens to
+[TW-BOTS-001](living-world.prd). Earlier baseline descriptions in that document are
+historical. Companion commands retain priority when a citizen is recruited.
+This proposal does not revise ownership or earned-character progression rules.
+
+500 active sessions and horizontal planning capacity are separate deliverables.
+External planning workers can be replicated; distributing authoritative map/world
+simulation requires a separate design and is outside this implementation scope.
+Offline identities, decorative NPCs, and fabricated offline XP do not satisfy the
+500-active-session target. Capacity and hardware sufficiency remain unmeasured.
+500 simultaneous active sessions is the final capacity acceptance gate. Passing
+a smaller stage is partial progress and must not mark this requirement complete.
+
+## 2. Verified starting point and known gaps
+
+Source references are paths and symbols because line numbers change during work.
+The reviewed worktree extends commits e1a22d5 and 9d6ce50 and is checkpointed at
+e5648e9. Record the current implementation revision in each evidence card.
+
+| Evidence | Current behavior | Gap to address |
+|---|---|---|
+| PlayerBotAI.cpp: TryCitizenDisengage | One candidate toward home; sets a 45-second pause even if movement was not issued | No alternate escape or confirmed separation; moved:0 also means missing/mismatched home or home within four yards |
+| PlayerBotMgr.cpp: SelectCitizenProgressionDestination | Uses zone creature level distributions and nearest straight-line anchor | Whole-zone suitability does not prove local target availability, route reachability, or safety |
+| PlayerBotAI.cpp: AdvanceProgressionTravel | Short legs toward destination; zone entry OR proximity ends travel | Can finish before reaching a productive hunting area; blocked routes need remembered alternatives |
+| PlayerBotAI.cpp: PersistCitizenJournal | Durable progression intent and target | Extend through versioned migrations; preserve restart behavior |
+| PlayerBotMgr.cpp: RecordCitizenRouteEdge | Existing route-observation persistence hook | Audit its consumers, validity and bounds before extending it into shared route planning |
+| Companion/ConversationTransport.cpp: WorkerLoop | One sender waits for each response outside the world thread | More model-server slots alone do not provide concurrent requests from this caller |
+| PlayerBotMgr.cpp: SubmitWorldIntent | Global submission pacing | Fairness, admission budget and queue-age measurement needed for 500 citizens |
+| docker/personality-service/combat_review.py | Short advisory reflection from six counters | A generated reflection does not establish adaptive combat policy |
+
+The current progression threshold is 15% of profiled creatures in level-3 through
+the citizen's level. Level 60 is a leveling cap. Preserve this conservative
+baseline until a measured replacement passes the pilot. Logs from the prior
+session reported repeated retreat/reacquisition; the precise live cause remains
+unverified. A movement call or moved:1 log does not establish successful travel.
+
+## 3. Architecture and ownership
+
+1. **World executor:** owns live entities, combat legality, movement, rewards and
+   persistence. All proposed actions are revalidated here before execution.
+2. **Citizen controller:** owns activity state, personal capability estimates,
+   failure history, commitments and deterministic fallback selection.
+3. **Shared world knowledge:** bounded hunting-area profiles, route graph,
+   temporary hazards and expiring area reservations; shared across citizens.
+4. **Population scheduler:** budgets strategic work and distributes expensive
+   scans/path requests over time. It preserves required session/combat updates.
+5. **Planning broker and workers:** consume compact immutable snapshots and return
+   expiring proposals. Optional LLM advice cannot block ordinary gameplay.
+
+Extract these responsibilities incrementally from PlayerBotAI/PlayerBotMgr into
+focused components. Avoid a wholesale rewrite of working companion behavior.
+Every activity has one owner; party recruitment cancels or suspends citizen work
+and invalidates outstanding planning requests.
+
+## 4. Requirements
+
+### AC-01: Explicit activity lifecycle and survival (P0)
+
+Represent Hunt, Travel, Rest, Retreat, RecoverCorpse, Maintain, and PartyDuty with
+entry conditions, progress signals, completion conditions, deadline, failure
+reason and fallback. Select priorities explicitly: immediate survival and party
+authority preempt optional work. Model responses never bypass these priorities.
+
+Retreat samples a bounded set of path-valid candidates using threat direction,
+other hostiles, known safe ground and escape distance. Track actual displacement
+and separation. If no candidate works, attempt a different bounded recovery
+action and record failure. Suppress voluntary reacquisition of the failed target
+while recovering, without suppressing necessary self-defense. Do not manufacture
+successful combat disengagement by clearing bookkeeping alone.
+
+Proposed initial recovery budgets: sample at most eight candidates, check progress
+within five seconds, and escalate after three failed attempts. Tune from fixtures;
+these are defaults to validate, not established safe constants. Every failure
+path must terminate, defer with a reason, or select a different action.
+
+### AC-02: Hunting areas and personal capability (P0)
+
+Build small hunting-area profiles from existing world data and observations:
+map/zone, reachable anchor, level distribution, eligible enemy count, respawn
+availability, hostile density, service access and observation freshness.
+Reject illegal targets before scoring. Keep spatial scans bounded and shared.
+
+Maintain bounded per-bot statistics for kill time, damage taken, resource use,
+recovery duration, retreats and deaths by enemy category. Include actual learned
+abilities and equipment in capability decisions. Require minimum samples and
+confidence before relaxing conservative target selection; decay old evidence and
+reset or discount it after material gear, spell or level changes.
+
+Do not infer causes from aggregate counters alone. Failed casts, navigation
+failures and combat defeats need distinct categories. No GM boosts or automatic
+replacement of earned gear to make a behavior test pass.
+
+### AC-03: Productive independent progression (P0)
+
+Track XP per active minute, eligible-target scarcity, failed pulls and recovery
+cost. Distinguish intentional rest, travel and party duty from unexplained idle.
+Evaluate local alternatives before leaving a zone. Use observed productivity and
+capability in addition to the existing creature distribution gate.
+
+Use minimum dwell time and a required improvement margin to prevent oscillation.
+Initial proposal: ten-minute observation windows, two poor windows before normal
+relocation, and a 20% predicted improvement for elective switching. Danger and
+unreachable routes may interrupt immediately. Tune thresholds using recorded
+outcomes; normal differing class/gear performance must remain visible.
+
+At level cap, select explicitly supported maintenance/social/party activities;
+do not repeatedly request another leveling destination.
+
+### AC-04: Reachable routes and meaningful arrival (P0)
+
+Filter candidate areas by faction/access rules, capability, usable targets and
+capacity. Rank feasible candidates by estimated safe travel time. Use a graph of
+verified crossings and waypoints with local pathfinding between nodes. Straight
+line distance is only a coarse candidate prefilter.
+
+Arrival requires the expected map/area and verified access to the destination's
+usable ground; crossing a zone boundary alone is insufficient. Record attempted
+route edges and outcomes. Failed edges receive reason-specific temporary
+penalties and bounded backoff. Replanning should try alternatives before retrying
+the same failed edge. Terrain/content version changes invalidate stale evidence.
+Represent no known route as an explicit result. Cross-continent transport is a
+later slice with its own boarding, waiting, arrival and failure tests.
+
+### AC-05: Population distribution and shared learning (P1)
+
+Assign soft area capacity from suitable spawns, respawn supply and competition.
+Use expiring reservations, bounded leases and jittered departures. Respect human
+access to quest targets. Avoid moving all citizens because one area briefly looks
+better. Account for destination reservations when planning travel.
+
+Share route success and hazard observations with timestamp, confidence, source
+version and expiry. One bot's failure cannot permanently blacklist an area for
+the population. Cap personal and shared memories and expire obsolete records.
+Persist coarse evidence rather than unbounded movement samples.
+
+### AC-06: Maintenance and continuity (P1)
+
+Plan food/drink, bags, equipment, repairs, training and corpse recovery through
+verified services and ordinary game rules. Add each service as a bounded slice.
+Persist stable activity intent and necessary progress, with transactional or
+idempotent handling appropriate to existing storage. On restart, validate goals
+against the current world before resuming. Release stale reservations.
+
+Use new ordered migrations; do not rewrite applied migration files. Prove saved
+character, inventory and quest state across an actual restart/restore before
+claiming persistence. Never exercise destructive fixtures on personal volumes.
+
+### AC-07: Scheduling and horizontal planning (P1)
+
+Measure existing costs before choosing concurrency or hardware. Event-driven
+replanning occurs after level/capability change, repeated failure, destination
+loss or activity completion. Stagger periodic strategic refreshes. Cache area
+profiles and candidate routes by map, capability band and content version.
+
+Maintain explicit per-tick budgets for discretionary scans and route requests;
+defer work fairly when exhausted. Preserve server-required movement, combat and
+session processing even for distant citizens. Coalesce dirty journal writes and
+rate-limit repetitive diagnostics. Track queue age and starvation.
+
+Horizontal workers receive bot-scoped opaque IDs, snapshot generation, activity
+revision, content version, allowed option IDs and deadline. Return request ID,
+selected option ID, expiry and bounded reason code. The executor accepts at most
+one current result, rejects duplicates/stale revisions, and validates actual
+world state. Workers have no live entity pointers or character-database write
+authority. A broker lease prevents competing workers owning one request.
+
+Scale workers independently of the authoritative world process. Prove safe
+worker loss, duplicate delivery, delayed replies and broker restart before
+adding replicas. World simulation sharding is a separate future proposal.
+
+### AC-08: Optional local LLM (P2)
+
+Use the existing local inference service for infrequent selection among validated
+strategic options, personality and coordination, and sanitized failure analysis.
+Keep combat execution and pathfinding deterministic. Send neither credentials,
+raw logs, private character/account records nor transcripts. Runtime prompts use
+minimal derived features and opaque option IDs, with a versioned schema.
+
+The model may choose a bounded option and commitment duration. Invalid, expired,
+unavailable or unsupported output invokes deterministic fallback. Evaluate its
+effect on measured outcomes against the same controller with LLM advice disabled.
+Useful dialogue alone does not prove better progression.
+
+Add bounded concurrent requests to the caller only after measuring server
+throughput and GPU contention. Use a fair queue, party-interaction priority with
+reserved citizen service capacity, timeouts, cancellation, request/token budgets
+and a circuit breaker. No retry storm and no paid/cloud fallback.
+
+Sizing example: 500 citizens / 600 seconds = 0.833 requests/sec (50/minute).
+The documented 10-second global pacing allows at most six world-intent submits
+per minute. For this comparison, one strategic review means one request through
+the current world-intent transport; that pacing is an inference submission gate,
+not a limit on ordinary world actions. A replacement broker must explicitly
+reconcile this gate with its request budget. With average service time L seconds,
+the illustrative
+required mean concurrency is arrival_rate * L, plus tested headroom. Concurrency
+alone cannot overcome insufficient tokens/sec. Choose frequency from measured
+capacity and use event-triggered or shared decisions where useful.
+
+### AC-09: Observability and operator controls (P0 throughout)
+
+Expose configured roster, online, active, deferred and offline counts separately.
+For each citizen, report activity/reason, last meaningful progress, destination,
+failure count and next retry. Aggregate XP rate, death/retreat rates, successful
+arrivals, stuck duration and area occupancy without hiding outliers.
+
+Measure p50/p95/p99 world tick duration, AI CPU time, path queue latency, database
+write rate/latency, memory, log rate, model throughput, queue age, rejected stale
+responses and fallback rate. Sample detailed traces locally with retention caps.
+Provide feature flags for new policies and a controlled rollback to deterministic
+baseline. Downscale by normal save/logout, never delete character records.
+
+## 5. Delivery and acceptance
+
+| Slice | Deliverables | Required evidence |
+|---|---|---|
+| S0: baseline | Per-citizen activity/progress metrics, repeatable fixtures, capability flags | Capture eight-bot baseline with model off/on status and source revision |
+| S1: recovery | AC-01 and explicit arrival semantics | Missing home, nearby home, blocked escape, repeated threat, interrupted travel; bounded alternate actions and no false success |
+| S2: progression | AC-02/03 and local area selection | Different capabilities progress independently; depleted areas trigger alternatives; stable choices under noisy observations |
+| S3: routes/distribution | AC-04/05 | Obstructed nearest destination, safer alternative, capacity contention, stale knowledge and no-route case |
+| S4: maintenance | AC-06 | Bags/resources/repair/training/death slices; persistence across restart; recruited-party preemption |
+| S5: capacity | AC-07 and stepped population ramp | 25, 50, 100, 250, 500 active sessions; fair distant activity and measured limiting resource |
+| S6: LLM and replicas | AC-08 and worker replication | Disabled/stalled/malformed model, stale/duplicate response, worker/broker failure; baseline gameplay continues |
+
+At every slice, run appropriate deterministic tests and inspect the diff. Python
+gates: python -m unittest discover -s docker -p 'test_*.py'; compile changed Python;
+parse changed PowerShell; validate Compose and git diff --check. C++ changes
+require a server build with the existing BUILD_JOBS value and Turtle addons on.
+Database-dependent behavior needs disposable fixtures. Source-text assertions
+and a clean build do not prove successful gameplay.
+
+Pilot acceptance requires observed combat/XP, loot/equipment, death/recovery,
+normal travel and restart persistence. Test quest completion only for declared
+supported quest types and record unsupported content explicitly. All eight must
+show independent meaningful progress or an explicit bounded defer reason; no
+bot may remain in an unnoticed repeat-failure loop.
+S1 must distinguish the actual retreat failure reason using bounded local
+observations before declaring the live symptom fixed; reacquisition suppression
+alone is insufficient evidence.
+
+Proposed measurable distant-activity floors: in each 30-minute load interval,
+at least 90% of available autonomous citizens in human-free zones must complete
+one legitimate gameplay objective (successful hunt/loot, maintenance interaction,
+or confirmed travel arrival). Track recovery-only citizens separately. Detect
+unexplained no-progress within 60 seconds and begin a bounded recovery or report
+an explicit blocked reason within another 60 seconds. Any citizen remaining
+blocked for five minutes fails the stage until investigated. Exclude party duty
+and intentional operator pauses explicitly, not by silently removing outliers.
+Commit the final floors before S5; these proposed values require S0 calibration.
+
+For each load stage, run a proposed minimum 30-minute steady interval after login
+stabilizes, then a proposed two-hour soak at the highest passing stage. Before
+ramping, record numeric tick/path/database/queue budgets from S0 and commit them
+to the acceptance evidence; do not choose favorable limits after the result.
+Require zero crashes, bounded queues/memory, no unexplained stuck citizens and
+continued activity without humans present. Compare individual progression and
+failure distributions to the eight-bot baseline. Longer gameplay observation is
+still needed to establish full leveling-journey correctness.
+
+## 6. Risks and open decisions
+
+- Establish the actual server tick budget and sustainable local-model throughput.
+- Audit existing route/danger memory consumers before adding overlapping tables.
+- Determine minimum reachable enemy supply for an area and appropriate per-class
+  capability sample counts using fixtures; avoid arbitrary universal constants.
+- Separate broken world content from navigation and policy defects in reports.
+- Agree cross-map transport scope after same-map progression passes.
+- If 500 active sessions exceed capacity, report the highest passing population
+  and measured bottleneck. Preserve the original target in subsequent planning.
+
+## 7. Implementation workflow
+
+Use retrieval scoped to tortoise-wow, verify current source/hashes, and give one
+fresh bounded local worker an eligible task per implementation slice. Keep
+evidence and sanitized worker reports in ignored local/. Hosted Codex owns
+architecture, source review, validation and acceptance. Sync changed tracked
+source after validation and report embedding/derived-write counts.
+
+This PRD records proposed work. The checkpoint preserves the pilot with known
+recovery limitations; it is not a claim of 500-bot readiness or a deployment.
