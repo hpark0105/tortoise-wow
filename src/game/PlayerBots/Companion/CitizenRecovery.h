@@ -18,6 +18,33 @@ namespace CitizenRecovery {
 
 enum class Outcome { Inactive, Walking, Escaped, Stalled, TimedOut };
 
+// Citizens normally retreat at 15%. If their current opponent is nearly
+// defeated, let them finish the fight unless their own health reaches the
+// critical 5% floor. A separate danger-zone signal still retreats at once.
+constexpr std::uint32_t kRetreatHealthPercent = 15u;
+constexpr std::uint32_t kDyingTargetHealthPercent = 15u;
+constexpr std::uint32_t kCriticalHealthPercent = 5u;
+
+inline bool ShouldRetreat(std::uint32_t health, std::uint32_t maxHealth,
+                          bool dangerZone, std::uint32_t targetHealth = 0u,
+                          std::uint32_t targetMaxHealth = 0u)
+{
+    if (!maxHealth)
+        return false;
+    if (dangerZone)
+        return true;
+
+    std::uint64_t const healthPercent = static_cast<std::uint64_t>(health) * 100u;
+    bool const atRetreatThreshold = healthPercent <=
+        static_cast<std::uint64_t>(maxHealth) * kRetreatHealthPercent;
+    bool const opponentNearlyDefeated = targetMaxHealth &&
+        static_cast<std::uint64_t>(targetHealth) * 100u <=
+        static_cast<std::uint64_t>(targetMaxHealth) * kDyingTargetHealthPercent;
+    bool const criticalHealth = healthPercent <=
+        static_cast<std::uint64_t>(maxHealth) * kCriticalHealthPercent;
+    return atRetreatThreshold && (!opponentNearlyDefeated || criticalHealth);
+}
+
 // Escape: cleared of combat at least this far from the retreat start.
 constexpr float kEscapeDistanceYards = 5.0f;
 constexpr float kEscapeDistanceSquaredYards = kEscapeDistanceYards * kEscapeDistanceYards;

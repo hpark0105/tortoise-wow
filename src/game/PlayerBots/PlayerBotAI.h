@@ -90,6 +90,8 @@ class PlayerBotAI: public PlayerAI
         void RememberActivityArrival();
         void AbandonActivityTravel();
         void UpdateCombatPursuit(Unit* target, uint32 diff);
+        bool JoinCitizenCombat(Unit* target);
+        bool UpdateCitizenGroupActivity(uint32 diff);
         virtual void PrepareZoneSpawn(uint32, uint32, uint32, float, float, float) {}
         virtual void ClearZoneSpawn() {}
         // Helpers
@@ -281,6 +283,7 @@ class PlayerBotAI: public PlayerAI
         uint32 _citizenRetreatMap = 0;
         float _citizenRetreatStartX = 0.0f, _citizenRetreatStartY = 0.0f;
         float _citizenRetreatEndX = 0.0f, _citizenRetreatEndY = 0.0f;
+        uint32 _citizenGroupFollowTimer = 0;
         bool TryCitizenDisengage(Unit* threat);
         bool UpdateCitizenRetreat(uint32 diff);
         void RecordCitizenRetreatFailure(bool hasEndpoint, char const* reason);
@@ -419,6 +422,14 @@ class PlayerBotAI: public PlayerAI
         Companion::Damage::Observation FillDamageObservation() const;
         bool IsEstablishedTankTarget(Creature* target) const;
         void AutoEquipForLevel();
+        void AutoAssignCitizenTalents();
+        bool MaintainCitizenHunterPet(uint32 diff);
+        uint8 GetCitizenSpecIndex();
+        char const* GetCitizenSpecName(uint8 specIndex) const;
+        uint32 _citizenSpecIndex = 0;
+        bool _citizenSpecInitialized = false;
+        uint32 _hunterPetAttemptTimer = 0;
+        bool _hunterPetReported = false;
         uint32 _gearMaxDiff = 9; // default similar to sample
         uint32 GetHighestKnownSpell(uint32 spellId) const;
         bool TargetHasAuraFromChain(Unit* target, uint32 spellId) const;

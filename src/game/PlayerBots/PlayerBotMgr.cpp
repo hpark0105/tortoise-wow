@@ -2820,6 +2820,135 @@ PlayerBotEntry* PlayerBotMgr::FindBotByGuid(uint32 guid) const
     return (it != m_bots.end()) ? it->second : nullptr;
 }
 
+void PlayerBotMgr::FormCitizenCombatGroup(Player* leader, Unit* target)
+{
+    PlayerBotAI* leaderAI = leader ? dynamic_cast<PlayerBotAI*>(leader->AI()) : nullptr;
+    if (!leader || !target || !leaderAI || !leaderAI->IsZoneCitizen() ||
+        !leaderAI->botEntry || !leaderAI->botEntry->persistent ||
+        leaderAI->botEntry->ownerAccountId || leaderAI->botEntry->recruiterAccountId ||
+        !leader->IsInWorld() || !leader->IsAlive() ||
+        !leader->CanAttack(target) || !target->IsInWorld() || !target->IsAlive() ||
+        target->GetTypeId() != TYPEID_UNIT || target->GetMap() != leader->GetMap() ||
+        target->GetZoneId() != leader->GetZoneId())
+        return;
+
+    Group* group = leader->GetGroup();
+    bool const created = !group;
+    if (group && !IsAutonomousCitizenGroup(group))
+        return;
+    if (group && group->IsFull())
+    {
+        sLog.outString("[ZoneCitizen][HuntingGroup] shared-hunt group:%u leader:%u target:%u members:%u recruitment-stop:capacity",
+                       group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(), group->GetMembersCount());
+        return;
+    }
+    if (created)
+    {
+        group = new Group;
+        if (!group->Create(leader->GetObjectGuid(), leader->GetName()))
+        {
+            delete group;
+            return;
+        }
+        sObjectMgr.AddGroup(group);
+    }
+
+    uint32 joined = 0;
+    uint32 levelDenied = 0;
+    uint32 busyDenied = 0;
+    for (auto const& item : sObjectAccessor.GetPlayers())
+    {
+        Player* candidate = item.second;
+        if (!candidate || candidate == leader || !candidate->IsInWorld() ||
+            !candidate->IsAlive() || candidate->GetMap() != leader->GetMap() ||
+            candidate->GetZoneId() != leader->GetZoneId() || candidate->GetTeam() != leader->GetTeam() ||
+            candidate->GetDistance(leader) > 30.0f || candidate->GetGroup())
+            continue;
+        PlayerBotAI* ai = dynamic_cast<PlayerBotAI*>(candidate->AI());
+        if (!ai || !ai->IsZoneCitizen() || !ai->botEntry ||
+            !ai->botEntry->persistent || ai->botEntry->ownerAccountId ||
+            ai->botEntry->recruiterAccountId)
+            continue;
+        if (std::abs(int(candidate->GetLevel()) - int(leader->GetLevel())) > 3)
+        {
+            ++levelDenied;
+            continue;
+        }
+        if (candidate->IsInCombat() || candidate->GetVictim())
+        {
+            ++busyDenied;
+            continue;
+        }
+        if (!ai->JoinCitizenCombat(target))
+        {
+            ++busyDenied;
+            continue;
+        }
+        if (!group->AddMember(candidate->GetObjectGuid(), candidate->GetName()))
+        {
+            ++busyDenied;
+            sLog.outString("[ZoneCitizen][HuntingGroup] join-denied group:%u guid:%u level:%u reason:add-failed fallback:solo",
+                           group->GetId(), candidate->GetGUIDLow(), candidate->GetLevel());
+            continue;
+        }
+        ++joined;
+        std::string const joinedLine = "I am joining " + std::string(leader->GetName()) + "'s hunting party.";
+        candidate->Say(joinedLine.c_str(), LANG_UNIVERSAL);
+        sLog.outString("[ZoneCitizen][HuntingGroup] member-joined group:%u guid:%u name:%s level:%u target:%u",
+                       group->GetId(), candidate->GetGUIDLow(), candidate->GetName(),
+                       candidate->GetLevel(), target->GetGUIDLow());
+        if (group->IsFull())
+        {
+            sLog.outString("[ZoneCitizen][HuntingGroup] recruitment-stop group:%u leader:%u reason:capacity members:%u",
+                           group->GetId(), leader->GetGUIDLow(), group->GetMembersCount());
+            break;
+        }
+    }
+
+    if (created && group->GetMembersCount() < 2)
+    {
+        sLog.outString("[ZoneCitizen][HuntingGroup] solo guid:%u level:%u nearby-level-denied:%u busy-or-ordered:%u",
+                       leader->GetGUIDLow(), leader->GetLevel(), levelDenied, busyDenied);
+        group->Disband(true, leader->GetObjectGuid());
+        return;
+    }
+    group->BroadcastGroupUpdate();
+    if (created)
+    {
+        std::string const formedLine = "We are forming a hunting party to travel and hunt together.";
+        leader->Say(formedLine.c_str(), LANG_UNIVERSAL);
+        sLog.outString("[ZoneCitizen][HuntingGroup] formed group:%u leader:%u target:%u members:%u level:%u level-denied:%u busy-or-ordered:%u",
+                       group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(),
+                       group->GetMembersCount(), leader->GetLevel(), levelDenied, busyDenied);
+    }
+    else if (joined)
+        sLog.outString("[ZoneCitizen][HuntingGroup] recruitment-complete group:%u leader:%u joined:%u total:%u target:%u level-denied:%u busy-or-ordered:%u",
+                       group->GetId(), leader->GetGUIDLow(), joined,
+                       group->GetMembersCount(), target->GetGUIDLow(), levelDenied, busyDenied);
+    else if (!created)
+        sLog.outString("[ZoneCitizen][HuntingGroup] shared-hunt group:%u leader:%u target:%u members:%u level-denied:%u busy-or-ordered:%u",
+                       group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(),
+                       group->GetMembersCount(), levelDenied, busyDenied);
+}
+
+bool PlayerBotMgr::IsAutonomousCitizenGroup(Group const* group) const
+{
+    if (!group || group->GetMembersCount() < 2)
+        return false;
+    PlayerBotEntry* leader = FindBotByGuid(group->GetLeaderGuid().GetCounter());
+    if (!leader || !leader->persistent || leader->ownerAccountId || leader->recruiterAccountId ||
+        !leader->ai || !leader->ai->IsZoneCitizen())
+        return false;
+    for (auto const& slot : group->GetMemberSlots())
+    {
+        PlayerBotEntry* entry = FindBotByGuid(slot.guid.GetCounter());
+        if (!entry || !entry->persistent || entry->ownerAccountId || entry->recruiterAccountId ||
+            (entry->ai && !entry->ai->IsZoneCitizen()))
+            return false;
+    }
+    return true;
+}
+
 bool PlayerBotMgr::IsOwnedCompanionGroup(Group const* group, uint32 logoutGuid, uint32 accountId) const
 {
     if (!group)

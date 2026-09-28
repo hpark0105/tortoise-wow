@@ -24,6 +24,18 @@ void Check(bool condition, char const* label)
 using Companion::CitizenRecovery::Outcome;
 using Companion::CitizenRecovery::Progress;
 using Companion::CitizenRecovery::RetryPolicy;
+using Companion::CitizenRecovery::ShouldRetreat;
+
+void TestRetreatHealthThreshold()
+{
+    Check(ShouldRetreat(15u, 100u, false), "health threshold: retreat at 15 percent");
+    Check(!ShouldRetreat(16u, 100u, false), "health threshold: keep fighting above 15 percent");
+    Check(ShouldRetreat(10u, 100u, false), "health threshold: retreat below 15 percent");
+    Check(!ShouldRetreat(10u, 100u, false, 10u, 100u), "dying target: finish fight above critical health");
+    Check(ShouldRetreat(5u, 100u, false, 10u, 100u), "dying target: retreat at critical health");
+    Check(ShouldRetreat(80u, 100u, true), "health threshold: danger zone overrides health");
+    Check(!ShouldRetreat(0u, 0u, true), "health threshold: zero maximum health is invalid");
+}
 
 void TestNoStart()
 {
@@ -494,6 +506,7 @@ void TestProgressFeedsRetryEscalation()
 
 int main()
 {
+    TestRetreatHealthThreshold();
     TestNoStart();
     TestResetAndRestart();
     TestNoMovementCombatClearedIsNotSuccess();

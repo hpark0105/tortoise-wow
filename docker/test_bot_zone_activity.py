@@ -72,6 +72,7 @@ UPDATE tw_world.creature SET position_x=-8946.95,position_y=-175.493,position_z=
         self.assertIn(f"[PlayerBot] fighting GUID:{d.COMP_GUID} victim:{d.ATTACKER_GUID}",
                       self.logs)
         self.assertIn(f"[WorldRoute] learned guid:{d.COMP_GUID}", self.logs)
+        self.assertIn(f"[ZoneCitizen][HuntingGroup] solo guid:{d.COMP_GUID}", self.logs)
 
 
 if __name__ == "__main__":

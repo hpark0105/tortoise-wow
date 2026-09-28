@@ -15,6 +15,7 @@ class PlayerBotAI;
 class WorldSession;
 class Player;
 class Group;
+class Unit;
 
 enum PlayerBotState
 {
@@ -180,6 +181,9 @@ class PlayerBotMgr
         // PORT-018 (KAP-558): live bot lookup by low GUID (world thread,
         // no allocation).
         PlayerBotEntry* FindBotByGuid(uint32 guid) const;
+        // Form a persistent bot-only citizen party around an active hunt.
+        void FormCitizenCombatGroup(Player* leader, Unit* target);
+        bool IsAutonomousCitizenGroup(Group const* group) const;
 
         // TW-OWNER-PARTY-LOGOUT: true when the group contains the logging-out
         // owner plus at least one registered companion owned by that account,
