@@ -436,6 +436,10 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             ClearCitizenRetreatMotion();
         _citizenRetreat.Reset();
         _citizenRetreatRetry.Reset();
+        // AC-10 R5: a teleport is a position discontinuity; the
+        // hunting-group episode age does not survive it.
+        _citizenGroupLeaderLostMs = 0;
+        _citizenGroupFollowStallMs = 0;
     }
 
     if (me->IsBeingTeleportedNear())
@@ -470,6 +474,18 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             ClearCitizenRetreatMotion();
         _citizenRetreat.Reset(); // ordinary recovery/party orders own motion now
         _citizenRetreatRetry.Reset();
+        // AC-10 R5: genuine party/recovery authority also clears the
+        // hunting-group episode age. The map leg counts only after a
+        // retreat set _citizenRetreatMap: with its zero default the
+        // block fires for every never-retreated citizen and would
+        // reset the episode on every tick.
+        if (!me->IsAlive() || _following || _held || _assistTargetGuid ||
+            (botEntry && botEntry->recruiterAccountId) ||
+            (_citizenRetreatMap != 0 && me->GetMapId() != _citizenRetreatMap))
+        {
+            _citizenGroupLeaderLostMs = 0;
+            _citizenGroupFollowStallMs = 0;
+        }
     }
     else if (!_citizenRetreat.Active() && !me->IsInCombat() && !me->GetVictim() &&
              !GetAliveHeldTarget() && me->GetMaxHealth() &&
@@ -1261,15 +1277,36 @@ void PlayerBotAI::RememberCombatTarget(Unit* unit)
                        unit->GetHealth(), unit->GetMaxHealth());
 }
 
+void PlayerBotAI::ClearCitizenGroupState()
+{
+    _citizenGroupLeaderLostMs = 0;
+    _citizenGroupFollowStallMs = 0;
+}
+
 bool PlayerBotAI::CitizenCombatReady() const
 {
     // Voluntary combat (pulling a solo hunt or joining a hunting group)
     // requires hunt-ready health; below it the citizen rests or recovers.
     // Necessary self-defense is never gated: an already engaged citizen
     // keeps fighting through the ordinary combat path.
-    return me && me->IsAlive() && me->GetMaxHealth() > 0 &&
-        me->GetHealth() * 100u >= me->GetMaxHealth() *
-            Companion::CitizenRecovery::kHuntReadyHealthPercent;
+    // AC-10 R3: readiness also requires a free recovery commitment. A
+    // citizen resting after a retreat, still retreating, deferred by
+    // repeated retreat failures, or holding a corpse pending loot is
+    // not pulled into voluntary combat until that commitment ends.
+    if (!me || !me->IsAlive() || me->GetMaxHealth() == 0)
+        return false;
+    if (me->GetHealth() * 100u < me->GetMaxHealth() *
+        Companion::CitizenRecovery::kHuntReadyHealthPercent)
+        return false;
+    if (_worldRestUntilMs > WorldTimer::getMSTime())
+        return false;
+    if (_citizenRetreat.Active())
+        return false;
+    if (_citizenRetreatRetry.Deferred())
+        return false;
+    if (_targets.corpse != 0)
+        return false;
+    return true;
 }
 
 bool PlayerBotAI::JoinCitizenCombat(Unit* target)
@@ -1281,7 +1318,10 @@ bool PlayerBotAI::JoinCitizenCombat(Unit* target)
         _following || _held || _assistTargetGuid || !target ||
         !target->IsAlive() || target->GetTypeId() != TYPEID_UNIT ||
         target->GetMap() != me->GetMap() || target->GetZoneId() != me->GetZoneId() ||
-        !me->CanAttack(target))
+        !me->CanAttack(target) ||
+        // AC-10 R3: a suppressed failed hunt target is not a group
+        // re-engagement target; the suppression window owns it.
+        (_failedHuntMs && target->GetGUIDLow() == _failedHuntGuid))
         return false;
 
     RememberCombatTarget(target);
@@ -1292,12 +1332,23 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
 {
     Group* group = me ? me->GetGroup() : nullptr;
     if (!me || !group || !sPlayerBotMgr.IsAutonomousCitizenGroup(group))
+    {
+        // AC-10 R5: a new group identity (joined, left, disbanded)
+        // starts a fresh episode; no timer survives the change.
+        _citizenGroupLeaderLostMs = 0;
+        _citizenGroupFollowStallMs = 0;
         return false;
+    }
 
     Player* leader = sObjectAccessor.FindPlayer(group->GetLeaderGuid());
     PlayerBotAI* leaderAI = leader ? dynamic_cast<PlayerBotAI*>(leader->AI()) : nullptr;
-    bool const leaderUsable = leader && leader->IsInWorld() && leader->IsAlive() &&
+    bool const leaderReachable = leader && leader->IsInWorld() && leader->IsAlive() &&
         leaderAI && leaderAI->IsZoneCitizen();
+    // AC-10 R2: reachability is not usability. A living leader on
+    // another map cannot be followed from this one, so it enters the
+    // same bounded episode; on expiry the follower leaves instead of
+    // disbanding the leader's group.
+    bool const leaderUsable = leaderReachable && leader->GetMapId() == me->GetMapId();
     if (!leaderUsable)
     {
         // A dead or unavailable leader must not suspend the member's own
@@ -1309,9 +1360,33 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
             _citizenGroupLeaderLostMs, me->IsInCombat() || me->GetVictim() != nullptr))
         {
         case Companion::CitizenRecovery::LeaderLoss::FallThrough:
-            _citizenGroupLeaderLostMs = 0;
+            // AC-10 R5: self-defense does not cancel the missing-leader
+            // episode; the age is preserved and the outcome resolves on
+            // the next safe tick.
             return false;
         case Companion::CitizenRecovery::LeaderLoss::Disband:
+            if (leaderReachable)
+            {
+                // AC-10 R2: the leader is fine, only this follower
+                // cannot reach it. Leave the group and resume solo
+                // activity; the leader keeps its group.
+                sLog.outString("[ZoneCitizen][HuntingGroup] leave cross-map group:%u member:%u leader-guid:%u leader-map:%u member-map:%u waited-ms:%u deadline-ms:%u",
+                               group->GetId(), me->GetGUIDLow(),
+                               group->GetLeaderGuid().GetCounter(),
+                               leader->GetMapId(), me->GetMapId(),
+                               _citizenGroupLeaderLostMs,
+                               Companion::CitizenRecovery::kLeaderLostDeadlineMs);
+                me->Say("My hunting party is out of reach. I am resuming my own hunt.", LANG_UNIVERSAL);
+                if (!MotionIdle())
+                {
+                    me->GetMotionMaster()->Clear(false);
+                    me->GetMotionMaster()->MoveIdle();
+                }
+                _citizenGroupLeaderLostMs = 0;
+                _citizenGroupFollowStallMs = 0;
+                group->RemoveMember(me->GetObjectGuid(), GROUP_LEAVE);
+                return true;
+            }
             sLog.outString("[ZoneCitizen][HuntingGroup] disband leader-unavailable group:%u member:%u leader-guid:%u waited-ms:%u deadline-ms:%u",
                            group->GetId(), me->GetGUIDLow(),
                            group->GetLeaderGuid().GetCounter(),
@@ -1319,6 +1394,7 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
                            Companion::CitizenRecovery::kLeaderLostDeadlineMs);
             me->Say("I am resuming my own hunt without the group.", LANG_UNIVERSAL);
             _citizenGroupLeaderLostMs = 0;
+            _citizenGroupFollowStallMs = 0;
             group->Disband(true, me->GetObjectGuid());
             return true;
         case Companion::CitizenRecovery::LeaderLoss::Wait:
@@ -1334,6 +1410,7 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         return true;
     }
     _citizenGroupLeaderLostMs = 0;
+    _citizenGroupFollowStallMs = 0;
 
     bool levelSpread = false;
     for (auto const& slot : group->GetMemberSlots())
@@ -1370,6 +1447,36 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         _citizenGroupFollowTimer = _citizenGroupFollowTimer > diff
             ? _citizenGroupFollowTimer - diff : 0;
         float const distance = me->GetDistance(leader);
+        // AC-10 R2: a same-map follower that cannot close the
+        // distance to a usable leader (blocked path, lagging member)
+        // gets a bounded progress deadline; on expiry it leaves the
+        // group and resumes solo activity instead of orbiting forever.
+        if (distance <= 6.0f)
+            _citizenGroupFollowStallMs = 0;
+        else if (diff >= Companion::CitizenRecovery::kFollowStallDeadlineMs ||
+                 _citizenGroupFollowStallMs >=
+                     Companion::CitizenRecovery::kFollowStallDeadlineMs - diff)
+            _citizenGroupFollowStallMs = Companion::CitizenRecovery::kFollowStallDeadlineMs;
+        else
+            _citizenGroupFollowStallMs += diff;
+        if (_citizenGroupFollowStallMs >= Companion::CitizenRecovery::kFollowStallDeadlineMs)
+        {
+            sLog.outString("[ZoneCitizen][HuntingGroup] leave follow-stall group:%u member:%u leader-guid:%u distance:%.1f stall-ms:%u deadline-ms:%u",
+                           group->GetId(), me->GetGUIDLow(),
+                           group->GetLeaderGuid().GetCounter(), distance,
+                           _citizenGroupFollowStallMs,
+                           Companion::CitizenRecovery::kFollowStallDeadlineMs);
+            me->Say("My hunting party is out of reach. I am resuming my own hunt.", LANG_UNIVERSAL);
+            _citizenGroupFollowStallMs = 0;
+            _citizenGroupLeaderLostMs = 0;
+            if (!MotionIdle())
+            {
+                me->GetMotionMaster()->Clear(false);
+                me->GetMotionMaster()->MoveIdle();
+            }
+            group->RemoveMember(me->GetObjectGuid(), GROUP_LEAVE);
+            return true;
+        }
         if (distance > 6.0f && !_citizenGroupFollowTimer)
         {
             float const angle = leader->GetOrientation() + M_PI_F;
@@ -3494,6 +3601,9 @@ void PlayerBotAI::AutoEquipForLevel()
             }
         }
 
+    // AC-10 R4: count equip failures so the gear-roll marker is never
+    // written ahead of durable equipment changes.
+    uint32 equipFailures = 0;
     for (auto const& it : selectedBySlot)
     {
         uint16 dest = it.first;
@@ -3507,6 +3617,11 @@ void PlayerBotAI::AutoEquipForLevel()
         {
             if (const ItemPrototype* existingProto = existing->GetProto())
             {
+                // AC-10 R4: the slot already holds exactly the selected
+                // item; a re-run of the deterministic roll (for example
+                // after a marker-write failure) must not churn it.
+                if (existingProto->ItemId == proto->ItemId)
+                    continue;
                 bool const requiresShield = shieldAndOneHandSpec && slot == EQUIPMENT_SLOT_OFFHAND &&
                                             existingProto->InventoryType != INVTYPE_SHIELD;
                 bool const requiresOneHand = shieldAndOneHandSpec && slot == EQUIPMENT_SLOT_MAINHAND &&
@@ -3531,15 +3646,32 @@ void PlayerBotAI::AutoEquipForLevel()
             me->AutoUnequipItemFromSlot(slot, false);
         }
 
-        me->EquipNewItem(dest, proto->ItemId, true);
+        if (!me->EquipNewItem(dest, proto->ItemId, true))
+            ++equipFailures;
     }
 
     if (IsZoneCitizen() && citizenGearRollDue)
     {
-        CharacterDatabase.DirectPExecute(
+        // AC-10 R4: the gear-roll marker must not outlive the equipment
+        // changes it records. Persist the inventory first (synchronous
+        // transaction), then write the marker. If any equip or the
+        // marker write fails, the marker stays behind the equipment and
+        // the deterministic roll harmlessly re-runs at the next login
+        // (slots already holding the selected item are skipped).
+        if (equipFailures)
+        {
+            sLog.outError("[ZoneCitizen][Gear] marker skipped guid:%u level:%u equip-failures:%u",
+                          me->GetGUIDLow(), level, equipFailures);
+            return;
+        }
+        me->SaveInventoryAndGoldToDB();
+        bool const markerOk = CharacterDatabase.DirectPExecute(
             "INSERT INTO bot_citizen_journal (char_guid, gear_roll_level) VALUES (%u,%u) "
             "ON DUPLICATE KEY UPDATE gear_roll_level=GREATEST(gear_roll_level,VALUES(gear_roll_level))",
             me->GetGUIDLow(), level);
+        if (!markerOk)
+            sLog.outError("[ZoneCitizen][Gear] marker write failed guid:%u level:%u (re-roll next login)",
+                          me->GetGUIDLow(), level);
         sLog.outString("[ZoneCitizen][Gear] roll-complete guid:%u level:%u initial:%u slots:%u",
                        me->GetGUIDLow(), level, citizenInitialGearRoll ? 1 : 0,
                        uint32(selectedBySlot.size()));

@@ -184,6 +184,15 @@ class PlayerBotMgr
         // Form a persistent bot-only citizen party around an active hunt.
         void FormCitizenCombatGroup(Player* leader, Unit* target);
         bool IsAutonomousCitizenGroup(Group const* group) const;
+        // AC-10 R1: true when the issuer may invite the invitee
+        // although the invitee is already grouped: a human (never a
+        // bot session, except the disposable zone-world test anchor)
+        // inviting an unowned, unrecruited zone citizen that
+        // currently sits in an autonomous citizen hunting group, with
+        // both in the same map/zone. The invite settles through the
+        // HandlePartyInvite citizen-accept path, which transfers the
+        // citizen out of its autonomous group first.
+        bool CanHumanInviteCitizen(Player* issuer, Player* invitee) const;
 
         // TW-OWNER-PARTY-LOGOUT: true when the group contains the logging-out
         // owner plus at least one registered companion owned by that account,

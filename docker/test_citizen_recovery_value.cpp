@@ -529,6 +529,18 @@ void TestLeaderLossWaitAndDisband()
               LeaderLoss::Disband,
           "leader-loss: unthreatened member disbands at saturated wait");
 }
+void TestFollowStallDeadlineBounds()
+{
+    using Companion::CitizenRecovery::kFollowStallDeadlineMs;
+    using Companion::CitizenRecovery::kLeaderLostDeadlineMs;
+    Check(kFollowStallDeadlineMs != 0u,
+          "follow-stall: deadline is nonzero");
+    Check(kFollowStallDeadlineMs > kLeaderLostDeadlineMs,
+          "follow-stall: a reachable-but-unfollowable leader gets a "
+          "longer grace than a dead leader");
+    Check(kFollowStallDeadlineMs < 600000u,
+          "follow-stall: deadline stays within ten minutes");
+}
 } // namespace
 
 int main()
@@ -560,6 +572,7 @@ int main()
     TestProgressFeedsRetryEscalation();
     TestLeaderLossThreatenedFallsThrough();
     TestLeaderLossWaitAndDisband();
+    TestFollowStallDeadlineBounds();
 
     if (g_failures != 0)
     {

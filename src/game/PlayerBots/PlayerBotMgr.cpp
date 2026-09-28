@@ -2952,6 +2952,33 @@ bool PlayerBotMgr::IsAutonomousCitizenGroup(Group const* group) const
     return true;
 }
 
+bool PlayerBotMgr::CanHumanInviteCitizen(Player* issuer, Player* invitee) const
+{
+    if (!issuer || !invitee || !issuer->GetSession())
+        return false;
+    if (issuer->GetSession()->GetBot() &&
+        issuer->GetGUIDLow() != confZoneWorldTestAnchorGuid)
+        return false; // a bot session cannot take over a citizen
+    if (!issuer->IsInWorld() || !invitee->IsInWorld() || !invitee->IsAlive() ||
+        issuer->GetTeam() != ALLIANCE || invitee->GetTeam() != ALLIANCE ||
+        issuer->GetMapId() != invitee->GetMapId() ||
+        issuer->GetZoneId() != invitee->GetZoneId())
+        return false;
+    std::map<uint32, PlayerBotEntry*>::const_iterator const it =
+        m_bots.find(invitee->GetObjectGuid().GetCounter());
+    if (it == m_bots.end())
+        return false;
+    PlayerBotEntry const* e = it->second;
+    if (!e->ai || !e->ai->IsZoneCitizen() || e->ownerAccountId ||
+        e->recruiterAccountId)
+        return false;
+    // Only the takeover case unblocks the invite: the citizen must
+    // already be grouped, in an autonomous citizen hunting group.
+    // An ungrouped citizen is already invite-able through the
+    // ordinary path; a grouped companion stays owner-invite-only.
+    return invitee->GetGroup() && IsAutonomousCitizenGroup(invitee->GetGroup());
+}
+
 bool PlayerBotMgr::IsOwnedCompanionGroup(Group const* group, uint32 logoutGuid, uint32 accountId) const
 {
     if (!group)
@@ -3963,6 +3990,27 @@ void PlayerBotMgr::HandlePartyInvite(Player* issuer, Player* invitee)
                           bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
                           group->GetLeaderGuid().GetCounter());
             return;
+        }
+        // AC-10 R1: the invite was admitted although the citizen is
+        // already grouped (CanHumanInviteCitizen, the human takeover
+        // path). Leave the autonomous citizen group first -- the same
+        // stale-group exit CompletePartyRecruit uses -- so AddMember
+        // can succeed, and clear the group episode state so no timer
+        // leaks into the recruited duty.
+        if (citizenInvite)
+        {
+            Group* oldGroup = invitee->GetGroup();
+            if (oldGroup)
+            {
+                sLog.outString("[ZoneCitizen] group transfer out bot:%s guid:%u group:%u group-leader-guid:%u to-group-leader-guid:%u",
+                               bot->name.c_str(), invitee->GetObjectGuid().GetCounter(),
+                               oldGroup->GetId(), oldGroup->GetLeaderGuid().GetCounter(),
+                               group->GetLeaderGuid().GetCounter());
+                invitee->Say("I am leaving my hunting party to follow you.", LANG_UNIVERSAL);
+                if (bot->ai)
+                    bot->ai->ClearCitizenGroupState();
+                oldGroup->RemoveMember(invitee->GetObjectGuid(), GROUP_LEAVE);
+            }
         }
         Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
         // forming a new group, create it (persisted immediately)

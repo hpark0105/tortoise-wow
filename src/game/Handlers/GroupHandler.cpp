@@ -111,8 +111,13 @@ void WorldSession::HandleGroupInviteOpcode(WorldPacket & recv_data)
     Group *group2 = player->GetGroup();
     if (group2 && group2->isBGGroup())
         group2 = player->GetOriginalGroup();
-    // Player already in another group or invited
-    if (group2 || player->GetGroupInvite())
+    // Player already in another group or invited. One exception
+    // (AC-10 R1): a human may invite a roster citizen that is already
+    // in an autonomous citizen hunting group; that is the human
+    // takeover path and the bot side settles the group transfer in
+    // HandlePartyInvite.
+    if (player->GetGroupInvite() ||
+        (group2 && !sPlayerBotMgr.CanHumanInviteCitizen(GetPlayer(), player)))
     {
         SendPartyResult(PARTY_OP_INVITE, membername, ERR_ALREADY_IN_GROUP_S);
         return;
