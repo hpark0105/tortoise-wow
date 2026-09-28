@@ -92,6 +92,10 @@ class PlayerBotAI: public PlayerAI
         void UpdateCombatPursuit(Unit* target, uint32 diff);
         bool JoinCitizenCombat(Unit* target);
         bool UpdateCitizenGroupActivity(uint32 diff);
+        // Voluntary combat readiness shared by the solo hunt pull and
+        // hunting-group assistance: alive and at or above the hunt-ready
+        // health percentage. Necessary self-defense never checks this.
+        bool CitizenCombatReady() const;
         virtual void PrepareZoneSpawn(uint32, uint32, uint32, float, float, float) {}
         virtual void ClearZoneSpawn() {}
         // Helpers
@@ -284,6 +288,7 @@ class PlayerBotAI: public PlayerAI
         float _citizenRetreatStartX = 0.0f, _citizenRetreatStartY = 0.0f;
         float _citizenRetreatEndX = 0.0f, _citizenRetreatEndY = 0.0f;
         uint32 _citizenGroupFollowTimer = 0;
+        uint32 _citizenGroupLeaderLostMs = 0;
         bool TryCitizenDisengage(Unit* threat);
         bool UpdateCitizenRetreat(uint32 diff);
         void RecordCitizenRetreatFailure(bool hasEndpoint, char const* reason);
