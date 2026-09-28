@@ -1,5 +1,6 @@
 #include "PlayerBotAI.h"
 #include "Player.h"
+#include "Pet.h"
 #include "Corpse.h"
 #include "DBCStores.h"
 #include "Log.h"
@@ -27,10 +28,31 @@
 #include <functional>
 #include <vector>
 #include <map>
+#include <algorithm>
 
 
 namespace
 {
+class NearestTameableCreatureCheck
+{
+public:
+    NearestTameableCreatureCheck(Player const* player, float range) : i_player(player), i_range(range) {}
+    WorldObject const& GetFocusObject() const { return *i_player; }
+    bool operator()(Creature const* creature)
+    {
+        CreatureInfo const* info = creature ? creature->GetCreatureInfo() : nullptr;
+        if (!creature || !creature->IsAlive() || !info || !info->isTameable() ||
+            creature->GetLevel() > i_player->GetLevel() || creature->IsInCombat() ||
+            !i_player->IsWithinDistInMap(creature, i_range))
+            return false;
+        i_range = i_player->GetDistance(creature);
+        return true;
+    }
+private:
+    Player const* const i_player;
+    float i_range;
+};
+
 // TW-014 (KAP-557): the companion holds this range around its owner.
 const float kFollowRange = 2.0f;
 const float kFollowSideOffsetYd = 1.5f; // PORT-032: stand beside, not on the leader
@@ -436,7 +458,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         return;
 
     _citizenRetreatRetry.Tick(diff);
-    if (!me->IsAlive() || me->GetGroup() ||
+    if (!me->IsAlive() ||
+        (me->GetGroup() && !sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())) ||
         _following || _held || _assistTargetGuid || me->GetMapId() != _citizenRetreatMap ||
         (botEntry && botEntry->recruiterAccountId))
     {
@@ -476,6 +499,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         _lastLevel = me->GetLevel();
         RefreshCitizenProgression(true);
         AutoLearnSpellsForLevel();
+        AutoAssignCitizenTalents();
         AutoEquipForLevel();
         PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
     }
@@ -534,6 +558,9 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (UpdateQuestPhases(diff))
         return;
 
+    if (IsZoneCitizen() && me->GetClass() == CLASS_HUNTER && MaintainCitizenHunterPet(diff))
+        return;
+
     // Persistent bots share one bounded off-duty travel-and-hunt loop.
     // Owned companions wait for their owner to be online; citizens need no
     // owner. Party orders, hold, combat, recovery and loot preempt this job.
@@ -541,7 +568,16 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         !botEntry->recruiterAccountId;
     bool const ownedOffDuty = botEntry && botEntry->ownerAccountId &&
         FindOwnerByAccount();
-    if (botEntry && botEntry->persistent && !me->GetGroup() &&
+    Group* const citizenGroup = me->GetGroup();
+    bool const autonomousGroup = citizenGroup &&
+        sPlayerBotMgr.IsAutonomousCitizenGroup(citizenGroup);
+    bool const autonomousGroupLeader = autonomousGroup &&
+        citizenGroup->GetLeaderGuid() == me->GetObjectGuid();
+    if (botEntry && botEntry->persistent && autonomousGroup &&
+        !_following && !_held && !_assistTargetGuid &&
+        UpdateCitizenGroupActivity(diff))
+        return;
+    if (botEntry && botEntry->persistent && (!citizenGroup || autonomousGroupLeader) &&
         !_following && !_held && !_assistTargetGuid &&
         (citizenOffDuty || ownedOffDuty) && UpdateIndependentActivity(diff))
         return;
@@ -1224,6 +1260,88 @@ void PlayerBotAI::RememberCombatTarget(Unit* unit)
                        unit->GetHealth(), unit->GetMaxHealth());
 }
 
+bool PlayerBotAI::JoinCitizenCombat(Unit* target)
+{
+    if (!me || !IsZoneCitizen() || !botEntry || !botEntry->persistent ||
+        botEntry->ownerAccountId || botEntry->recruiterAccountId || !me->IsAlive() ||
+        (me->GetGroup() && !sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())) ||
+        _following || _held || _assistTargetGuid || !target ||
+        !target->IsAlive() || target->GetTypeId() != TYPEID_UNIT ||
+        target->GetMap() != me->GetMap() || target->GetZoneId() != me->GetZoneId() ||
+        !me->CanAttack(target))
+        return false;
+
+    RememberCombatTarget(target);
+    return me->Attack(target, true);
+}
+
+bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
+{
+    Group* group = me ? me->GetGroup() : nullptr;
+    if (!me || !group || !sPlayerBotMgr.IsAutonomousCitizenGroup(group))
+        return false;
+
+    Player* leader = sObjectAccessor.FindPlayer(group->GetLeaderGuid());
+    if (!leader || !leader->IsInWorld() || !leader->IsAlive())
+        return true;
+    PlayerBotAI* leaderAI = dynamic_cast<PlayerBotAI*>(leader->AI());
+    if (!leaderAI || !leaderAI->IsZoneCitizen())
+        return true;
+
+    bool levelSpread = false;
+    for (auto const& slot : group->GetMemberSlots())
+    {
+        Player* member = sObjectAccessor.FindPlayer(slot.guid);
+        if (member && std::abs(int(member->GetLevel()) - int(leader->GetLevel())) > 3)
+        {
+            levelSpread = true;
+            break;
+        }
+    }
+    if (levelSpread)
+    {
+        sLog.outString("[ZoneCitizen][HuntingGroup] disband level-spread group:%u member:%u leader:%u level:%u",
+                       group->GetId(), me->GetGUIDLow(), leader->GetGUIDLow(), leader->GetLevel());
+        me->Say("We are splitting up as our levels pull us toward different challenges.", LANG_UNIVERSAL);
+        group->Disband(true, group->GetLeaderGuid());
+        return true;
+    }
+
+    if (leader != me)
+    {
+        Unit* target = leaderAI->GetAliveHeldTarget();
+        if (target && target->IsAlive())
+        {
+            if (me->GetVictim() == target || (me->IsInCombat() && me->GetVictim()))
+                return false;
+            JoinCitizenCombat(target);
+            return false;
+        }
+        if (me->IsInCombat() || me->GetVictim())
+            return false;
+
+        _citizenGroupFollowTimer = _citizenGroupFollowTimer > diff
+            ? _citizenGroupFollowTimer - diff : 0;
+        float const distance = me->GetDistance(leader);
+        if (distance > 6.0f && !_citizenGroupFollowTimer)
+        {
+            float const angle = leader->GetOrientation() + M_PI_F;
+            float x = leader->GetPositionX() + std::cos(angle) * 3.0f;
+            float y = leader->GetPositionY() + std::sin(angle) * 3.0f;
+            float z = leader->GetPositionZ();
+            me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
+            _citizenGroupFollowTimer = 2500;
+        }
+        else if (distance <= 6.0f && !MotionIdle())
+        {
+            me->GetMotionMaster()->Clear(false);
+            me->GetMotionMaster()->MoveIdle();
+        }
+        return true;
+    }
+    return false;
+}
+
 void PlayerBotAI::InitQuestState()
 {
     _questId = sPlayerBotMgr.GetQuestId();
@@ -1579,6 +1697,7 @@ void PlayerBotAI::OnPlayerLogin()
     RefreshCitizenProgression(true);
     RepairBrokenEquipment();
     AutoLearnSpellsForLevel();
+    AutoAssignCitizenTalents();
     AutoEquipForLevel();
     InitQuestState();
     BackfillMirrorQuestMarkers(); // KAP-558 review: legacy in-flight mirrors
@@ -1592,6 +1711,7 @@ void PlayerBotAI::OnLevelUp()
     _lastLevel = me ? me->GetLevel() : _lastLevel;
     RefreshCitizenProgression(true);
     AutoLearnSpellsForLevel();
+    AutoAssignCitizenTalents();
     AutoEquipForLevel();
     PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
 }
@@ -1772,7 +1892,6 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
     uint8 playerClass = me->GetClass();
     uint8 playerRace = me->GetRace();
     uint8 level = me->GetLevel();
-
     uint32 classMask = 1 << (playerClass - 1);
     uint32 raceMask = 1 << (playerRace - 1);
 
@@ -1830,6 +1949,13 @@ void PlayerBotAI::AutoLearnSpellsForLevel()
 
         me->LearnSpell(ability->spellId, false);
     }
+
+    // Citizens take the standard Hunter taming skill as part of autonomous
+    // class progression; pets themselves are still acquired with the core's
+    // normal Tame Beast spell and tameable-creature checks.
+    if (IsZoneCitizen() && playerClass == CLASS_HUNTER && level >= 10 &&
+        !me->HasSpell(1515) && sSpellMgr.GetSpellEntry(1515))
+        me->LearnSpell(1515, false);
 }
 
 // PORT-011/012 (KAP-558): the raw 1.12 SpellCastResult is mapped to
@@ -2146,7 +2272,8 @@ void PlayerBotAI::OnDamageTaken(Unit* /*attacker*/, uint32 effectiveDamage, uint
             _citizenDangerZoneUntilMs = WorldTimer::getMSTime() + cooldownSeconds * 1000;
             // Do not make a party member disappear.  Independent citizens
             // hand this request to the population allocator on its next tick.
-            _citizenSafetyRelocationRequested = !me->GetGroup();
+            _citizenSafetyRelocationRequested = !me->GetGroup() ||
+                sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup());
             if (_citizenSafetyRelocationRequested && botEntry)
             {
                 // This entry survives the normal death/logout path, so the
@@ -2833,6 +2960,185 @@ namespace
     }
 }
 
+uint8 PlayerBotAI::GetCitizenSpecIndex()
+{
+    if (_citizenSpecInitialized)
+        return static_cast<uint8>(_citizenSpecIndex);
+
+    if (!me || !IsZoneCitizen() || me->GetLevel() < 10)
+        return 0;
+    _citizenSpecInitialized = true;
+
+    // Rank each citizen within its class by stable character GUID. Cycling
+    // that rank over the three DBC talent tabs keeps every class split even,
+    // and new citizens append to the distribution without reshuffling peers.
+    QueryResult* result = CharacterDatabase.PQuery(
+        "SELECT COUNT(*) FROM playerbot pb JOIN characters c ON c.guid=pb.char_guid "
+        "WHERE pb.ai='ZoneCitizenAI' AND c.class=%u AND pb.char_guid<=%u",
+        me->GetClass(), me->GetGUIDLow());
+    uint32 rank = 0;
+    if (result)
+    {
+        rank = result->Fetch()[0].GetUInt32();
+        delete result;
+    }
+    _citizenSpecIndex = rank ? (rank - 1) % 3 : me->GetGUIDLow() % 3;
+    return static_cast<uint8>(_citizenSpecIndex);
+}
+
+char const* PlayerBotAI::GetCitizenSpecName(uint8 specIndex) const
+{
+    static char const* const trees[12][3] = {
+        { "", "", "" },
+        { "Arms", "Fury", "Protection" },
+        { "Holy", "Protection", "Retribution" },
+        { "Beast Mastery", "Marksmanship", "Survival" },
+        { "Assassination", "Combat", "Subtlety" },
+        { "Discipline", "Holy", "Shadow" },
+        { "", "", "" },
+        { "Elemental", "Enhancement", "Restoration" },
+        { "Arcane", "Fire", "Frost" },
+        { "Affliction", "Demonology", "Destruction" },
+        { "", "", "" },
+        { "Balance", "Feral", "Restoration" }
+    };
+    uint32 const classId = me ? me->GetClass() : 0;
+    return classId < 12 && specIndex < 3 ? trees[classId][specIndex] : "Unknown";
+}
+
+void PlayerBotAI::AutoAssignCitizenTalents()
+{
+    if (!me || !IsZoneCitizen() || me->GetLevel() < 10)
+        return;
+
+    me->InitTalentForLevel();
+    uint32 const freeAtStart = me->GetFreeTalentPoints();
+    if (!freeAtStart)
+        return;
+
+    uint8 const specIndex = GetCitizenSpecIndex();
+    uint32 const* talentTabs = GetTalentTabPages(me->GetClass());
+    uint32 const talentTab = talentTabs ? talentTabs[specIndex] : 0;
+    if (!talentTab)
+    {
+        sLog.outError("[ZoneCitizen][Spec] no talent tab for guid:%u class:%u tree:%u",
+                      me->GetGUIDLow(), me->GetClass(), specIndex);
+        return;
+    }
+
+    auto currentRank = [this](TalentEntry const& talent) -> uint32
+    {
+        for (int32 rank = MAX_TALENT_RANK - 1; rank >= 0; --rank)
+            if (talent.RankID[rank] && me->HasSpell(talent.RankID[rank]))
+                return static_cast<uint32>(rank + 1);
+        return 0;
+    };
+
+    // Prefer the earliest row, continue ranks already started, and use the
+    // column/DBC id as a stable tie break. LearnTalent enforces row,
+    // prerequisite, class and rank rules exactly as it does for players.
+    for (uint32 guard = 0; guard < freeAtStart; ++guard)
+    {
+        std::vector<TalentEntry const*> candidates;
+        for (uint32 i = 0; i < sTalentStore.GetNumRows(); ++i)
+        {
+            TalentEntry const* talent = sTalentStore.LookupEntry(i);
+            if (!talent || talent->TalentTab != talentTab)
+                continue;
+            uint32 const rank = currentRank(*talent);
+            if (rank < MAX_TALENT_RANK && talent->RankID[rank])
+                candidates.push_back(talent);
+        }
+        std::sort(candidates.begin(), candidates.end(), [&](TalentEntry const* left, TalentEntry const* right)
+        {
+            if (left->Row != right->Row) return left->Row < right->Row;
+            bool const leftStarted = currentRank(*left) != 0;
+            bool const rightStarted = currentRank(*right) != 0;
+            if (leftStarted != rightStarted) return leftStarted;
+            if (left->Col != right->Col) return left->Col < right->Col;
+            return left->TalentID < right->TalentID;
+        });
+
+        uint32 const before = me->GetFreeTalentPoints();
+        bool learned = false;
+        for (TalentEntry const* talent : candidates)
+        {
+            uint32 const rank = currentRank(*talent);
+            me->LearnTalent(talent->TalentID, rank);
+            if (me->GetFreeTalentPoints() < before)
+            {
+                learned = true;
+                break;
+            }
+        }
+        if (!learned)
+            break;
+    }
+
+    uint32 const spent = freeAtStart - me->GetFreeTalentPoints();
+    if (spent || me->GetFreeTalentPoints())
+        sLog.outString("[ZoneCitizen][Spec] guid:%u class:%u spec:%s points-spent:%u points-remaining:%u",
+                       me->GetGUIDLow(), me->GetClass(), GetCitizenSpecName(specIndex),
+                       spent, me->GetFreeTalentPoints());
+}
+
+bool PlayerBotAI::MaintainCitizenHunterPet(uint32 diff)
+{
+    if (!me || !IsZoneCitizen() || me->GetClass() != CLASS_HUNTER || me->GetLevel() < 10)
+        return false;
+
+    if (Pet* pet = me->GetPet())
+    {
+        if (!_hunterPetReported)
+            sLog.outString("[ZoneCitizen][Pet] hunter-ready guid:%u pet-entry:%u pet-level:%u",
+                           me->GetGUIDLow(), pet->GetEntry(), pet->GetLevel());
+        _hunterPetReported = true;
+        return false;
+    }
+    if (_hunterPetReported)
+    {
+        sLog.outString("[ZoneCitizen][Pet] hunter-pet-missing guid:%u level:%u",
+                       me->GetGUIDLow(), me->GetLevel());
+        _hunterPetReported = false;
+    }
+
+    if (me->IsNonMeleeSpellCasted(false))
+        return true;
+    if (me->IsInCombat() || _hunterPetAttemptTimer > diff)
+    {
+        if (_hunterPetAttemptTimer > diff)
+            _hunterPetAttemptTimer -= diff;
+        return false;
+    }
+    _hunterPetAttemptTimer = 30000;
+
+    uint32 const tameBeast = 1515;
+    if (!me->HasSpell(tameBeast))
+    {
+        sLog.outString("[ZoneCitizen][Pet] waiting-for-tame-spell guid:%u level:%u",
+                       me->GetGUIDLow(), me->GetLevel());
+        return false;
+    }
+
+    Creature* target = nullptr;
+    NearestTameableCreatureCheck check(me, 30.0f);
+    MaNGOS::CreatureLastSearcher<NearestTameableCreatureCheck> searcher(target, check);
+    Cell::VisitGridObjects(me, searcher, 30.0f);
+    if (!target)
+        return false;
+
+    SpellCastResult const result = me->CastSpell(target, tameBeast, false);
+    if (result == SPELL_CAST_OK)
+    {
+        sLog.outString("[ZoneCitizen][Pet] taming guid:%u creature-entry:%u creature-level:%u",
+                       me->GetGUIDLow(), target->GetEntry(), target->GetLevel());
+        return true;
+    }
+    sLog.outString("[ZoneCitizen][Pet] tame-rejected guid:%u creature-entry:%u result:%u",
+                   me->GetGUIDLow(), target->GetEntry(), uint32(result));
+    return false;
+}
+
 void PlayerBotAI::AutoEquipForLevel()
 {
     if (!me)
@@ -2849,6 +3155,24 @@ void PlayerBotAI::AutoEquipForLevel()
         return;
 
     uint8 level = me->GetLevel();
+    bool citizenInitialGearRoll = false;
+    bool citizenGearRollDue = true;
+    if (IsZoneCitizen())
+    {
+        QueryResult* roll = CharacterDatabase.PQuery(
+            "SELECT gear_roll_level FROM bot_citizen_journal WHERE char_guid=%u",
+            me->GetGUIDLow());
+        uint8 lastRollLevel = 0;
+        if (roll)
+        {
+            lastRollLevel = roll->Fetch()[0].GetUInt8();
+            delete roll;
+        }
+        citizenInitialGearRoll = !lastRollLevel;
+        citizenGearRollDue = citizenInitialGearRoll || level > lastRollLevel;
+        if (!citizenGearRollDue)
+            return;
+    }
     // Citizens should look like ordinary leveling characters, not receive
     // the strongest free kit at every login. A GUID-derived level band makes
     // their common gear varied but stable; earned better gear is never removed.
@@ -2856,6 +3180,21 @@ void PlayerBotAI::AutoEquipForLevel()
         ? std::max<uint8>(1, level > 2 + me->GetGUIDLow() % 4
                                 ? level - 2 - me->GetGUIDLow() % 4 : 1)
         : level;
+    uint8 const citizenSpec = IsZoneCitizen() && level >= 10 ? GetCitizenSpecIndex() : 0;
+    bool const protectionWarrior = IsZoneCitizen() && me->GetClass() == CLASS_WARRIOR && citizenSpec == 2;
+    bool const shieldAndOneHandSpec = IsZoneCitizen() && level >= 10 &&
+        (protectionWarrior ||
+         (me->GetClass() == CLASS_PALADIN && citizenSpec <= 1) ||
+         (me->GetClass() == CLASS_SHAMAN && (citizenSpec == 0 || citizenSpec == 2)) ||
+         (me->GetClass() == CLASS_SHAMAN && citizenSpec == 1 && level < 20));
+    bool const dualWieldAvailable = level >= 10 && me->HasSpell(674); // Dual Wield
+    bool const dualWieldWeapons = IsZoneCitizen() && dualWieldAvailable &&
+        ((me->GetClass() == CLASS_ROGUE) ||
+         ((me->GetClass() == CLASS_WARRIOR || me->GetClass() == CLASS_HUNTER) && level >= 20));
+    bool const prefersTwoHand = IsZoneCitizen() && level >= 10 &&
+        ((me->GetClass() == CLASS_WARRIOR && citizenSpec == 0) ||
+         (me->GetClass() == CLASS_PALADIN && citizenSpec == 2) ||
+         (me->GetClass() == CLASS_SHAMAN && citizenSpec == 1 && level >= 20));
     uint32 classMask = 1 << (me->GetClass() - 1);
     uint32 raceMask = 1 << (me->GetRace() - 1);
 
@@ -2933,7 +3272,18 @@ void PlayerBotAI::AutoEquipForLevel()
         uint32 score;
     };
 
-    std::unordered_map<uint16, GearChoice> bestBySlot;
+    // One stable quality roll per citizen/level/equipment slot. Re-logging at
+    // the same level therefore never rerolls the gear; leveling creates the
+    // next deterministic opportunity to replace an item.
+    auto desiredCitizenQuality = [&](uint16 slot) -> uint32
+    {
+        uint32 const roll = (me->GetGUIDLow() * 2654435761u + uint32(level) * 2246822519u +
+                             uint32(slot & 0xff) * 3266489917u) % 10;
+        return roll == 0 ? ITEM_QUALITY_RARE :
+               (roll <= 3 ? ITEM_QUALITY_UNCOMMON : ITEM_QUALITY_POOR);
+    };
+
+    std::map<std::pair<uint16, uint32>, GearChoice> bestBySlotQuality;
 
     for (auto const& pair : sObjectMgr.GetItemPrototypeMap())
     {
@@ -2945,7 +3295,9 @@ void PlayerBotAI::AutoEquipForLevel()
         if (!IsAllowedSource(proto))
             continue;
 
-        if (IsZoneCitizen() && proto.Quality > ITEM_QUALITY_NORMAL)
+        if (!IsZoneCitizen() && proto.Quality > ITEM_QUALITY_NORMAL)
+            continue;
+        if (IsZoneCitizen() && proto.Quality > ITEM_QUALITY_RARE)
             continue;
 
         if (proto.RequiredLevel > citizenGearLevel)
@@ -2972,25 +3324,130 @@ void PlayerBotAI::AutoEquipForLevel()
 
         if (proto.Class == ITEM_CLASS_ARMOR && !CanEquipArmorSubclass(proto))
             continue;
-        if (proto.Class == ITEM_CLASS_WEAPON && !CanEquipWeaponSubclass(proto))
+        bool const casterHoldable = proto.InventoryType == INVTYPE_HOLDABLE && IsZoneCitizen() &&
+            (me->GetClass() == CLASS_PALADIN || me->GetClass() == CLASS_PRIEST ||
+             me->GetClass() == CLASS_SHAMAN || me->GetClass() == CLASS_MAGE ||
+             me->GetClass() == CLASS_WARLOCK || me->GetClass() == CLASS_DRUID);
+        if (proto.Class == ITEM_CLASS_WEAPON && !casterHoldable && !CanEquipWeaponSubclass(proto))
+            continue;
+        if (shieldAndOneHandSpec && proto.Class == ITEM_CLASS_WEAPON &&
+            proto.InventoryType != INVTYPE_WEAPON && proto.InventoryType != INVTYPE_WEAPONMAINHAND)
+            continue;
+        if (prefersTwoHand && proto.Class == ITEM_CLASS_WEAPON &&
+            proto.InventoryType != INVTYPE_2HWEAPON && proto.InventoryType != INVTYPE_WEAPON)
             continue;
 
-        uint16 dest = NULL_SLOT;
-        InventoryResult res = me->CanEquipItem(NULL_SLOT, dest, &proto, nullptr, true);
-        if (res != EQUIP_ERR_OK || dest == NULL_SLOT)
-            continue;
+        std::vector<uint8> preferredSlots(1, NULL_SLOT);
+        if (shieldAndOneHandSpec && proto.Class == ITEM_CLASS_WEAPON)
+            preferredSlots[0] = EQUIPMENT_SLOT_MAINHAND;
+        else if (dualWieldWeapons && proto.Class == ITEM_CLASS_WEAPON && proto.InventoryType == INVTYPE_WEAPON)
+            preferredSlots = { EQUIPMENT_SLOT_MAINHAND, EQUIPMENT_SLOT_OFFHAND };
+        else if (prefersTwoHand && proto.Class == ITEM_CLASS_WEAPON)
+            preferredSlots[0] = EQUIPMENT_SLOT_MAINHAND;
+        else if (IsZoneCitizen() && proto.InventoryType == INVTYPE_HOLDABLE &&
+                 (me->GetClass() == CLASS_PALADIN || me->GetClass() == CLASS_PRIEST ||
+                  me->GetClass() == CLASS_SHAMAN || me->GetClass() == CLASS_MAGE ||
+                  me->GetClass() == CLASS_WARLOCK || me->GetClass() == CLASS_DRUID))
+            preferredSlots[0] = EQUIPMENT_SLOT_OFFHAND;
 
-        // Prefer items near current level (effective level), then quality, then item level
-        uint32 score = effectiveLevel * 1000 + proto.Quality * 10 + proto.ItemLevel;
+        int32 statScore = 0;
+        for (auto const& stat : proto.ItemStat)
+        {
+            int32 weight = 0;
+            switch (stat.ItemStatType)
+            {
+                case ITEM_MOD_STRENGTH:
+                    weight = (me->GetClass() == CLASS_WARRIOR || me->GetClass() == CLASS_PALADIN ||
+                              (me->GetClass() == CLASS_SHAMAN && citizenSpec == 1) ||
+                              (me->GetClass() == CLASS_DRUID && citizenSpec == 1)) ? 3 : 1;
+                    break;
+                case ITEM_MOD_AGILITY:
+                    weight = (me->GetClass() == CLASS_HUNTER || me->GetClass() == CLASS_ROGUE ||
+                              me->GetClass() == CLASS_DRUID ||
+                              (me->GetClass() == CLASS_SHAMAN && citizenSpec == 1)) ? 3 : 1;
+                    break;
+                case ITEM_MOD_STAMINA:
+                    weight = (protectionWarrior ||
+                              (me->GetClass() == CLASS_PALADIN && citizenSpec == 1) ||
+                              (me->GetClass() == CLASS_WARLOCK && citizenSpec == 1)) ? 4 : 2;
+                    break;
+                case ITEM_MOD_INTELLECT:
+                    weight = (me->GetClass() == CLASS_PRIEST || me->GetClass() == CLASS_MAGE ||
+                              me->GetClass() == CLASS_WARLOCK || me->GetClass() == CLASS_PALADIN ||
+                              me->GetClass() == CLASS_SHAMAN || me->GetClass() == CLASS_DRUID) ? 3 : 1;
+                    break;
+                case ITEM_MOD_SPIRIT:
+                    weight = (me->GetClass() == CLASS_PRIEST || me->GetClass() == CLASS_MAGE ||
+                              me->GetClass() == CLASS_WARLOCK || me->GetClass() == CLASS_DRUID ||
+                              me->GetClass() == CLASS_PALADIN || me->GetClass() == CLASS_SHAMAN) ? 2 : 1;
+                    if (me->GetClass() == CLASS_PRIEST && citizenSpec == 2)
+                        weight = 1;
+                    break;
+                default: break;
+            }
+            statScore += stat.ItemStatValue * weight;
+        }
+        uint32 score = effectiveLevel * 1000 + proto.ItemLevel + std::max<int32>(0, statScore) * 20;
+        if (shieldAndOneHandSpec && proto.Class == ITEM_CLASS_ARMOR && proto.SubClass == ITEM_SUBCLASS_ARMOR_SHIELD)
+            score += 5000;
+        if (prefersTwoHand && proto.Class == ITEM_CLASS_WEAPON && proto.InventoryType == INVTYPE_2HWEAPON)
+            score += 5000;
+        if (me->GetClass() == CLASS_HUNTER && proto.Class == ITEM_CLASS_WEAPON && proto.SubClass == ITEM_SUBCLASS_WEAPON_BOW)
+            score += 5000; // Hunters prefer their ranged bow for ordinary hunting.
 
-        auto it = bestBySlot.find(dest);
-        if (it != bestBySlot.end() && it->second.score >= score)
-            continue;
-
-        bestBySlot[dest] = { &proto, score };
+        for (uint8 preferredSlot : preferredSlots)
+        {
+            uint16 dest = NULL_SLOT;
+            InventoryResult res = me->CanEquipItem(preferredSlot, dest, &proto, nullptr, true);
+            if (res != EQUIP_ERR_OK || dest == NULL_SLOT)
+                continue;
+            auto key = std::make_pair(dest, proto.Quality);
+            auto it = bestBySlotQuality.find(key);
+            if (it == bestBySlotQuality.end() || it->second.score < score)
+                bestBySlotQuality[key] = { &proto, score };
+        }
     }
 
-    for (auto const& it : bestBySlot)
+    std::map<uint16, GearChoice> selectedBySlot;
+    for (auto const& candidate : bestBySlotQuality)
+        if (!selectedBySlot.count(candidate.first.first))
+        {
+            uint16 const dest = candidate.first.first;
+            uint32 const target = IsZoneCitizen() ? desiredCitizenQuality(dest) : ITEM_QUALITY_NORMAL;
+            uint32 fallback[4];
+            if (target == ITEM_QUALITY_RARE)
+            {
+                fallback[0] = ITEM_QUALITY_RARE;
+                fallback[1] = ITEM_QUALITY_UNCOMMON;
+                fallback[2] = ITEM_QUALITY_NORMAL;
+                fallback[3] = ITEM_QUALITY_POOR;
+            }
+            else if (target == ITEM_QUALITY_UNCOMMON)
+            {
+                fallback[0] = ITEM_QUALITY_UNCOMMON;
+                fallback[1] = ITEM_QUALITY_POOR;
+                fallback[2] = ITEM_QUALITY_NORMAL;
+                fallback[3] = ITEM_QUALITY_RARE;
+            }
+            else
+            {
+                fallback[0] = ITEM_QUALITY_POOR;
+                fallback[1] = ITEM_QUALITY_NORMAL;
+                fallback[2] = ITEM_QUALITY_UNCOMMON;
+                fallback[3] = ITEM_QUALITY_RARE;
+            }
+            for (uint32 quality : fallback)
+            {
+                auto found = bestBySlotQuality.find(std::make_pair(dest, quality));
+                if (found != bestBySlotQuality.end())
+                {
+                    selectedBySlot[dest] = found->second;
+                    break;
+                }
+            }
+        }
+
+    for (auto const& it : selectedBySlot)
     {
         uint16 dest = it.first;
         ItemPrototype const* proto = it.second.proto;
@@ -3003,13 +3460,42 @@ void PlayerBotAI::AutoEquipForLevel()
         {
             if (const ItemPrototype* existingProto = existing->GetProto())
             {
-                if (existingProto->ItemLevel >= proto->ItemLevel)
+                bool const requiresShield = shieldAndOneHandSpec && slot == EQUIPMENT_SLOT_OFFHAND &&
+                                            existingProto->InventoryType != INVTYPE_SHIELD;
+                bool const requiresOneHand = shieldAndOneHandSpec && slot == EQUIPMENT_SLOT_MAINHAND &&
+                    (existingProto->InventoryType == INVTYPE_2HWEAPON ||
+                     existingProto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 ||
+                     existingProto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 ||
+                     existingProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2 ||
+                     existingProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF ||
+                     existingProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM);
+                bool const existingValuableUpgrade = existingProto->Quality >= ITEM_QUALITY_UNCOMMON &&
+                    existingProto->ItemLevel >= proto->ItemLevel;
+                bool const sameOrBetterQualityAtLevel = existingProto->ItemLevel >= proto->ItemLevel &&
+                    existingProto->Quality >= proto->Quality;
+                bool const materiallyHigherLevel = existingProto->ItemLevel > proto->ItemLevel + 2;
+                bool const preserveInitialUpgrade = existingValuableUpgrade ||
+                    existingProto->ItemLevel > proto->ItemLevel + 10;
+                if (!requiresShield && !requiresOneHand &&
+                    (citizenInitialGearRoll ? preserveInitialUpgrade :
+                     (sameOrBetterQualityAtLevel || materiallyHigherLevel)))
                     continue;
             }
             me->AutoUnequipItemFromSlot(slot, false);
         }
 
         me->EquipNewItem(dest, proto->ItemId, true);
+    }
+
+    if (IsZoneCitizen() && citizenGearRollDue)
+    {
+        CharacterDatabase.DirectPExecute(
+            "INSERT INTO bot_citizen_journal (char_guid, gear_roll_level) VALUES (%u,%u) "
+            "ON DUPLICATE KEY UPDATE gear_roll_level=GREATEST(gear_roll_level,VALUES(gear_roll_level))",
+            me->GetGUIDLow(), level);
+        sLog.outString("[ZoneCitizen][Gear] roll-complete guid:%u level:%u initial:%u slots:%u",
+                       me->GetGUIDLow(), level, citizenInitialGearRoll ? 1 : 0,
+                       uint32(selectedBySlot.size()));
     }
 }
 
@@ -3310,7 +3796,9 @@ void PopulateAreaBotAI::OnPlayerLogin()
 
 bool PlayerBotAI::TryCitizenEmergencySelfHeal()
 {
-    if (!me || !IsZoneCitizen() || me->GetGroup() || !me->IsInCombat() ||
+    if (!me || !IsZoneCitizen() ||
+        (me->GetGroup() && !sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())) ||
+        !me->IsInCombat() ||
         me->GetHealth() * 100 >= me->GetMaxHealth() * 55 ||
         me->IsNonMeleeSpellCasted(true))
         return false;
@@ -3395,11 +3883,15 @@ void PlayerBotAI::RecordCitizenRetreatFailure(bool hasEndpoint, char const* reas
 
 bool PlayerBotAI::TryCitizenDisengage(Unit* threat)
 {
-    if (!me || !IsZoneCitizen() || me->GetGroup() || !me->GetMap() ||
+    if (!me || !IsZoneCitizen() ||
+        (me->GetGroup() && !sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())) ||
+        !me->GetMap() ||
         !me->GetMaxHealth() || !threat || !threat->IsInWorld() ||
         threat->GetMap() != me->GetMap() || !_citizenRetreatRetry.CanTry() ||
-        (me->GetHealth() * 100 > me->GetMaxHealth() * 45 &&
-         _citizenDangerZoneUntilMs <= WorldTimer::getMSTime()))
+        !Companion::CitizenRecovery::ShouldRetreat(
+            me->GetHealth(), me->GetMaxHealth(),
+            _citizenDangerZoneUntilMs > WorldTimer::getMSTime(),
+            threat->GetHealth(), threat->GetMaxHealth()))
         return false;
     if (_citizenRetreat.Active())
         return true;
@@ -3555,7 +4047,11 @@ void PlayerBotAI::StartActivityTravel(float x, float y, float z,
 
 bool PlayerBotAI::BeginProgressionTravel()
 {
-    if (!me || !IsZoneCitizen() || me->GetGroup() || me->IsInCombat() ||
+    bool const autonomousLeader = me && me->GetGroup() &&
+        sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup()) &&
+        me->GetGroup()->GetLeaderGuid() == me->GetObjectGuid();
+    if (!me || !IsZoneCitizen() ||
+        (me->GetGroup() && !autonomousLeader) || me->IsInCombat() ||
         !_progressionOverleveled || _progressionRetryMs)
         return false;
     uint32 targetZone = 0;
@@ -3579,10 +4075,17 @@ bool PlayerBotAI::BeginProgressionTravel()
                    target && target->Name ? target->Name : "unknown");
     if (_activitySpeechUntilMs <= WorldTimer::getMSTime() && target && target->Name)
     {
-        std::string const line = "I am taking the road toward " + std::string(target->Name) + ".";
+        bool const inHuntingGroup = me->GetGroup() &&
+            sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup());
+        std::string const line = inHuntingGroup
+            ? "Our hunting party is taking the road toward " + std::string(target->Name) + "."
+            : "I am taking the road toward " + std::string(target->Name) + ".";
         me->Say(line.c_str(), LANG_UNIVERSAL);
         _activitySpeechUntilMs = WorldTimer::getMSTime() + 90000;
     }
+    if (me->GetGroup() && sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup()))
+        sLog.outString("[ZoneCitizen][HuntingGroup] traveling group:%u leader:%u from:%u to:%u",
+                       me->GetGroup()->GetId(), me->GetGUIDLow(), me->GetZoneId(), targetZone);
     return AdvanceProgressionTravel();
 }
 
@@ -3819,7 +4322,8 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         // ground is unsafe for this solo citizen.  The normal death path
         // already uses this safe manager logout; use it here as well rather
         // than spending the entire warning resting in the same kill pocket.
-        if (botEntry && botEntry->zoneWorldSafetyRelocation && !me->GetGroup())
+        if (botEntry && botEntry->zoneWorldSafetyRelocation &&
+            (!me->GetGroup() || sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())))
         {
             sLog.outString("[ZoneCitizen][Survival] leaving-danger guid:%u map:%u zone:%u",
                            me->GetGUIDLow(), _citizenDeathMap, _citizenDeathZone);
@@ -3918,6 +4422,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
                 _travelNudging = false;
                 RememberCombatTarget(target);
                 me->Attack(target, true);
+                sPlayerBotMgr.FormCitizenCombatGroup(me, target);
                 UpdateCombatPursuit(target, diff);
                 SetCitizenActivityIntent(2, "nearby-target");
                 sLog.outString("[ZoneCitizen] hunt guid:%u target:%u level:%u",
