@@ -106,7 +106,11 @@ SELECT CONCAT('DANGER|',SUM(CASE WHEN safe_until>UNIX_TIMESTAMP() THEN 1 ELSE 0 
     $intentAccepted = @($worldLogs | Select-String -Pattern '\[WorldIntent\] accepted bot:').Count
     $intentRejected = @($worldLogs | Select-String -Pattern 'conversation submit refused|world intent.*(failed|timeout|rejected)').Count
     $relocations = @($worldLogs | Select-String -Pattern 'login queued guid:.*relocation:1').Count
-    $retreats = @($worldLogs | Select-String -Pattern '\[ZoneCitizen\]\[Survival\] retreat').Count
+    $retreats = @($worldLogs | Select-String -Pattern '\[ZoneCitizen\]\[Survival\] retreat(?:-start)? guid:').Count
+    $retreatEscaped = @($worldLogs | Select-String -Pattern '\[Survival\] retreat-result .*result:escaped ').Count
+    $retreatFailed = @($worldLogs | Select-String -Pattern '\[Survival\] retreat-result .*result:(stalled|timed-out) ').Count
+    $retreatUnavailable = @($worldLogs | Select-String -Pattern '\[Survival\] retreat-unavailable guid:').Count
+    $retreatDeferred = @($worldLogs | Select-String -Pattern '\[Survival\] retreat-retry .*deferred:1').Count
     $departs = @($worldLogs | Select-String -Pattern '\[ZoneCitizen\]\[Survival\] leaving-danger').Count
     $errors = @($worldLogs | Select-String -Pattern 'FATAL|Segmentation fault|\bERROR\b').Count
 
@@ -136,9 +140,11 @@ SELECT CONCAT('DANGER|',SUM(CASE WHEN safe_until>UNIX_TIMESTAMP() THEN 1 ELSE 0 
     if ($intentSubmitted -gt 0 -or $intentAccepted -gt 0) { $recommendations.Add("Local-model world intents: submitted=$intentSubmitted accepted=$intentAccepted rejected=$intentRejected; compare accepted intents with hunt and recovery outcomes.") }
     if ($socialCount -eq 0) { $recommendations.Add('No shared-kill acquaintance events were recorded; citizen-to-citizen party assistance is not measured as active behavior yet.') }
     if ($errors -gt 0) { $recommendations.Add("Found $errors server error/fatal lines; inspect those log entries.") }
+    if ($retreatFailed -gt 0 -or $retreatUnavailable -gt 0) { $recommendations.Add("Retreat outcomes: escaped=$retreatEscaped failed=$retreatFailed unavailable=$retreatUnavailable; inspect path and threat clearance before increasing population.") }
     if (!$recommendations.Count) { $recommendations.Add('No threshold alert; continue collecting comparable windows before tuning behavior.') }
 
     $metrics = "window=10m online=$citizensOnline human_online=$humansOnline levels={$levels} zones={$zones} jobs={$jobs} xp_delta_since_previous=$xpDelta hunt_in_band=$huntValid hunt_out_of_band=$huntInvalid fights={$fightSummary} social_rows=$socialCount active_danger=$activeDanger danger_updates=$($danger[1]) relocations=$relocations retreats=$retreats danger_departures=$departs local_model_intents{submitted=$intentSubmitted,accepted=$intentAccepted,rejected=$intentRejected} errors=$errors"
+    $metrics += " retreat_outcomes{escaped=$retreatEscaped,failed=$retreatFailed,unavailable=$retreatUnavailable,deferred_events=$retreatDeferred}"
     $llmAdvice = Get-LocalModelAdvice $metrics $now $state
     if ($llmAdvice) { $state.lastLlmAdvice = $llmAdvice }
     $state.totalXp = $totalXp

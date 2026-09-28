@@ -1,4 +1,4 @@
-"""PORT-002: dismissed owned companions stay benched across population refreshes."""
+"""PORT-002: dismissed owned companions stay online as released bots across population refreshes."""
 import os
 import time
 import unittest
@@ -17,9 +17,11 @@ PERSONAL_CONTAINERS = ("tortoise-local-db-1", "tortoise-local-realmd-1",
                        "tortoise-local-world-1")
 
 # Population target = 3, refresh = 10s.
-# After dismiss at 20s, active drops to 2 < target 3.
-# The system must add an ambient bot, NOT re-spawn the dismissed companion.
-# Recall at 60s proves the companion still responds to explicit owner action.
+# Dismiss no longer benches the bot: it stays online, released from party
+# orders, roaming locally (companion-commands.md contract). The population
+# system must not count or re-spawn the owned companion; ambient bots
+# maintain the target. Recall at 60s proves the companion still responds
+# to explicit owner action.
 BENCH_SCRIPT = ";".join([
     "5000:%d:botrecruit Benchcomp" % OWNER_GUID,
     "20000:%d:botdismiss Benchcomp" % OWNER_GUID,
@@ -60,6 +62,7 @@ class BotBenchTests(unittest.TestCase):
     base = env = project = evidence = None
     logs = ""
     bench_samples = []
+    bench_groups = []
     restart_samples = []
     saved_before = saved_after = ""
     personal_before = {}
@@ -116,6 +119,10 @@ class BotBenchTests(unittest.TestCase):
                 time.sleep(5)
                 cls.bench_samples.append(p.db_exec(cls.base, cls.env,
                     "SELECT guid,online FROM characters WHERE guid BETWEEN 600101 AND 600105 ORDER BY guid"))
+                # The dismissed companion must have left the party in every
+                # sample; querying later would be masked by the phase-2 recall.
+                cls.bench_groups.append(p.db_int(cls.base, cls.env,
+                    "SELECT COUNT(*) FROM group_member WHERE memberGuid=600101"))
             p.command(["docker", "compose"] + cls.base + ["stop", "world"], env=cls.env, timeout=180)
             cls.saved_before = p.db_exec(cls.base, cls.env,
                 "SELECT guid,account,level,xp,money FROM characters WHERE guid=600101")
@@ -151,9 +158,16 @@ class BotBenchTests(unittest.TestCase):
         self.assertIn("party recruit accepted bot:Benchcomp", self.logs)
 
     def test_02_companion_dismissed(self):
-        """The owner can dismiss the owned companion."""
+        """The owner can dismiss the owned companion; it stays online, released.
+
+        Dismiss clears party orders and removes the bot from the party but
+        keeps the durable bot online (companion-commands.md: "stays online
+        and resumes bounded off-duty travel and hunting"). It must remain
+        online across every reconciliation sample and leave the party.
+        """
         self.assertTrue(self.bench_samples)
-        self.assertTrue(all("600101\t0" in sample for sample in self.bench_samples))
+        self.assertTrue(all("600101\t1" in sample for sample in self.bench_samples))
+        self.assertTrue(all(g == 0 for g in self.bench_groups))
 
     def test_03_no_unauthorized_relogin_between_dismiss_and_recall(self):
         """After dismiss, the population system must NOT re-login the companion.

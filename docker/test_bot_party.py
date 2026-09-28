@@ -127,14 +127,13 @@ class BotPartyTests(unittest.TestCase):
                                   "party recruit accepted bot:Partycomp" in text,
                                   deadline=120)
             cls.recruit_snapshot = _group_snapshot(cls.base, cls.env)
-            # The 55000 recall races the 70000 dismiss on its login
-            # completion; every valid ordering ends with the 80000
-            # cancelling the pending recall (the bot is never in a
-            # party at that point) and at least one async recall
-            # completion rejected.
+            # 0cbedd1: dismiss no longer benches the bot, so every
+            # recall here is the immediate online re-recruit path;
+            # the last scripted event is the 80000 same-tick dismiss
+            # that follows the 80000 recall.
             cls.logs = p.wait_for(cls.base, cls.env, lambda text:
-                                  "party dismiss cancelled pending recall bot:Partycomp" in text and
-                                  "party recall completion rejected bot:Partycomp" in text,
+                                  "party dismiss accepted bot:Partycomp guid:%d leader:%d seq:7"
+                                  % (COMP_GUID, OWNER_GUID) in text,
                                   deadline=120)
             cls.recall_snapshot = _group_snapshot(cls.base, cls.env)
             time.sleep(10)
@@ -183,24 +182,33 @@ class BotPartyTests(unittest.TestCase):
 
     def test_dismiss_and_recall_preserve_owner_and_group_again(self):
         self.assertIn("party dismiss accepted bot:Partycomp", self.logs)
-        self.assertIn("party recall queued bot:Partycomp", self.logs)
+        # The 55000 recall finds the bot still online (dismiss keeps
+        # it online since 0cbedd1) and re-recruits immediately.
+        self.assertIn("party recruit accepted bot:Partycomp guid:%d leader:%d seq:4"
+                      % (COMP_GUID, OWNER_GUID), self.logs)
         # The 36000 recruit (seq:2) created a group with owner as leader
         self.assertIn("party recruit accepted bot:Partycomp guid:%d leader:%d seq:2" % (COMP_GUID, OWNER_GUID), self.logs)
         self.assertIn("%d\t%d\t%d" % (COMP_GUID, COMP_ACC, OWNER_ACC), self.ownership)
 
-    def test_pending_recall_is_invalidated_by_dismiss(self):
-        # The 55000 async recall races the 70000 dismiss on its login
-        # completion (accepted, rejected missing-in-world, or rejected
-        # stale are all valid orderings), and the 80000 recall+dismiss is a
-        # same-timestamp race that always cancels the pending recall. In
-        # every ordering: the invalidated completion is rejected, no
-        # recruit is accepted after the final dismiss, and the bot is out
-        # of the final group.
-        self.assertIn("party recall completion rejected bot:Partycomp", self.logs)
-        idx = max(self.logs.rfind("party dismiss cancelled pending recall bot:Partycomp"),
-                  self.logs.rfind("party dismiss accepted bot:Partycomp guid:%d" % COMP_GUID))
-        self.assertGreater(idx, -1)
-        self.assertNotIn("party recruit accepted bot:Partycomp", self.logs[idx:])
+    def test_final_dismiss_wins_over_same_tick_recall(self):
+        # Dismiss keeps the bot online (0cbedd1), so no recall queues an
+        # offline login here and the old pending-recall race cannot occur
+        # (the bench lab still covers the offline/queued path). The 80000
+        # recall+dismiss are the same script tick in list order: the
+        # immediate re-recruit (seq 6) lands first and the same-tick
+        # dismiss (seq 7) wins. No recruit is accepted after the final
+        # dismiss and the bot is out of the final group.
+        self.assertNotIn("party recall queued bot:Partycomp", self.logs)
+        recall_at = self.logs.find(
+            "party recruit accepted bot:Partycomp guid:%d leader:%d seq:6"
+            % (COMP_GUID, OWNER_GUID))
+        final_dismiss = ("party dismiss accepted bot:Partycomp guid:%d leader:%d seq:7"
+                         % (COMP_GUID, OWNER_GUID))
+        dismiss_at = self.logs.rfind(final_dismiss)
+        self.assertGreater(recall_at, -1)
+        self.assertGreater(dismiss_at, recall_at,
+                           "the same-tick dismiss must land after the recall")
+        self.assertNotIn("party recruit accepted bot:Partycomp", self.logs[dismiss_at:])
         self.assertNotIn("%d\t%d" % (OWNER_GUID, COMP_GUID), self.final_snapshot)
 
     def test_world_and_personal_server_stayed_healthy(self):

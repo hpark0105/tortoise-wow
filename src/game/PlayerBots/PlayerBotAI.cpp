@@ -12,6 +12,7 @@
 #include "Timer.h"
 #include "Group.h"
 #include "WorldPacket.h"
+#include "World.h"
 #include "Map.h"
 #include "Maps/GridSearchers.h"
 #include "QuestDef.h"
@@ -275,7 +276,7 @@ private:
 class BotCitizenHuntScan
 {
 public:
-    explicit BotCitizenHuntScan(Player* source) : me(source) {}
+    explicit BotCitizenHuntScan(Player* source, uint32 excluded = 0) : me(source), m_excluded(excluded) {}
 
     static bool Eligible(Player const* me, Creature* u)
     {
@@ -302,7 +303,7 @@ public:
 
     bool operator()(Creature* u)
     {
-        if (!Eligible(me, u) ||
+        if (!Eligible(me, u) || u->GetGUIDLow() == m_excluded ||
             !u->IsWithinDistInMap(me, 25.0f, false, SizeFactor::None))
             return false;
         float const distance = me->GetDistance(u);
@@ -319,8 +320,32 @@ public:
 
 private:
     Player* me;
+    uint32 m_excluded;
     Creature* m_best = nullptr;
     float m_distance = 0.0f;
+};
+
+// One bounded local scan per retreat attempt. Overflow fails closed rather
+// than treating an incompletely observed crowded area as a safe destination.
+class BotCitizenEscapeScan
+{
+public:
+    BotCitizenEscapeScan(Player* source, float radius) : me(source), radius(radius) {}
+    bool operator()(Creature* u)
+    {
+        if (!u || !u->IsAlive() || !u->IsWithinDistInMap(me, radius) ||
+            (!u->IsHostileTo(me) && u->GetVictim() != me) || !u->CanAttack(me))
+            return false;
+        if (hostiles.size() < 32)
+            hostiles.push_back(u);
+        else
+            overflow = true;
+        return false;
+    }
+    Player* me;
+    float radius;
+    std::vector<Creature*> hostiles;
+    bool overflow = false;
 };
 
 // A distant eligible creature is a destination, not an immediate attack.
@@ -381,18 +406,52 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (!me)
         return;
 
+    // A same-map teleport is also a position discontinuity. Its displacement
+    // must not be mistaken for a successful walk out of combat.
+    if (me->IsBeingTeleportedNear() || me->IsBeingTeleportedFar())
+    {
+        if (_citizenRetreat.Active() && !MotionIdle())
+            ClearCitizenRetreatMotion();
+        _citizenRetreat.Reset();
+        _citizenRetreatRetry.Reset();
+    }
+
     if (me->IsBeingTeleportedNear())
     {
         WorldPacket data(MSG_MOVE_TELEPORT_ACK, 10);
         data << me->GetObjectGuid();
         data << uint32(0) << uint32(0);
-        me->GetSession()->HandleMoveTeleportAckOpcode(data);
+        // A null session means the disconnect flow already owns the
+        // player; skipping the ack loses only this in-flight teleport.
+        if (WorldSession* sess = me->GetSession())
+            sess->HandleMoveTeleportAckOpcode(data);
     }
     if (me->IsBeingTeleportedFar())
-        me->GetSession()->HandleMoveWorldportAckOpcode();
+    {
+        if (WorldSession* sess = me->GetSession())
+            sess->HandleMoveWorldportAckOpcode();
+    }
 
     if (!me->IsInWorld())
         return;
+
+    _citizenRetreatRetry.Tick(diff);
+    if (!me->IsAlive() || me->GetGroup() ||
+        _following || _held || _assistTargetGuid || me->GetMapId() != _citizenRetreatMap ||
+        (botEntry && botEntry->recruiterAccountId))
+    {
+        // A pending retreat leg must not resurface on the motion stack
+        // once party/recovery orders own motion; terminal retreat
+        // outcomes clear motion the same way (UpdateCitizenRetreat).
+        if (_citizenRetreat.Active() && !MotionIdle())
+            ClearCitizenRetreatMotion();
+        _citizenRetreat.Reset(); // ordinary recovery/party orders own motion now
+        _citizenRetreatRetry.Reset();
+    }
+    else if (!_citizenRetreat.Active() && !me->IsInCombat() && !me->GetVictim() &&
+             !GetAliveHeldTarget() && me->GetMaxHealth() &&
+             me->GetHealth() * 100 >= me->GetMaxHealth() * 80)
+        _citizenRetreatRetry.Reset(); // genuine health/combat recovery ends this episode
 
     if (_socialCooldownMs > diff)
         _socialCooldownMs -= diff;
@@ -461,6 +520,9 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         return;
 
     if (UpdateCompanion(diff))
+        return;
+
+    if (UpdateCitizenRetreat(diff))
         return;
 
     if (TryLootDefeatedTarget())
@@ -1571,6 +1633,7 @@ void PlayerBotAI::LoadCitizenJournal()
         targetProductiveShare >= PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent)
     {
         _progressionTargetZone = targetZone;
+        _progressionMap = me->GetMapId();
         _progressionTravelActive = true;
         sLog.outString("[ZoneCitizen][Journal] resume guid:%u target-zone:%u visits:%u",
                        me->GetGUIDLow(), targetZone, _citizenVisitedZones);
@@ -3276,56 +3339,191 @@ bool PlayerBotAI::TryCitizenEmergencySelfHeal()
     return true;
 }
 
+bool PlayerBotAI::UpdateCitizenRetreat(uint32 diff)
+{
+    if (!_citizenRetreat.Active() || !me)
+        return false;
+    using Companion::CitizenRecovery::Outcome;
+    Outcome const outcome = _citizenRetreat.Update(diff, me->GetPositionX(),
+                                                  me->GetPositionY(), me->IsInCombat());
+    if (outcome == Outcome::Walking)
+        return true; // rest, loot and target acquisition must not cancel this leg
+
+    float const dx = me->GetPositionX() - _citizenRetreatStartX;
+    float const dy = me->GetPositionY() - _citizenRetreatStartY;
+    char const* reason = outcome == Outcome::Escaped ? "escaped" :
+                         outcome == Outcome::Stalled ? "stalled" : "timed-out";
+    sLog.outString("[ZoneCitizen][Survival] retreat-result guid:%u threat:%u result:%s displacement:%.1f combat:%u",
+                   me->GetGUIDLow(), _citizenRetreatThreat, reason,
+                   std::sqrt(dx * dx + dy * dy), me->IsInCombat() ? 1 : 0);
+    if (!MotionIdle())
+        ClearCitizenRetreatMotion();
+    if (outcome == Outcome::Escaped)
+    {
+        _citizenRetreatRetry.Reset();
+        // Rest only after observed displacement and natural combat clearance.
+        _worldRestUntilMs = WorldTimer::getMSTime() + 15000;
+        _activityPauseMs = 15000;
+        SetCitizenActivityIntent(4, "retreat-escaped");
+        return true;
+    }
+    RecordCitizenRetreatFailure(true, reason);
+    return false; // a failed escape must leave normal self-defense available
+}
+
+void PlayerBotAI::ClearCitizenRetreatMotion()
+{
+    if (!me)
+        return;
+    MotionMaster* const motion = me->GetMotionMaster();
+    // Clearing every generator leaves MotionMaster empty; its next world
+    // update asserts. Restore a valid idle default before control returns.
+    motion->Clear(false, true);
+    motion->MoveIdle();
+    me->StopMoving();
+}
+
+void PlayerBotAI::RecordCitizenRetreatFailure(bool hasEndpoint, char const* reason)
+{
+    _citizenRetreatRetry.Fail(hasEndpoint, _citizenRetreatEndX, _citizenRetreatEndY);
+    bool const deferred = _citizenRetreatRetry.Deferred();
+    SetCitizenActivityIntent(4, deferred ? "retreat-deferred-self-defense" : "retreat-retry");
+    sLog.outString("[ZoneCitizen][Survival] retreat-retry guid:%u reason:%s failures:%u retry-ms:%u deferred:%u",
+                   me->GetGUIDLow(), reason, _citizenRetreatRetry.Failures(),
+                   _citizenRetreatRetry.RetryMs(), deferred ? 1 : 0);
+}
+
 bool PlayerBotAI::TryCitizenDisengage(Unit* threat)
 {
-    if (!me || !IsZoneCitizen() || me->GetGroup() || !me->GetMaxHealth() ||
+    if (!me || !IsZoneCitizen() || me->GetGroup() || !me->GetMap() ||
+        !me->GetMaxHealth() || !threat || !threat->IsInWorld() ||
+        threat->GetMap() != me->GetMap() || !_citizenRetreatRetry.CanTry() ||
         (me->GetHealth() * 100 > me->GetMaxHealth() * 45 &&
          _citizenDangerZoneUntilMs <= WorldTimer::getMSTime()))
         return false;
+    if (_citizenRetreat.Active())
+        return true;
 
-    // A citizen has no party healer or owner override in this mode. Break
-    // contact before the emergency heal becomes a last, usually fatal cast.
-    // The short leg stays inside its recorded local activity zone and never
-    // teleports or turns into a cross-zone escape.
+    // Failure memory belongs to this map even if no candidate can be issued.
+    _citizenRetreatMap = me->GetMapId();
+    _failedHuntGuid = threat->GetTypeId() == TYPEID_UNIT ? threat->GetGUIDLow() : 0;
+    _failedHuntMs = 60000;
+
+    float const sx = me->GetPositionX(), sy = me->GetPositionY(), sz = me->GetPositionZ();
+    float const tx = threat->GetPositionX(), ty = threat->GetPositionY();
+    float const startThreatDistance = std::hypot(sx - tx, sy - ty);
+    float originX = tx, originY = ty, originZ = sz;
+    float leashDistance = sWorld.getConfig(CONFIG_FLOAT_THREAT_RADIUS);
+    if (threat->GetTypeId() == TYPEID_UNIT)
+    {
+        Creature const* creature = static_cast<Creature const*>(threat);
+        creature->GetCombatStartPosition(originX, originY, originZ);
+        leashDistance = std::max(leashDistance, creature->GetAttackDistance(me) * 1.5f);
+    }
+    // Core evasion requires both participants outside the combat-start radius
+    // and an expired leash-extension timer. A fixed 30-yard endpoint was still
+    // inside the default 50-yard radius and could never establish separation.
+    float const retreatDistance = std::max(35.0f, std::min(90.0f, leashDistance + 15.0f));
+    float const originDistance = std::hypot(sx - originX, sy - originY);
+    float const away = originDistance > 0.1f ? std::atan2(sy - originY, sx - originX)
+                                           : me->GetOrientation() + 3.14159265f;
+    // Prefer away and sideways alternatives. A missing or nearby activity home
+    // cannot prevent an attempt, and home never overrides the observed threat.
+    float const offsets[] = {0.0f, 0.78539816f, -0.78539816f, 1.57079633f,
+                             -1.57079633f, 2.35619449f, -2.35619449f, 3.14159265f};
+    BotCitizenEscapeScan scan(me, retreatDistance + 30.0f);
+    Creature* unused = nullptr;
+    MaNGOS::CreatureLastSearcher<BotCitizenEscapeScan> searcher(unused, scan);
+    Cell::VisitGridObjects(me, searcher, retreatDistance + 30.0f);
+    float bestX = sx, bestY = sy, bestZ = sz, bestScore = -1.0f;
+    uint32 blocked = 0, unsafe = 0, remembered = 0;
+    if (!scan.overflow)
+    {
+        for (float offset : offsets)
+        {
+            float x = sx + retreatDistance * std::cos(away + offset);
+            float y = sy + retreatDistance * std::sin(away + offset);
+            float z = sz;
+            me->UpdateGroundPositionZ(x, y, z);
+            if (!me->GetMap()->GetWalkHitPosition(nullptr, sx, sy, sz, x, y, z) ||
+                !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+                std::hypot(x - sx, y - sy) < 6.0f)
+            {
+                ++blocked;
+                continue;
+            }
+            if (_citizenRetreatRetry.Excludes(x, y))
+            {
+                ++remembered;
+                continue;
+            }
+            float const distance = std::hypot(x - tx, y - ty);
+            bool safe = distance >= startThreatDistance + 5.0f;
+            for (Creature const* hostile : scan.hostiles)
+            {
+                if (hostile == threat)
+                    continue;
+                float const oldDistance = std::hypot(sx - hostile->GetPositionX(), sy - hostile->GetPositionY());
+                float const newDistance = std::hypot(x - hostile->GetPositionX(), y - hostile->GetPositionY());
+                // Existing attackers must become farther away. Other hostiles
+                // must remain outside aggro range at both ends and along the leg.
+                if (hostile->GetVictim() == me)
+                {
+                    if (newDistance < oldDistance + 3.0f)
+                        safe = false;
+                }
+                else
+                {
+                    float const vx = x - sx, vy = y - sy;
+                    float const length2 = vx * vx + vy * vy;
+                    float const projection = std::max(0.0f, std::min(1.0f,
+                        ((hostile->GetPositionX() - sx) * vx + (hostile->GetPositionY() - sy) * vy) / length2));
+                    float const clearance = std::hypot(sx + projection * vx - hostile->GetPositionX(),
+                                                       sy + projection * vy - hostile->GetPositionY());
+                    if (clearance < hostile->GetAttackDistance(me) + 3.0f)
+                        safe = false;
+                }
+            }
+            if (!safe)
+            {
+                ++unsafe;
+                continue;
+            }
+            float const score = distance - startThreatDistance;
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestX = x; bestY = y; bestZ = z;
+            }
+        }
+    }
+    if (bestScore < 0.0f)
+    {
+        RecordCitizenRetreatFailure(false, scan.overflow ? "crowded" : "no-safe-candidate");
+        sLog.outString("[ZoneCitizen][Survival] retreat-unavailable guid:%u threat:%u blocked:%u unsafe:%u crowded:%u home:%u remembered:%u",
+                       me->GetGUIDLow(), threat->GetGUIDLow(), blocked, unsafe,
+                       scan.overflow ? 1 : 0, _activityHomeSet ? 1 : 0, remembered);
+        return false; // do not clear combat, stop motion, or pretend to rest
+    }
+
+    _citizenRetreatThreat = threat->GetGUIDLow();
+    _citizenRetreatMap = me->GetMapId();
+    _citizenRetreatStartX = sx; _citizenRetreatStartY = sy;
+    _citizenRetreatEndX = bestX; _citizenRetreatEndY = bestY;
     me->AttackStop();
-    me->CombatStop(true);
     ClearTarget();
     if (!MotionIdle())
         me->GetMotionMaster()->Clear(false);
-
-    float x = me->GetPositionX();
-    float y = me->GetPositionY();
-    float z = me->GetPositionZ();
-    bool moved = false;
-    if (_activityHomeSet && _activityMap == me->GetMapId() &&
-        _activityZone == me->GetZoneId())
-    {
-        float const dx = _activityHomeX - x;
-        float const dy = _activityHomeY - y;
-        float const distance = std::sqrt(dx * dx + dy * dy);
-        if (distance > 4.0f)
-        {
-            float const leg = std::min(35.0f, distance);
-            x += dx * leg / distance;
-            y += dy * leg / distance;
-            me->UpdateGroundPositionZ(x, y, z);
-            moved = me->GetMap()->GetWalkHitPosition(nullptr, me->GetPositionX(),
-                                                      me->GetPositionY(), me->GetPositionZ(),
-                                                      x, y, z);
-        }
-    }
-    if (moved)
-        me->GetMotionMaster()->MovePoint(0, x, y, z, MOVE_PATHFINDING);
-
     _travelActive = false;
     _travelHuntGuid = 0;
     _travelNudging = false;
-    _worldRestUntilMs = WorldTimer::getMSTime() + 45000;
-    _activityPauseMs = 45000;
+    _worldRestUntilMs = 0;
+    _activityPauseMs = 0;
+    _citizenRetreat.Begin(sx, sy);
+    me->GetMotionMaster()->MovePoint(0, bestX, bestY, bestZ, MOVE_PATHFINDING);
     SetCitizenActivityIntent(4, "combat-retreat");
-    sLog.outString("[ZoneCitizen][Survival] retreat guid:%u threat:%u hp:%u/%u moved:%u",
-                   me->GetGUIDLow(), threat ? threat->GetGUIDLow() : 0,
-                   me->GetHealth(), me->GetMaxHealth(), moved ? 1 : 0);
+    sLog.outString("[ZoneCitizen][Survival] retreat-start guid:%u threat:%u hp:%u/%u blocked:%u unsafe:%u",
+                   me->GetGUIDLow(), _citizenRetreatThreat, me->GetHealth(), me->GetMaxHealth(), blocked, unsafe);
     return true;
 }
 
@@ -3372,6 +3570,7 @@ bool PlayerBotAI::BeginProgressionTravel()
         return false;
     }
     _progressionTargetZone = targetZone;
+    _progressionMap = me->GetMapId();
     _progressionTravelActive = true;
     PersistCitizenJournal(1);
     AreaEntry const* target = AreaEntry::GetById(targetZone);
@@ -3387,6 +3586,23 @@ bool PlayerBotAI::BeginProgressionTravel()
     return AdvanceProgressionTravel();
 }
 
+void PlayerBotAI::FinishProgressionTravel(bool arrived, char const* reason)
+{
+    _progressionTravelActive = false;
+    _progressionTargetZone = 0;
+    _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
+    if (arrived)
+    {
+        _activityHomeSet = false;
+        ++_citizenVisitedZones;
+        PersistCitizenJournal(0, true);
+        return;
+    }
+    _progressionRetryMs = 120000;
+    SetCitizenActivityIntent(4, reason);
+    PersistCitizenJournal(0);
+}
+
 bool PlayerBotAI::AdvanceProgressionTravel()
 {
     if (!me || !_progressionTravelActive || !me->GetMap())
@@ -3394,21 +3610,56 @@ bool PlayerBotAI::AdvanceProgressionTravel()
     float const dx = _progressionFinalX - me->GetPositionX();
     float const dy = _progressionFinalY - me->GetPositionY();
     float const distance = std::sqrt(dx * dx + dy * dy);
-    if (me->GetZoneId() == _progressionTargetZone || distance < 12.0f)
+
+    // Explicit arrival (TW-BOTS-002 S1): only the selected hunting anchor
+    // on verified usable ground ends the route as success. Entering the
+    // destination zone alone never counts as arrival.
+    using Companion::CitizenTravel::ArrivalDecision;
+    Companion::CitizenTravel::ArrivalInput input;
+    input.sameMap = me->GetMapId() == _progressionMap;
+    input.inTargetZone = me->GetZoneId() == _progressionTargetZone;
+    input.distanceToAnchorYards = distance;
+    if (input.sameMap && distance < Companion::CitizenTravel::kArrivalRadiusYards)
     {
-        sLog.outString("[ZoneCitizen][Progression] route arrived guid:%u zone:%u",
-                       me->GetGUIDLow(), me->GetZoneId());
-        _progressionTravelActive = false;
-        _activityHomeSet = false;
-        ++_citizenVisitedZones;
-        PersistCitizenJournal(0, true);
+        float ax = _progressionFinalX, ay = _progressionFinalY, az = _progressionFinalZ;
+        me->UpdateGroundPositionZ(ax, ay, az);
+        input.anchorWalkable = std::isfinite(ax) && std::isfinite(ay) && std::isfinite(az) &&
+            me->GetMap()->GetWalkHitPosition(nullptr, me->GetPositionX(),
+                                             me->GetPositionY(), me->GetPositionZ(),
+                                             ax, ay, az) &&
+            std::hypot(ax - _progressionFinalX, ay - _progressionFinalY) <= 2.0f &&
+            me->GetMap()->GetTerrain()->GetZoneId(ax, ay, az) == _progressionTargetZone;
+    }
+    ArrivalDecision const decision = Companion::CitizenTravel::DecideArrival(input);
+    if (decision == ArrivalDecision::ArrivedAnchor)
+    {
+        sLog.outString("[ZoneCitizen][Progression] route arrived guid:%u zone:%u anchor:%.1f/%.1f",
+                       me->GetGUIDLow(), me->GetZoneId(),
+                       _progressionFinalX, _progressionFinalY);
+        FinishProgressionTravel(true, "progression-arrived");
         return true;
     }
+    if (decision == ArrivalDecision::MapLost)
+    {
+        sLog.outError("[ZoneCitizen][Progression] route map-lost guid:%u map:%u expected:%u to-zone:%u",
+                      me->GetGUIDLow(), me->GetMapId(), _progressionMap,
+                      _progressionTargetZone);
+        FinishProgressionTravel(false, "progression-map-lost");
+        return false;
+    }
+    if (decision == ArrivalDecision::BlockedNearAnchor)
+    {
+        sLog.outError("[ZoneCitizen][Progression] route blocked guid:%u to-zone:%u anchor-unusable",
+                      me->GetGUIDLow(), _progressionTargetZone);
+        FinishProgressionTravel(false, "progression-anchor-blocked");
+        return false;
+    }
+
     float const leg = std::min(60.0f, distance);
     float x = me->GetPositionX() + dx * leg / distance;
     float y = me->GetPositionY() + dy * leg / distance;
-    // The final anchor's height can be hundreds of yards away from this
-    // short local leg. Resolve terrain at the leg itself; passing the distant
+    // The final anchor height can be far above or below this short local
+    // leg. Resolve terrain at the leg itself; passing the distant
     // destination Z makes otherwise walkable cross-zone routes look blocked.
     float z = me->GetPositionZ();
     me->UpdateGroundPositionZ(x, y, z);
@@ -3417,12 +3668,7 @@ bool PlayerBotAI::AdvanceProgressionTravel()
     {
         sLog.outError("[ZoneCitizen][Progression] route blocked guid:%u to-zone:%u",
                       me->GetGUIDLow(), _progressionTargetZone);
-        _progressionTravelActive = false;
-        _progressionTargetZone = 0;
-        _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
-        _progressionRetryMs = 120000;
-        SetCitizenActivityIntent(4, "progression-route-blocked");
-        PersistCitizenJournal(0);
+        FinishProgressionTravel(false, "progression-route-blocked");
         return false;
     }
     StartActivityTravel(x, y, z, 0, 255, true);
@@ -3542,6 +3788,19 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
     if (_targets.corpse)
         return true; // finish the normal loot attempt before walking away
 
+    if (IsZoneCitizen() && _citizenRetreatRetry.Deferred())
+    {
+        // Combat already returned above, so self-defense remains available.
+        // While out of combat, defer new hunts/travel until the bounded retry.
+        SetCitizenActivityIntent(4, "retreat-deferred-self-defense");
+        if (!MotionIdle())
+            ClearCitizenRetreatMotion();
+        _travelActive = false;
+        _travelHuntGuid = 0;
+        _travelNudging = false;
+        return true;
+    }
+
     if (_worldRestUntilMs > WorldTimer::getMSTime())
     {
         SetCitizenActivityIntent(4, "model-or-health-rest");
@@ -3629,24 +3888,26 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
     // party commands, death and rest preempt it above; otherwise it has the
     // first claim on off-duty movement and cannot be replaced by a nearby
     // low-level hunt.
-    if (_progressionTravelActive)
+    if (_progressionTravelActive && !_travelActive)
     {
         SetCitizenActivityIntent(1, "progression-route");
-        if (!_travelActive)
-            AdvanceProgressionTravel();
+        AdvanceProgressionTravel();
         return true;
     }
-    if (IsZoneCitizen() && _progressionOverleveled && BeginProgressionTravel())
+    if (_progressionTravelActive)
+        SetCitizenActivityIntent(1, "progression-route");
+    if (!_progressionTravelActive && IsZoneCitizen() && _progressionOverleveled &&
+        BeginProgressionTravel())
         return true;
 
     // Pace the scan independently of the world tick even with a larger
     // citizen roster. Low health makes the bot rest instead of pulling.
-    if (_huntScanMs <= diff)
+    if (_huntScanMs <= diff && !_progressionTravelActive)
     {
         _huntScanMs = 2000;
         if (me->GetHealth() * 100 >= me->GetMaxHealth() * 80)
         {
-            BotCitizenHuntScan scan(me);
+            BotCitizenHuntScan scan(me, _failedHuntMs ? _failedHuntGuid : 0);
             Creature* found = nullptr;
             MaNGOS::CreatureLastSearcher<BotCitizenHuntScan> searcher(found, scan);
             Cell::VisitGridObjects(me, searcher, 25.0f);
@@ -4015,11 +4276,15 @@ void PlayerBotAI::Hold(uint32 seq)
     _presence.ResetParty();
     _assistTargetGuid = 0; // PORT-005: a hold cancels an active assist
     _pursuitLeash.Disarm(); // PORT-008: a hold starts a fresh pursuit budget
+    AbandonActivityTravel(); // a hold supersedes an in-flight citizen travel
     ClearTarget();
     me->InterruptNonMeleeSpells(false);
     if (me->GetVictim())
         me->CombatStop();
-    me->GetMotionMaster()->Clear(true);
+    // Clear the whole stack and explicitly install an idle generator;
+    // Clear(..., true) does not repopulate an all-cleared motion stack.
+    me->GetMotionMaster()->Clear(false, true);
+    me->GetMotionMaster()->MoveIdle();
     if (sPlayerBotMgr.IsDebugEnabled())
         sLog.outString("[PlayerBot][Hold] active GUID:%u seq:%u", me->GetGUIDLow(), seq);
 }

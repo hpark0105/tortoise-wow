@@ -73,7 +73,8 @@ class IndependentCompanionValueTest(unittest.TestCase):
         self.assertIn("void PlayerBotAI::RecordSocialEncounter", ai)
         for fragment in ("bot_social_acquaintance", "shared_events = shared_events + 1",
                          "_socialCooldownMs = 30000",
-                         "event:shared-kill", "Good work, friend."):
+                         "event:shared-kill",
+                         'Good work, " + std::string(partner->GetName())'):
             self.assertIn(fragment, ai)
         self.assertIn("RecordSocialEncounter(target, true)", ai)
 

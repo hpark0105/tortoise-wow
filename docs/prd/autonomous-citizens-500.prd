@@ -309,3 +309,108 @@ source after validation and report embedding/derived-write counts.
 
 This PRD records proposed work. The checkpoint preserves the pilot with known
 recovery limitations; it is not a claim of 500-bot readiness or a deployment.
+
+## 8. Implementation progress (2026-09-27)
+
+S0/S1 are in progress; neither slice has final gameplay acceptance.
+
+- Recovery now has an explicit value policy: actual displacement plus natural
+  combat clearance is required for escape, five-second movement checks detect
+  stalls, and a fifteen-second lifetime bounds an attempt. Rest cannot cancel
+  an active retreat. Failed candidate selection leaves self-defense available.
+- The world adapter tries eight bounded escape candidates, checks nearby hostile
+  clearance, and reports start, escaped, stalled, timed-out and unavailable
+  outcomes. Monitor counts distinguish these outcomes from attempted movement.
+  The first live window showed thirty-yard movement with combat retained. Core
+  Creature::IsOutOfThreatArea uses a configurable radius (default fifty yards)
+  and a twelve-second leash-extension delay. Candidate distance now derives
+  from that radius with a bounded margin, and direction uses combat-start
+  position. This adjustment still requires measured escape outcomes.
+- Arrival requires the expected map and zone, a finite nonnegative distance
+  inside twelve yards, and verified access to the selected anchor. An unusable
+  anchor or zone entry alone cannot record successful arrival. Clipped walk
+  endpoints must still reach the anchor within two yards in the expected zone.
+- Qwen implemented the recovery value helper/tests and initial arrival policy.
+  Hosted review found and corrected arrival acceptance for wrong-zone, invalid
+  distance and unusable-ground cases. New behavior tests cover those failures.
+- The earlier full suite reported 392 tests with 8 failures, 7 setup errors,
+  3 skips and 1 expected failure. These are unresolved; assertions about load
+  flakiness are not accepted as a diagnosis. The companion-dismissal failure
+  also reproduced in a focused fixture before the reviewed arrival changes.
+- Remaining S1 work includes reproducible world fixtures for blocked escape,
+  multiple threats, interruption/party preemption, actual safe arrival and
+  restart continuity; repeated-failure escalation needs further validation.
+  The new helper tests and build do not substitute for these world fixtures.
+- Resume pass (2026-09-27, park-head local session): the three findings
+  from the S1 integration review (card v3) were re-verified against
+  current source; the card's recorded SHA256 no longer matches the file,
+  so line references were re-located rather than trusted. Finding 1
+  (same-map teleport leaving an active retreat with a stale destination)
+  was already corrected in-tree. Finding 2 (the interrupt/death/party
+  reset clears retreat state but not the pending retreat motion leg) and
+  finding 3 (unguarded me->GetSession() in the teleport-ack block) were
+  fixed: the reset path now clears the motion master symmetrically with
+  the terminal retreat outcomes, and both teleport acks are
+  session-guarded. ByteBuffer::append auto-resizes on write, so the
+  ten-byte ack packet writing sixteen bytes is safe. Rebuilt
+  tortoise-local:dev with BUILD_JOBS=2; clean compile.
+- Companion-dismissal bench failure root cause: docker/test_bot_bench.py
+  still asserted the pre-KAP-558 "dismiss benches the bot offline"
+  contract, while the current documented contract (companion-commands.md)
+  is "stays online, released from party orders, roams locally". The test
+  was updated to the current contract (companion online stays 1 across
+  reconciliation samples and leaves the party group in every sample);
+  the bench fixture passes 6/6 on the rebuilt image.
+
+Private validation captures remain under ignored local/prd-s1/. Do not copy
+raw runtime logs or character snapshots into retrieval or model assignments.
+
+### S1 follow-up (2026-09-28)
+
+The latest complete pre-follow-up suite capture ran 383 tests with 6 failures,
+9 setup errors, 3 skips and 1 expected failure. Later focused captures passed
+bench 6/6, defend 11/11 and independent-value 9/9; these do not establish a
+green full suite. The local changes also include regroup/equipment fixture
+placement corrections, the online recall/dismiss party contract, and Hold
+movement cancellation. Their existence does not close the remaining suite
+failures or S1 gameplay acceptance.
+
+The next bounded recovery slice adds failure escalation: the first two failed
+attempts retry after five seconds; the third and subsequent failures defer for
+thirty seconds while ordinary self-defense remains available. Failed escape
+endpoints are remembered in at most three entries for sixty seconds; candidates
+within eight yards are excluded so alternatives are considered. Success,
+genuine out-of-combat health recovery, death, teleport or party authority clears
+the episode. These are initial policy constants, not calibrated gameplay claims.
+The world adapter logs failure reason, capped failure count and retry delay;
+the monitor counts defer events separately from successful escapes.
+
+Validation for this slice is recorded under ignored local/prd-s1-escalation/.
+
+- Server build passed with BUILD_JOBS=2 and Turtle addons enabled.
+- Recovery and arrival value runners passed with a real C++ compiler; existing
+  independent-value checks passed 9/9 and placement checks passed 6/6.
+- The new disposable recovery world fixture passed: a normal hunt reaches low
+  health; a crowded escape scan produces failures one and two with five-second
+  retries, failure three with a thirty-second defer, continued self-defense
+  during that defer, and a fourth failure retaining the longer delay. No escape
+  or movement success is fabricated. Personal container identities/start times
+  were unchanged. Earlier fixture attempts did not establish combat and are
+  setup failures, not evidence for or against the recovery policy.
+- The current party lifecycle fixture passed 6/6 on the rebuilt image.
+- The full suite was not rerun. Successful escape paths, blocked movement,
+  multiple active attackers, interruption during a retreat and restart
+  continuity still require their own world evidence. The passing crowded-scan
+  fixture does not establish those behaviors or calibrated survival outcomes.
+
+S0/S1 remain open until the required gameplay, path, interruption and continuity
+evidence is complete. The recovery slice is now running on the personal server
+for operator review (2026-09-28). Before restart, 25 ZoneCitizenAI characters
+were online; the final rollout check found zero human characters online. The
+world container uses candidate image
+sha256:5d243e54fd23cc6ae8680bd46451bf12dd23bb168816b6ae9019559e1ddf23f5. A
+pre-restart database backup was saved as
+local/backups/tortoise-20260928T143504Z.sql. Restart completed without fatal
+or error log matches. No personal data volume or schema was reset. Real-player
+review must now establish a natural retreat outcome in the live world; the
+synthetic crowded-scan fixture does not provide that evidence.

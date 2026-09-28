@@ -17,6 +17,8 @@
 #include "Companion/Equipment.h"
 #include "Companion/Inventory.h"
 #include "Companion/Presence.h"
+#include "Companion/CitizenRecovery.h"
+#include "Companion/CitizenTravel.h"
 #include <utility>
 #include <vector>
 #include <map>
@@ -261,6 +263,7 @@ class PlayerBotAI: public PlayerAI
         bool _progressionTravelActive = false;
         uint32 _progressionRetryMs = 0;
         uint32 _progressionTargetZone = 0;
+        uint32 _progressionMap = 0;
         float _progressionFinalX = 0.0f, _progressionFinalY = 0.0f, _progressionFinalZ = 0.0f;
         uint32 _citizenVisitedZones = 0;
         uint8 _citizenActivityIntent = 0; // durable: idle/progression/hunt/patrol/rest
@@ -272,7 +275,15 @@ class PlayerBotAI: public PlayerAI
         // manager consumes this as a request to re-place an ungrouped
         // citizen, rather than leaving it to rest beside the same threat.
         bool _citizenSafetyRelocationRequested = false;
+        Companion::CitizenRecovery::Progress _citizenRetreat;
+        Companion::CitizenRecovery::RetryPolicy _citizenRetreatRetry;
+        uint32 _citizenRetreatThreat = 0;
+        uint32 _citizenRetreatMap = 0;
+        float _citizenRetreatStartX = 0.0f, _citizenRetreatStartY = 0.0f;
+        float _citizenRetreatEndX = 0.0f, _citizenRetreatEndY = 0.0f;
         bool TryCitizenDisengage(Unit* threat);
+        bool UpdateCitizenRetreat(uint32 diff);
+        void RecordCitizenRetreatFailure(bool hasEndpoint, char const* reason);
         bool TryLootDefeatedTarget();
         void RememberCombatTarget(Unit* unit); // Hardening item 4: remembers the live combat target
         bool CorpseLootStep(Creature* creature);
@@ -296,9 +307,11 @@ class PlayerBotAI: public PlayerAI
                                         uint32 nowMs);
         bool BeginProgressionTravel();
         bool AdvanceProgressionTravel();
+        void FinishProgressionTravel(bool arrived, char const* reason);
         void LoadCitizenJournal();
         void PersistCitizenJournal(uint8 intent, bool recordVisit = false);
         void SetCitizenActivityIntent(uint8 intent, char const* reason);
+        void ClearCitizenRetreatMotion();
         void LogAssistProbe(Creature* target); // PORT-009 diagnostic, assist path only
         bool UpdateRecovery(uint32 diff); // PORT-009: dead companion corpse reclaim
         bool UpdateCompanion(uint32 diff);

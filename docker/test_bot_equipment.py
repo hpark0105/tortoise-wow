@@ -8,7 +8,8 @@ the baseline sword 1008 in the mainhand equipment slot). One pinned
 Kobold Vermin (2500300, entry 6, 150 HP / regen 0) drops loot
 template 990301 with three items at 100%: 15335 (a strict upgrade),
 3267 (a downgrade) and 7298 (rogue-only, illegal for a warrior). The
-companion follows the owner, assists the kill, taps the corpse,
+companion assists the kill from near its spawn (it no longer pre-party
+follows the owner), taps the corpse,
 stores all three items and the deterministic evaluator equips 15335
 (the baseline 1008 returns to the bag the upgrade came from), keeps
 3267 (not a strict upgrade) and 7298 (fails the authoritative class
@@ -125,7 +126,7 @@ def _vermin(v, hp=150):
         "INSERT INTO tw_world.creature\n"
         " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
         "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
-        "VALUES (%d,6,0,-8949.95,-163.493,83.5312,0,600,600,0,100,100,0,1);\n"
+        "VALUES (%d,6,0,-8949.95,-185.493,83.5312,0,600,600,0,100,100,0,1);\n"
         "DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910\n"
         " AND position_y BETWEEN -230 AND -100 AND guid NOT IN (%d);\n" % (hp, hp, v, v))
 

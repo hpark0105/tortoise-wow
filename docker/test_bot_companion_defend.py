@@ -24,10 +24,12 @@ The attacker choice is evidence-driven (defend-run1/2):
     on it three flaps later ([Defend] fighting target:2500041) -
     proof the Snufflesnout sustains victim state long enough to lock.
 The Snufflesnout is therefore the attacker. Its template is pinned
-(1200/1200 HP, regeneration = 0): its natural 182 HP plus ~60-HP-per-
+(800/800 HP, regeneration = 0): its natural 182 HP plus ~60-HP-per-
 4-s regeneration outlasted the owner alone in run2 (net damage ~0
-over 26 s), and 1200 keeps the kill inside the t24-t50 window even
-when the companion adds its DPS.
+over 26 s). The 1200 calibration assumed the pre-S1 full level kit;
+S1's GUID-banded citizen gear trims the owner's kit and slows its
+DPS, so 800 keeps the kill inside the t24-t50 window even when the
+companion adds its DPS.
 
 There is deliberately no hostile bystander. Any hostile creature
 inside the companion's 30 yd defend scan is also inside the owner
@@ -153,7 +155,7 @@ INSERT INTO tw_world.creature
   spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)
 VALUES (2500040,51600,0,-8949.95,-120.493,86.0,0,600,600,0,100,100,0,1);
 UPDATE tw_world.creature_template
- SET health_min = 1200, health_max = 1200, regeneration = 0 WHERE entry = 51600;
+ SET health_min = 800, health_max = 800, regeneration = 0 WHERE entry = 51600;
 DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910
  AND position_y BETWEEN -230 AND -100 AND guid NOT IN (2500040);
 

@@ -4,15 +4,15 @@ Two disposable, port-free labs in the combat-proven corridor.
 
 Lab A (loot + regroup): the owner (610100) and the companion (610101, bound to the
 owner), which sits 70 yd south. One Kobold Vermin
-(2500010, entry 6, pinned 150 HP / regen 0) sits 33 yd south of the owner
-(37 yd from the companion's spawn) and drops item 117 (100% chance). The owner pins itself first (so it never
+(2500010, entry 6, pinned 150 HP / regen 0) sits 55 yd south of the owner
+(15 yd from the companion's spawn) and drops item 117 (100% chance). The owner pins itself first (so it never
 auto-aggresses the vermin), holds the companion, recruits it into the party,
-and orders it to follow. The companion follows the owner by default from
-spawn (Phase 1.1: the default owner-follow catch-up starts at login and a
-hold does not stop it; the explicit .botfollow re-issues the same goal); the
-assist lands while it is still mid-walk, about 25 yd from the vermin (the
-assist lookup is 30 yd, and the vermin's 12 yd detection range keeps the
-pinned owner at 33 yd clear, so the vermin only ever fights the companion). The companion is the sole party damager, so it has loot
+and orders it to follow. The companion stays near its spawn until recruited
+(owned companions no longer pre-party follow the owner, e1a22d5); the t9
+assist is accepted in place because the vermin sits 15 yd from the
+companion's spawn (the assist lookup is 30 yd), and the vermin's 12 yd
+detection range keeps the pinned owner 55 yd clear, so the vermin only ever
+fights the companion. The companion is the sole party damager, so it has loot
 rights. The idle-wander radius is clamped to 0.5 yd (PlayerBot.WanderRadius)
 so the owner cannot drift into the vermin's aggro radius before its hold. When the vermin dies the dead corpse becomes a first-class Loot intent
 (PORT-007): the companion taps it, auto-stores item 117, and the follow goal
@@ -72,7 +72,7 @@ def _seed_sql(o, c, v, hp, loot_id):
         "INSERT INTO tw_world.creature\n"
         " (guid,id,map,position_x,position_y,position_z,orientation,spawntimesecsmin,\n"
         "  spawntimesecsmax,wander_distance,health_percent,mana_percent,movement_type,spawn_flags)\n"
-        "VALUES ({v},6,0,-8949.95,-163.493,83.5312,0,600,600,0,100,100,0,1);\n"
+        "VALUES ({v},6,0,-8949.95,-185.493,83.5312,0,600,600,0,100,100,0,1);\n"
         "DELETE FROM tw_world.creature WHERE map=0 AND position_x BETWEEN -8990 AND -8910\n"
         " AND position_y BETWEEN -230 AND -100 AND guid NOT IN ({v});\n"
     ).format(o=o, c=c, v=v, hp=hp, loot=loot)
