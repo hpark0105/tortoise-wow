@@ -23,6 +23,8 @@ void Check(bool condition, char const* label)
 
 using Companion::CitizenRecovery::Outcome;
 using Companion::CitizenRecovery::Progress;
+using Companion::CitizenRecovery::EvaluateLeaderLoss;
+using Companion::CitizenRecovery::LeaderLoss;
 using Companion::CitizenRecovery::RetryPolicy;
 using Companion::CitizenRecovery::ShouldRetreat;
 
@@ -502,6 +504,31 @@ void TestProgressFeedsRetryEscalation()
     Check(!retry.CanTry(), "feed: still cannot retry while escalated");
 }
 
+void TestLeaderLossThreatenedFallsThrough()
+{
+    Check(EvaluateLeaderLoss(0u, true) == LeaderLoss::FallThrough,
+          "leader-loss: threatened member falls through at zero wait");
+    Check(EvaluateLeaderLoss(59999u, true) == LeaderLoss::FallThrough,
+          "leader-loss: threatened member falls through just before the deadline");
+    Check(EvaluateLeaderLoss(60000u, true) == LeaderLoss::FallThrough,
+          "leader-loss: threatened member falls through at the deadline");
+    Check(EvaluateLeaderLoss(std::numeric_limits<std::uint32_t>::max(), true) ==
+              LeaderLoss::FallThrough,
+          "leader-loss: threatened member falls through at saturated wait");
+}
+
+void TestLeaderLossWaitAndDisband()
+{
+    Check(EvaluateLeaderLoss(0u, false) == LeaderLoss::Wait,
+          "leader-loss: unthreatened member waits at zero");
+    Check(EvaluateLeaderLoss(59999u, false) == LeaderLoss::Wait,
+          "leader-loss: unthreatened member waits just before the deadline");
+    Check(EvaluateLeaderLoss(60000u, false) == LeaderLoss::Disband,
+          "leader-loss: unthreatened member disbands at the deadline");
+    Check(EvaluateLeaderLoss(std::numeric_limits<std::uint32_t>::max(), false) ==
+              LeaderLoss::Disband,
+          "leader-loss: unthreatened member disbands at saturated wait");
+}
 } // namespace
 
 int main()
@@ -531,6 +558,8 @@ int main()
     TestFailureSaturation();
     TestResetClearsEverything();
     TestProgressFeedsRetryEscalation();
+    TestLeaderLossThreatenedFallsThrough();
+    TestLeaderLossWaitAndDisband();
 
     if (g_failures != 0)
     {

@@ -2855,6 +2855,7 @@ void PlayerBotMgr::FormCitizenCombatGroup(Player* leader, Unit* target)
 
     uint32 joined = 0;
     uint32 levelDenied = 0;
+    uint32 unreadyDenied = 0;
     uint32 busyDenied = 0;
     for (auto const& item : sObjectAccessor.GetPlayers())
     {
@@ -2872,6 +2873,11 @@ void PlayerBotMgr::FormCitizenCombatGroup(Player* leader, Unit* target)
         if (std::abs(int(candidate->GetLevel()) - int(leader->GetLevel())) > 3)
         {
             ++levelDenied;
+            continue;
+        }
+        if (!ai->CitizenCombatReady())
+        {
+            ++unreadyDenied;
             continue;
         }
         if (candidate->IsInCombat() || candidate->GetVictim())
@@ -2907,8 +2913,8 @@ void PlayerBotMgr::FormCitizenCombatGroup(Player* leader, Unit* target)
 
     if (created && group->GetMembersCount() < 2)
     {
-        sLog.outString("[ZoneCitizen][HuntingGroup] solo guid:%u level:%u nearby-level-denied:%u busy-or-ordered:%u",
-                       leader->GetGUIDLow(), leader->GetLevel(), levelDenied, busyDenied);
+        sLog.outString("[ZoneCitizen][HuntingGroup] solo guid:%u level:%u nearby-level-denied:%u unready:%u busy-or-ordered:%u",
+                        leader->GetGUIDLow(), leader->GetLevel(), levelDenied, unreadyDenied, busyDenied);
         group->Disband(true, leader->GetObjectGuid());
         return;
     }
@@ -2917,18 +2923,15 @@ void PlayerBotMgr::FormCitizenCombatGroup(Player* leader, Unit* target)
     {
         std::string const formedLine = "We are forming a hunting party to travel and hunt together.";
         leader->Say(formedLine.c_str(), LANG_UNIVERSAL);
-        sLog.outString("[ZoneCitizen][HuntingGroup] formed group:%u leader:%u target:%u members:%u level:%u level-denied:%u busy-or-ordered:%u",
-                       group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(),
-                       group->GetMembersCount(), leader->GetLevel(), levelDenied, busyDenied);
+        sLog.outString("[ZoneCitizen][HuntingGroup] formed group:%u leader:%u target:%u members:%u level:%u level-denied:%u unready:%u busy-or-ordered:%u",
+                        group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(), group->GetMembersCount(), leader->GetLevel(), levelDenied, unreadyDenied, busyDenied);
     }
     else if (joined)
-        sLog.outString("[ZoneCitizen][HuntingGroup] recruitment-complete group:%u leader:%u joined:%u total:%u target:%u level-denied:%u busy-or-ordered:%u",
-                       group->GetId(), leader->GetGUIDLow(), joined,
-                       group->GetMembersCount(), target->GetGUIDLow(), levelDenied, busyDenied);
+        sLog.outString("[ZoneCitizen][HuntingGroup] recruitment-complete group:%u leader:%u joined:%u total:%u target:%u level-denied:%u unready:%u busy-or-ordered:%u",
+                        group->GetId(), leader->GetGUIDLow(), joined, group->GetMembersCount(), target->GetGUIDLow(), levelDenied, unreadyDenied, busyDenied);
     else if (!created)
-        sLog.outString("[ZoneCitizen][HuntingGroup] shared-hunt group:%u leader:%u target:%u members:%u level-denied:%u busy-or-ordered:%u",
-                       group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(),
-                       group->GetMembersCount(), levelDenied, busyDenied);
+        sLog.outString("[ZoneCitizen][HuntingGroup] shared-hunt group:%u leader:%u target:%u members:%u level-denied:%u unready:%u busy-or-ordered:%u",
+                        group->GetId(), leader->GetGUIDLow(), target->GetGUIDLow(), group->GetMembersCount(), levelDenied, unreadyDenied, busyDenied);
 }
 
 bool PlayerBotMgr::IsAutonomousCitizenGroup(Group const* group) const

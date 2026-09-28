@@ -24,6 +24,10 @@ enum class Outcome { Inactive, Walking, Escaped, Stalled, TimedOut };
 constexpr std::uint32_t kRetreatHealthPercent = 15u;
 constexpr std::uint32_t kDyingTargetHealthPercent = 15u;
 constexpr std::uint32_t kCriticalHealthPercent = 5u;
+// Voluntary combat joining (solo hunt pull or hunting-group assistance)
+// requires at least this health percentage; below it the citizen rests or
+// recovers instead. Necessary self-defense is never gated by it.
+constexpr std::uint32_t kHuntReadyHealthPercent = 80u;
 
 inline bool ShouldRetreat(std::uint32_t health, std::uint32_t maxHealth,
                           bool dangerZone, std::uint32_t targetHealth = 0u,
@@ -350,6 +354,31 @@ private:
     }
 };
 
+// Bounded regroup policy for autonomous hunting-group members whose group
+// leader is dead or unavailable (TW-BOTS-002 S1G). A member's own survival
+// always preempts group duty: while the member is threatened the caller
+// must fall through to ordinary combat/retreat evaluation immediately.
+// Unthreatened members wait for the leader up to kLeaderLostDeadlineMs of
+// accumulated time, then the caller disbands and resumes solo citizen
+// activity. Value-only like the rest of this header: no engine state, no
+// wall clock; the caller accumulates waitedMs from supplied diffs
+// (saturating at the deadline) and resets it when the leader is usable.
+enum class LeaderLoss { FallThrough, Wait, Disband };
+// Initial regroup deadline: a policy default to validate from observed
+// leader recovery times, not a calibrated gameplay constant.
+constexpr std::uint32_t kLeaderLostDeadlineMs = 60000u;
+
+// Decides the member action for an unusable leader given the accumulated
+// waitedMs and whether the member is currently threatened (in combat or
+// holding a target).
+inline LeaderLoss EvaluateLeaderLoss(std::uint32_t waitedMs, bool threatened)
+{
+    if (threatened)
+        return LeaderLoss::FallThrough;
+    if (waitedMs >= kLeaderLostDeadlineMs)
+        return LeaderLoss::Disband;
+    return LeaderLoss::Wait;
+}
 } // namespace CitizenRecovery
 } // namespace Companion
 

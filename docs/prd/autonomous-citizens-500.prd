@@ -241,12 +241,59 @@ responses and fallback rate. Sample detailed traces locally with retention caps.
 Provide feature flags for new policies and a controlled rollback to deterministic
 baseline. Downscale by normal save/logout, never delete character records.
 
+### AC-10: Autonomous hunting-group lifecycle (P0)
+
+Autonomous hunting groups are bot-only parties formed around an active solo
+hunt. They are not human party duty; they carry their own bounded lifecycle
+and authority policy.
+
+- Formation: bot-only members, same map/zone/team, within 30 yards, level
+  difference at most three, out of combat, and each candidate at or above
+  the hunt-ready health percentage (initially 80%). Recruitment is bounded
+  by group capacity; candidates below any gate stay on solo activity.
+- Authority: the leader provides the shared target and travel direction.
+  Members keep independent survival authority: a member's own combat,
+  retreat, recovery and loot completion always preempt voluntary following
+  or assistance. Group assistance is voluntary joining, never forced
+  re-engagement, and never bypasses the member's health readiness.
+- Leader loss: when the leader is dead, disconnected or otherwise
+  unavailable, a threatened member immediately falls through to ordinary
+  combat/retreat evaluation. An unthreatened member waits up to the regroup
+  deadline (initially sixty seconds, accumulated from tick diffs) and then
+  disbands and resumes solo citizen activity. The wait resets when the
+  leader is usable again; death, teleport and party authority clear it.
+- Disband: level spread beyond the formation bound, or an expired leader
+  wait. A member may exit safely back to solo activity at any time; leaving
+  or disbanding never leaves stale combat or movement state.
+- Human recruitment: if a group member is recruited into a human party,
+  companion command priority takes over and the member leaves autonomous
+  group behavior for recruited duty.
+- Restart: group membership is a runtime construct and is not persisted.
+  After restart, members that are online wait for the leader under the same
+  bounded deadline; the leader reforms when it next pulls a target. Partial
+  member login must not strand or freeze any member.
+- Progress: each member's earned XP and loot are accounted individually;
+  group duty never substitutes for per-member progression evidence, and
+  autonomous groups are not excluded from population accounting as human
+  party duty.
+
+Acceptance: kill or disconnect the leader while a follower is attacked
+(assert the follower fights or retreats normally without waiting for the
+leader); recruit a member into a human party mid-route (assert companion
+priority and safe group exit); let one member rest, lag behind or change
+maps (assert bounded separation into solo activity); restart with followers
+logging in before the leader (assert bounded regroup deadline, no frozen
+members, per-member progress intact). The staged zone hunting-group fixture
+establishes formation and membership only; these failure paths still need
+world evidence.
+
 ## 5. Delivery and acceptance
 
 | Slice | Deliverables | Required evidence |
 |---|---|---|
 | S0: baseline | Per-citizen activity/progress metrics, repeatable fixtures, capability flags | Capture eight-bot baseline with model off/on status and source revision |
 | S1: recovery | AC-01 and explicit arrival semantics | Missing home, nearby home, blocked escape, repeated threat, interrupted travel; bounded alternate actions and no false success |
+| S1G: hunting groups | AC-10 | Formation and membership; leader loss with attacked follower; human recruitment mid-route; member rest/map separation; partial-login restart; per-member progress |
 | S2: progression | AC-02/03 and local area selection | Different capabilities progress independently; depleted areas trigger alternatives; stable choices under noisy observations |
 | S3: routes/distribution | AC-04/05 | Obstructed nearest destination, safer alternative, capacity contention, stale knowledge and no-route case |
 | S4: maintenance | AC-06 | Bags/resources/repair/training/death slices; persistence across restart; recruited-party preemption |
@@ -414,3 +461,29 @@ local/backups/tortoise-20260928T143504Z.sql. Restart completed without fatal
 or error log matches. No personal data volume or schema was reset. Real-player
 review must now establish a natural retreat outcome in the live world; the
 synthetic crowded-scan fixture does not provide that evidence.
+
+### S1G hunting-group lifecycle (2026-09-28)
+
+AC-10 landed with two priority fixes to the previously uncommitted group
+code, addressing the robustness review's group findings:
+
+- Leader loss no longer suspends a follower's own survival. A dead or
+  unavailable leader makes a threatened follower fall straight through to
+  ordinary combat/retreat evaluation; an unthreatened follower waits up to
+  a bounded sixty-second regroup deadline and then disbands and resumes
+  solo activity. The decision is the value policy
+  Companion::CitizenRecovery::EvaluateLeaderLoss with
+  kLeaderLostDeadlineMs; the wait accumulates from tick diffs, saturates
+  at the deadline and resets whenever the leader is usable again.
+- Voluntary combat joining now requires hunt-ready health.
+  JoinCitizenCombat and group formation both gate on
+  PlayerBotAI::CitizenCombatReady (initially 80% of max health), the same
+  readiness the solo hunt pull requires, now shared through the constant
+  kHuntReadyHealthPercent. Already-engaged citizens are unaffected:
+  necessary self-defense keeps running through the ordinary combat path.
+
+Value tests cover the leader-loss decision (threatened fall-through at all
+wait times, wait/disband deadline boundary, saturated input). The server
+build and the AC-10 world fixtures (attacked follower under a dead leader,
+human recruitment, partial-login restart) are outstanding; the staged zone
+hunting-group fixture still proves formation and membership only.

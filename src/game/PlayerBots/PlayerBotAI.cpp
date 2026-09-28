@@ -473,7 +473,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     }
     else if (!_citizenRetreat.Active() && !me->IsInCombat() && !me->GetVictim() &&
              !GetAliveHeldTarget() && me->GetMaxHealth() &&
-             me->GetHealth() * 100 >= me->GetMaxHealth() * 80)
+             me->GetHealth() * 100 >= me->GetMaxHealth() *
+                 Companion::CitizenRecovery::kHuntReadyHealthPercent)
         _citizenRetreatRetry.Reset(); // genuine health/combat recovery ends this episode
 
     if (_socialCooldownMs > diff)
@@ -1260,10 +1261,22 @@ void PlayerBotAI::RememberCombatTarget(Unit* unit)
                        unit->GetHealth(), unit->GetMaxHealth());
 }
 
+bool PlayerBotAI::CitizenCombatReady() const
+{
+    // Voluntary combat (pulling a solo hunt or joining a hunting group)
+    // requires hunt-ready health; below it the citizen rests or recovers.
+    // Necessary self-defense is never gated: an already engaged citizen
+    // keeps fighting through the ordinary combat path.
+    return me && me->IsAlive() && me->GetMaxHealth() > 0 &&
+        me->GetHealth() * 100u >= me->GetMaxHealth() *
+            Companion::CitizenRecovery::kHuntReadyHealthPercent;
+}
+
 bool PlayerBotAI::JoinCitizenCombat(Unit* target)
 {
     if (!me || !IsZoneCitizen() || !botEntry || !botEntry->persistent ||
         botEntry->ownerAccountId || botEntry->recruiterAccountId || !me->IsAlive() ||
+        !CitizenCombatReady() ||
         (me->GetGroup() && !sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())) ||
         _following || _held || _assistTargetGuid || !target ||
         !target->IsAlive() || target->GetTypeId() != TYPEID_UNIT ||
@@ -1282,11 +1295,45 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         return false;
 
     Player* leader = sObjectAccessor.FindPlayer(group->GetLeaderGuid());
-    if (!leader || !leader->IsInWorld() || !leader->IsAlive())
+    PlayerBotAI* leaderAI = leader ? dynamic_cast<PlayerBotAI*>(leader->AI()) : nullptr;
+    bool const leaderUsable = leader && leader->IsInWorld() && leader->IsAlive() &&
+        leaderAI && leaderAI->IsZoneCitizen();
+    if (!leaderUsable)
+    {
+        // A dead or unavailable leader must not suspend the member's own
+        // survival. A threatened member falls through immediately to the
+        // ordinary combat/retreat evaluation; an unthreatened member waits
+        // for the leader up to the bounded regroup deadline, then disbands
+        // and resumes solo citizen activity.
+        switch (Companion::CitizenRecovery::EvaluateLeaderLoss(
+            _citizenGroupLeaderLostMs, me->IsInCombat() || me->GetVictim() != nullptr))
+        {
+        case Companion::CitizenRecovery::LeaderLoss::FallThrough:
+            _citizenGroupLeaderLostMs = 0;
+            return false;
+        case Companion::CitizenRecovery::LeaderLoss::Disband:
+            sLog.outString("[ZoneCitizen][HuntingGroup] disband leader-unavailable group:%u member:%u leader-guid:%u waited-ms:%u deadline-ms:%u",
+                           group->GetId(), me->GetGUIDLow(),
+                           group->GetLeaderGuid().GetCounter(),
+                           _citizenGroupLeaderLostMs,
+                           Companion::CitizenRecovery::kLeaderLostDeadlineMs);
+            me->Say("I am resuming my own hunt without the group.", LANG_UNIVERSAL);
+            _citizenGroupLeaderLostMs = 0;
+            group->Disband(true, me->GetObjectGuid());
+            return true;
+        case Companion::CitizenRecovery::LeaderLoss::Wait:
+            break;
+        }
+        // Saturate the wait so a huge diff cannot wrap it backwards.
+        if (diff >= Companion::CitizenRecovery::kLeaderLostDeadlineMs ||
+            _citizenGroupLeaderLostMs >=
+                Companion::CitizenRecovery::kLeaderLostDeadlineMs - diff)
+            _citizenGroupLeaderLostMs = Companion::CitizenRecovery::kLeaderLostDeadlineMs;
+        else
+            _citizenGroupLeaderLostMs += diff;
         return true;
-    PlayerBotAI* leaderAI = dynamic_cast<PlayerBotAI*>(leader->AI());
-    if (!leaderAI || !leaderAI->IsZoneCitizen())
-        return true;
+    }
+    _citizenGroupLeaderLostMs = 0;
 
     bool levelSpread = false;
     for (auto const& slot : group->GetMemberSlots())
@@ -4409,7 +4456,8 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
     if (_huntScanMs <= diff && !_progressionTravelActive)
     {
         _huntScanMs = 2000;
-        if (me->GetHealth() * 100 >= me->GetMaxHealth() * 80)
+        if (me->GetHealth() * 100 >= me->GetMaxHealth() *
+            Companion::CitizenRecovery::kHuntReadyHealthPercent)
         {
             BotCitizenHuntScan scan(me, _failedHuntMs ? _failedHuntGuid : 0);
             Creature* found = nullptr;
