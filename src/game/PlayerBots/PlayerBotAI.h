@@ -96,6 +96,10 @@ class PlayerBotAI: public PlayerAI
         // hunting-group assistance: alive and at or above the hunt-ready
         // health percentage. Necessary self-defense never checks this.
         bool CitizenCombatReady() const;
+        // AC-10 R1: clear the hunting-group episode state when the
+        // citizen is transferred out of its autonomous group (human
+        // takeover) so no timer leaks into the recruited duty.
+        void ClearCitizenGroupState();
         virtual void PrepareZoneSpawn(uint32, uint32, uint32, float, float, float) {}
         virtual void ClearZoneSpawn() {}
         // Helpers
@@ -288,6 +292,10 @@ class PlayerBotAI: public PlayerAI
         float _citizenRetreatStartX = 0.0f, _citizenRetreatStartY = 0.0f;
         float _citizenRetreatEndX = 0.0f, _citizenRetreatEndY = 0.0f;
         uint32 _citizenGroupFollowTimer = 0;
+        // AC-10 R2: accumulated ms the same-map follower has kept a
+        // usable leader out of follow range; at kFollowStallDeadlineMs
+        // the follower leaves the group and resumes solo activity.
+        uint32 _citizenGroupFollowStallMs = 0;
         uint32 _citizenGroupLeaderLostMs = 0;
         bool TryCitizenDisengage(Unit* threat);
         bool UpdateCitizenRetreat(uint32 diff);

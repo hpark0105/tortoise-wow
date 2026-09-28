@@ -367,6 +367,12 @@ enum class LeaderLoss { FallThrough, Wait, Disband };
 // Initial regroup deadline: a policy default to validate from observed
 // leader recovery times, not a calibrated gameplay constant.
 constexpr std::uint32_t kLeaderLostDeadlineMs = 60000u;
+// A same-map follower that keeps a usable leader out of follow range
+// (blocked path, lagging member) leaves the group and resumes solo
+// citizen activity after this much accumulated unreachable time.
+// Longer than the leader-lost deadline: a reachable leader may still
+// close the distance, a dead one cannot.
+constexpr std::uint32_t kFollowStallDeadlineMs = 120000u;
 
 // Decides the member action for an unusable leader given the accumulated
 // waitedMs and whether the member is currently threatened (in combat or
