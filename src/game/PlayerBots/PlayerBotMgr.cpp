@@ -548,6 +548,7 @@ void PlayerBotMgr::Load()
     totalChance = 0;
     m_lastOwnedWorldRefresh = 0;
     m_lastZoneWorldRefresh = 0;
+    m_lastZoneWorldStallLog = 0;
     m_lastOwnedWorldDiagnosticMs = 0;
     m_ownedWorldCursor = 0;
     m_lastWorldIntentSubmitMs = 0;
@@ -1933,22 +1934,40 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             break;
         }
     }
-    auto it = m_bots.upper_bound(m_zoneWorldCursor);
-    for (size_t seen = 0; seen < m_bots.size() && queued < queueLimit; ++seen)
+    // Try all waiting safety relocations first, then use any remaining slots
+    // for ordinary offline citizens. A relocation with no viable destination
+    // must not hold the entire world population below target indefinitely.
+    std::vector<PlayerBotEntry*> allocationCandidates;
+    uint32 offlineCandidates = 0;
+    uint32 noSuitableZone = 0;
+    uint32 noSpawnAnchors = 0;
+    auto collectCandidates = [&](bool safetyPass)
     {
-        if (it == m_bots.end())
-            it = m_bots.begin();
-        PlayerBotEntry* e = it->second;
-        ++it;
-        if (!e->persistent || e->ownerAccountId || e->customBot || e->isChatBot ||
-            !e->ai->IsZoneCitizen() || e->state != PB_STATE_OFFLINE ||
-            (e->zoneWorldRetryAfterMs && m_elapsedTime < e->zoneWorldRetryAfterMs))
-            continue;
-        // A citizen that has already demonstrated a fatal local failure gets
-        // the next available allocator slots.  Without this priority a 500
-        // character roster can leave it idle behind ordinary repopulation.
-        if (safetyRelocationWaiting && !e->zoneWorldSafetyRelocation)
-            continue;
+        auto it = m_bots.upper_bound(m_zoneWorldCursor);
+        for (size_t seen = 0; seen < m_bots.size(); ++seen)
+        {
+            if (it == m_bots.end())
+                it = m_bots.begin();
+            PlayerBotEntry* e = it->second;
+            ++it;
+            if (!e || !e->persistent || e->ownerAccountId || e->customBot || e->isChatBot ||
+                !e->ai || !e->ai->IsZoneCitizen() || e->state != PB_STATE_OFFLINE ||
+                (e->zoneWorldRetryAfterMs && m_elapsedTime < e->zoneWorldRetryAfterMs))
+                continue;
+            if (safetyRelocationWaiting && e->zoneWorldSafetyRelocation != safetyPass)
+                continue;
+            allocationCandidates.push_back(e);
+            ++offlineCandidates;
+        }
+    };
+    if (safetyRelocationWaiting)
+        collectCandidates(true);
+    collectCandidates(false);
+    for (size_t candidateIndex = 0;
+         candidateIndex < allocationCandidates.size() && queued < queueLimit;
+         ++candidateIndex)
+    {
+        PlayerBotEntry* e = allocationCandidates[candidateIndex];
         PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)e->playerGUID);
         if (!data)
             continue;
@@ -2002,6 +2021,7 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             return true;
         };
         ZonePlan* targetPlan = nullptr;
+        bool usedConservativeFallback = false;
         for (size_t planIndex = 0; planIndex < plans.size(); ++planIndex)
         {
             ZonePlan& candidatePlan = plans[planIndex];
@@ -2054,11 +2074,82 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             }
         }
         if (!targetPlan)
+        {
+            // If no zone clears the normal 15% prey threshold, choose a
+            // conservative fallback only when it has verified ordinary
+            // creatures, at least 5% of prey in the citizen's productive
+            // band, and an average creature level no more than three
+            // above the citizen. Prefer configured underfilled zones and
+            // still require improvement when escaping an unproductive
+            // current zone.
+            float bestShare = 0.0f;
+            bool bestUnderTarget = false;
+            float bestDistance = std::numeric_limits<float>::max();
+            for (auto& candidatePlan : plans)
+            {
+                if ((e->zoneWorldSafetyRelocation &&
+                     candidatePlan.key.first == e->zoneWorldSafetyExcludeMap &&
+                     candidatePlan.key.second == e->zoneWorldSafetyExcludeZone) ||
+                    (needsProgressionMove && candidatePlan.key.first == currentMap &&
+                     candidatePlan.key.second == currentZone) ||
+                    !factionAllowed(candidatePlan.key.second))
+                    continue;
+                uint32 const candidateLevel = GetCitizenZoneDifficulty(
+                    candidatePlan.key.first, candidatePlan.key.second);
+                if (!candidateLevel || candidateLevel > citizenLevel + 3)
+                    continue;
+                uint32 const share = GetCitizenZoneProductiveSharePercent(
+                    candidatePlan.key.first, candidatePlan.key.second,
+                    productiveMinimum, citizenLevel);
+                if (share < CitizenZoneFallbackMinimumProductiveSharePercent ||
+                    (needsProgressionMove && share <= currentProductiveShare))
+                    continue;
+                std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty>::const_iterator const profile =
+                    m_zoneSpawnDifficulty.find(candidatePlan.key);
+                if (profile == m_zoneSpawnDifficulty.end() || !profile->second.samples)
+                    continue;
+                uint64 totalWeight = 0;
+                uint64 safeWeight = 0;
+                for (uint32 level = 1; level <= 60; ++level)
+                {
+                    totalWeight += profile->second.levelWeight[level];
+                    if (level <= citizenLevel + 3)
+                        safeWeight += profile->second.levelWeight[level];
+                }
+                if (!totalWeight || safeWeight * 100 < totalWeight *
+                    (100 - CitizenZoneFallbackMaximumOverlevelSharePercent))
+                    continue;
+                bool const underTarget = candidatePlan.active < candidatePlan.desired;
+                float const dx = candidatePlan.centerX - anchor->GetPositionX();
+                float const dy = candidatePlan.centerY - anchor->GetPositionY();
+                float const distance = dx * dx + dy * dy;
+                if (!targetPlan || (underTarget && !bestUnderTarget) ||
+                    (underTarget == bestUnderTarget && share > bestShare) ||
+                    (underTarget == bestUnderTarget && share == bestShare &&
+                     distance < bestDistance))
+                {
+                    targetPlan = &candidatePlan;
+                    bestShare = (float)share;
+                    bestUnderTarget = underTarget;
+                    bestDistance = distance;
+                    usedConservativeFallback = true;
+                }
+            }
+        }
+        if (!targetPlan)
+        {
+            ++noSuitableZone;
+            e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
             continue;
+        }
         std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>>::const_iterator targetAnchorsIt =
             m_zoneSpawnAnchors.find(targetPlan->key);
         if (targetAnchorsIt == m_zoneSpawnAnchors.end() || targetAnchorsIt->second.empty())
+        {
+            ++noSpawnAnchors;
+            e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
             continue;
+        }
 
         float x = 0.0f, y = 0.0f, z = 0.0f;
         bool placed = false;
@@ -2138,12 +2229,21 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         queuedPositions.push_back(std::make_pair(x, y));
         ++queued;
         ++targetPlan->active;
-        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u level:%u progression:%u relocation:%u active:%u target:%u batch:%u/%u",
+        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u level:%u progression:%u relocation:%u fallback:%u active:%u target:%u batch:%u/%u",
                        (uint32)e->playerGUID, targetPlan->key.second, citizenLevel,
                        needsProgressionMove ? 1 : 0,
                        safetyRelocation ? 1 : 0,
+                       usedConservativeFallback ? 1 : 0,
                        active + queued,
                        confZoneWorldTarget, queued, queueLimit);
+    }
+    if (active + queued < confZoneWorldTarget &&
+        m_elapsedTime - m_lastZoneWorldStallLog >= 60000)
+    {
+        m_lastZoneWorldStallLog = m_elapsedTime;
+        sLog.outString("[ZoneCitizen][Allocator] under-target active:%u target:%u queued_this_pass:%u offline_candidates:%u no_suitable_zone:%u no_spawn_anchors:%u safety_priority:%u",
+                       active, confZoneWorldTarget, queued, offlineCandidates,
+                       noSuitableZone, noSpawnAnchors, safetyRelocationWaiting ? 1 : 0);
     }
 }
 

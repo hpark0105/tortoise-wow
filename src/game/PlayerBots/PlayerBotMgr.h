@@ -89,6 +89,8 @@ class PlayerBotMgr
 {
     public:
         static uint32 const CitizenZoneMinimumProductiveSharePercent = 15;
+        static uint32 const CitizenZoneFallbackMinimumProductiveSharePercent = 5;
+        static uint32 const CitizenZoneFallbackMaximumOverlevelSharePercent = 5;
         PlayerBotMgr();
         ~PlayerBotMgr();
 
@@ -292,6 +294,7 @@ class PlayerBotMgr
         std::map<std::pair<uint32, uint32>, uint32> confZoneWorldZoneTargets;
         uint32 confZoneProvisionLevel = 1; // initial level of newly created citizens only
         uint32 m_lastZoneWorldRefresh = 0;
+        uint32 m_lastZoneWorldStallLog = 0;
         uint32 m_zoneWorldCursor = 0;
         // Static creature locations provide zone-wide spawn candidates. Build
         // each map/zone list once rather than scanning the world per login.
