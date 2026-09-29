@@ -373,6 +373,84 @@ constexpr std::uint32_t kLeaderLostDeadlineMs = 60000u;
 // Longer than the leader-lost deadline: a reachable leader may still
 // close the distance, a dead one cannot.
 constexpr std::uint32_t kFollowStallDeadlineMs = 120000u;
+constexpr std::uint32_t kFollowProgressSampleMs = 5000u;
+constexpr float kFollowProgressYards = 2.0f;
+constexpr float kFollowProgressSquaredYards = kFollowProgressYards * kFollowProgressYards;
+
+// A follower is stalled only when it makes too little physical progress
+// over repeated bounded samples. Distance from the leader alone is not a
+// stall: a follower can be moving steadily while the leader keeps moving.
+class FollowProgress
+{
+public:
+    void Begin(float x, float y)
+    {
+        _active = true;
+        _checkpointX = x;
+        _checkpointY = y;
+        _sampleElapsedMs = 0u;
+        _stalledMs = 0u;
+    }
+
+    void Reset()
+    {
+        _active = false;
+        _checkpointX = 0.0f;
+        _checkpointY = 0.0f;
+        _sampleElapsedMs = 0u;
+        _stalledMs = 0u;
+    }
+
+    bool Active() const { return _active; }
+    std::uint32_t StalledMs() const { return _stalledMs; }
+
+    bool Update(std::uint32_t diff, float x, float y)
+    {
+        if (!_active)
+            Begin(x, y);
+
+        if (diff >= kSaturatedElapsedMs - _sampleElapsedMs)
+            _sampleElapsedMs = kSaturatedElapsedMs;
+        else
+            _sampleElapsedMs += diff;
+
+        if (_sampleElapsedMs < kFollowProgressSampleMs)
+            return false;
+
+        std::uint32_t const sampleMs = _sampleElapsedMs;
+        _sampleElapsedMs = 0u;
+        float const dx = x - _checkpointX;
+        float const dy = y - _checkpointY;
+        float const movedSq = dx * dx + dy * dy;
+        bool const progressed = std::isfinite(movedSq) &&
+            movedSq >= kFollowProgressSquaredYards;
+        _checkpointX = x;
+        _checkpointY = y;
+
+        if (progressed)
+            _stalledMs = 0u;
+        else if (sampleMs >= kFollowStallDeadlineMs - _stalledMs)
+            _stalledMs = kFollowStallDeadlineMs;
+        else
+            _stalledMs += sampleMs;
+
+        return _stalledMs >= kFollowStallDeadlineMs;
+    }
+
+private:
+    bool _active = false;
+    float _checkpointX = 0.0f;
+    float _checkpointY = 0.0f;
+    std::uint32_t _sampleElapsedMs = 0u;
+    std::uint32_t _stalledMs = 0u;
+};
+
+// Recovery pauses all voluntary group duty, including follow and assist.
+// Existing combat remains eligible for self-defense and retreat evaluation.
+inline bool ShouldPauseGroupDuty(bool combatReady, bool selfDefenseNeeded)
+{
+    return !combatReady && !selfDefenseNeeded;
+}
 
 // Decides the member action for an unusable leader given the accumulated
 // waitedMs and whether the member is currently threatened (in combat or

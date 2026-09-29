@@ -77,11 +77,13 @@ bool ParseBotIdentitySpec(std::string const& value, BotIdentitySpec& spec)
 
 void DeriveCitizenAppearance(BotIdentitySpec& spec)
 {
-    if (!spec.fourField || spec.race != RACE_HUMAN)
+    if (!spec.fourField || (spec.race != RACE_HUMAN && spec.race != RACE_NIGHTELF &&
+                            spec.race != RACE_UNDEAD && spec.race != RACE_TAUREN))
         return;
-    // Ranges verified against the bundled Turtle 1.18.1 CharSections.dbc:
-    // human skin 0..9, male/female faces 0..11/14, hair styles
-    // 0..16/25, colors 0..9, and male facial hair 0..8.
+    // Ranges verified against bundled Turtle 1.18.1 CharSections.dbc and
+    // CharacterFacialHairStyles.dbc. Existing human ranges are retained;
+    // Night Elf, Forsaken, and Tauren ranges are also verified against the
+    // bundled CharSections.dbc and CharacterFacialHairStyles.dbc.
     uint32 seed = 2166136261u;
     for (char c : spec.name)
         seed = (seed ^ (uint8)std::tolower((unsigned char)c)) * 16777619u;
@@ -92,11 +94,38 @@ void DeriveCitizenAppearance(BotIdentitySpec& spec)
         seed ^= seed << 5;
         return (uint8)(seed % count);
     };
-    spec.skin = next(10);
-    spec.face = next(spec.gender == GENDER_FEMALE ? 15 : 12);
-    spec.hairStyle = next(spec.gender == GENDER_FEMALE ? 26 : 17);
-    spec.hairColor = next(10);
-    spec.facialHair = spec.gender == GENDER_MALE ? next(9) : 0;
+    if (spec.race == RACE_HUMAN)
+    {
+        spec.skin = next(10);
+        spec.face = next(spec.gender == GENDER_FEMALE ? 15 : 12);
+        spec.hairStyle = next(spec.gender == GENDER_FEMALE ? 26 : 17);
+        spec.hairColor = next(10);
+        spec.facialHair = spec.gender == GENDER_MALE ? next(9) : 0;
+    }
+    else if (spec.race == RACE_UNDEAD)
+    {
+        spec.skin = next(6);
+        spec.face = next(10);
+        spec.hairStyle = next(spec.gender == GENDER_FEMALE ? 17 : 16);
+        spec.hairColor = next(11);
+        spec.facialHair = spec.gender == GENDER_MALE ? next(17) : 0;
+    }
+    else if (spec.race == RACE_NIGHTELF)
+    {
+        spec.skin = next(11);
+        spec.face = next(spec.gender == GENDER_FEMALE ? 9 : 10);
+        spec.hairStyle = next(12);
+        spec.hairColor = next(10);
+        spec.facialHair = spec.gender == GENDER_MALE ? next(14) : 0;
+    }
+    else
+    {
+        spec.skin = next(spec.gender == GENDER_FEMALE ? 12 : 20);
+        spec.face = next(spec.gender == GENDER_FEMALE ? 4 : 5);
+        spec.hairStyle = next(spec.gender == GENDER_FEMALE ? 12 : 13);
+        spec.hairColor = next(9);
+        spec.facialHair = spec.gender == GENDER_MALE ? next(9) : 0;
+    }
 }
 }
 
@@ -157,7 +186,7 @@ void PlayerBotMgr::LoadConfig()
     int32 const ownedPace = sConfig.GetIntDefault("PlayerBot.OwnedWorldPaceMs", 5000);
     confOwnedWorldPaceMs = std::max<uint32>(1000u, ownedPace > 0 ? (uint32)ownedPace : 0u);
     int32 const zoneTarget = sConfig.GetIntDefault("PlayerBot.ZoneWorldTarget", 0);
-    confZoneWorldTarget = zoneTarget > 0 ? std::min<uint32>((uint32)zoneTarget, 500u) : 0;
+    confZoneWorldTarget = zoneTarget > 0 ? std::min<uint32>((uint32)zoneTarget, 1000u) : 0;
     confZoneWorldZoneTargets.clear();
     std::string const zoneTargets = sConfig.GetStringDefault("PlayerBot.ZoneWorldZoneTargets", "");
     uint32 zoneTargetTotal = 0;
@@ -182,7 +211,7 @@ void PlayerBotMgr::LoadConfig()
                 return false;
             char* parseEnd = nullptr;
             unsigned long const parsed = std::strtoul(value.c_str(), &parseEnd, 10);
-            if (!parseEnd || *parseEnd || parsed > 500u)
+            if (!parseEnd || *parseEnd || parsed > 1000u)
                 return false;
             number = (uint32)parsed;
             return true;
@@ -191,7 +220,7 @@ void PlayerBotMgr::LoadConfig()
         if (!parseNumber(spec.substr(0, first), mapId) || mapId > 1 ||
             !parseNumber(spec.substr(first + 1, second - first - 1), zoneId) || !zoneId ||
             !parseNumber(spec.substr(second + 1), count) || !count ||
-            zoneTargetTotal + count > 500u ||
+            zoneTargetTotal + count > 1000u ||
             !confZoneWorldZoneTargets.emplace(std::make_pair(mapId, zoneId), count).second)
         {
             zoneTargetsValid = false;
@@ -232,6 +261,15 @@ void PlayerBotMgr::LoadConfig()
     confZoneProvisionName = sConfig.GetStringDefault("PlayerBot.ZoneProvision", "");
     int32 const generatedCitizens = sConfig.GetIntDefault("PlayerBot.ZoneProvisionCount", 0);
     confZoneProvisionCount = generatedCitizens > 0 ? std::min<uint32>((uint32)generatedCitizens, 500u) : 0;
+    int32 const generatedHordeCitizens = sConfig.GetIntDefault("PlayerBot.ZoneHordeProvisionCount", 0);
+    confZoneHordeProvisionCount = generatedHordeCitizens > 0
+        ? std::min<uint32>((uint32)generatedHordeCitizens, 100u) : 0;
+    int32 const generatedNightElfCitizens = sConfig.GetIntDefault("PlayerBot.ZoneNightElfProvisionCount", 0);
+    confZoneNightElfProvisionCount = generatedNightElfCitizens > 0
+        ? std::min<uint32>((uint32)generatedNightElfCitizens, 100u) : 0;
+    int32 const generatedTaurenCitizens = sConfig.GetIntDefault("PlayerBot.ZoneTaurenProvisionCount", 0);
+    confZoneTaurenProvisionCount = generatedTaurenCitizens > 0
+        ? std::min<uint32>((uint32)generatedTaurenCitizens, 100u) : 0;
     // KAP-558 review (finding 1): the human account bound to every new
     // provision at publish time (0 = unowned legacy behavior); and the
     // one-shot legacy mirror-marker backfill at bot login.
@@ -571,7 +609,7 @@ void PlayerBotMgr::Load()
         }
     }
 
-    // Optional deterministic expansion for a large citizen population. Names
+    // Optional deterministic expansion for the Alliance citizen population. Names
     // are alphabetic and stable, so restart provisioning is idempotent. The
     // caller supplies the number of generated citizens in addition to any
     // explicit cohort in ZoneProvision.
@@ -599,6 +637,73 @@ void PlayerBotMgr::Load()
         ProvisionPersistentBot(name + ",1," + std::to_string(playerClass) + "," +
                                std::to_string(gender), true);
     }
+
+    // Optional, deterministic faction cohorts use hash-seeded class and gender
+    // choices, plus name-derived appearance. Identity remains stable on restart.
+    static char const* const hordeNameStarts[] = {
+        "Mor", "Gor", "Vek", "Zal", "Ner", "Dra", "Kel", "Thar", "Mal", "Vor"
+    };
+    static char const* const hordeNameEnds[] = {
+        "gath", "vash", "morn", "drek", "lith", "zane", "rath", "neth", "vorn", "grim"
+    };
+    static char const* const nightElfNameStarts[] = {
+        "Ael", "Tha", "Lun", "Syl", "Quel", "Nym", "Faer", "Elo", "Myr", "Ith"
+    };
+    static char const* const nightElfNameEnds[] = {
+        "doran", "vani", "lith", "sora", "rune", "thiel", "wyn", "nara", "riel", "len"
+    };
+    static char const* const taurenNameStarts[] = {
+        "Tor", "Moo", "Har", "Koa", "Sha", "Oro", "Tal", "Nok", "Ura", "Wak"
+    };
+    static char const* const taurenNameEnds[] = {
+        "ma", "ru", "ko", "ta", "ni", "la", "wa", "ka", "dor", "mok"
+    };
+    static uint8 const hordeClasses[] = {
+        CLASS_WARRIOR, CLASS_ROGUE, CLASS_PRIEST, CLASS_MAGE, CLASS_WARLOCK
+    };
+    static uint8 const nightElfClasses[] = {
+        CLASS_WARRIOR, CLASS_PALADIN, CLASS_HUNTER, CLASS_ROGUE, CLASS_PRIEST, CLASS_DRUID
+    };
+    static uint8 const taurenClasses[] = {
+        CLASS_WARRIOR, CLASS_HUNTER, CLASS_SHAMAN, CLASS_DRUID
+    };
+    auto provisionFactionCohort = [&](uint32 count, uint8 race,
+                                      char const* const* nameStarts, size_t startCount,
+                                      char const* const* nameEnds, size_t endCount,
+                                      uint8 const* classes, size_t classCount)
+    {
+        for (uint32 i = 0; i < count; ++i)
+        {
+            std::string const name = std::string(nameStarts[(i / endCount) % startCount]) +
+                                     nameEnds[i % endCount];
+            uint32 seed = 2166136261u;
+            for (char c : name)
+                seed = (seed ^ (uint8)std::tolower((unsigned char)c)) * 16777619u;
+            auto next = [&seed](uint32 choices) -> uint32
+            {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                return seed % choices;
+            };
+            uint8 const playerClass = classes[next((uint32)classCount)];
+            uint8 const gender = (uint8)next(2);
+            ProvisionPersistentBot(name + "," + std::to_string(race) + "," +
+                                   std::to_string(playerClass) + "," + std::to_string(gender), true);
+        }
+    };
+    provisionFactionCohort(confZoneHordeProvisionCount, RACE_UNDEAD,
+        hordeNameStarts, sizeof(hordeNameStarts) / sizeof(hordeNameStarts[0]),
+        hordeNameEnds, sizeof(hordeNameEnds) / sizeof(hordeNameEnds[0]),
+        hordeClasses, sizeof(hordeClasses) / sizeof(hordeClasses[0]));
+    provisionFactionCohort(confZoneNightElfProvisionCount, RACE_NIGHTELF,
+        nightElfNameStarts, sizeof(nightElfNameStarts) / sizeof(nightElfNameStarts[0]),
+        nightElfNameEnds, sizeof(nightElfNameEnds) / sizeof(nightElfNameEnds[0]),
+        nightElfClasses, sizeof(nightElfClasses) / sizeof(nightElfClasses[0]));
+    provisionFactionCohort(confZoneTaurenProvisionCount, RACE_TAUREN,
+        taurenNameStarts, sizeof(taurenNameStarts) / sizeof(taurenNameStarts[0]),
+        taurenNameEnds, sizeof(taurenNameEnds) / sizeof(taurenNameEnds[0]),
+        taurenClasses, sizeof(taurenClasses) / sizeof(taurenClasses[0]));
 
     // 4- LoadFromDB with persisted ownership bindings (TW-006, contract C2/C6).
     // Roster rows without a valid bot_ownership binding are quarantined: logged and skipped.
@@ -1472,6 +1577,118 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
     if (active >= confZoneWorldTarget || m_bots.empty())
         return;
 
+    // Fulfill configured starting-zone cohorts from their saved native
+    // PlayerCreateInfo position before relying on a nearby map anchor. This
+    // allows a live anchor on one continent to seed citizens on the other.
+    if (!confZoneWorldZoneTargets.empty())
+    {
+        auto countInZone = [&](std::pair<uint32, uint32> const& key) -> uint32
+        {
+            uint32 count = 0;
+            for (auto const& botItem : m_bots)
+            {
+                PlayerBotEntry const* citizen = botItem.second;
+                if (!citizen || !citizen->ai || !citizen->ai->IsZoneCitizen() ||
+                    (citizen->state != PB_STATE_LOADING && citizen->state != PB_STATE_ONLINE))
+                    continue;
+                if (citizen->state == PB_STATE_LOADING)
+                {
+                    ZoneCitizenAI const* citizenAI = static_cast<ZoneCitizenAI const*>(citizen->ai);
+                    if (citizenAI->GetPreparedSpawnMap() == key.first &&
+                        citizenAI->GetPreparedSpawnZone() == key.second)
+                        ++count;
+                    continue;
+                }
+                Player* onlineCitizen = sObjectAccessor.FindPlayer(
+                    ObjectGuid(HIGHGUID_PLAYER, (uint32)citizen->playerGUID));
+                if (onlineCitizen && onlineCitizen->GetMapId() == key.first &&
+                    onlineCitizen->GetZoneId() == key.second)
+                    ++count;
+            }
+            return count;
+        };
+
+        uint32 const seedLimit = std::min<uint32>(confZoneWorldLoginBatch,
+                                                  confZoneWorldTarget - active);
+        uint32 seeded = 0;
+        for (auto const& target : confZoneWorldZoneTargets)
+        {
+            uint32 inZone = countInZone(target.first);
+            while (inZone < target.second && seeded < seedLimit)
+            {
+                AreaEntry const* area = AreaEntry::GetById(target.first.second);
+                bool queued = false;
+                for (auto const& botItem : m_bots)
+                {
+                    PlayerBotEntry* citizen = botItem.second;
+                    if (!citizen || !citizen->persistent || citizen->ownerAccountId ||
+                        citizen->customBot || citizen->isChatBot || !citizen->ai ||
+                        !citizen->ai->IsZoneCitizen() || citizen->state != PB_STATE_OFFLINE ||
+                        citizen->zoneWorldSafetyRelocation ||
+                        (citizen->zoneWorldRetryAfterMs && m_elapsedTime < citizen->zoneWorldRetryAfterMs))
+                        continue;
+                    PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)citizen->playerGUID);
+                    if (!data)
+                        continue;
+                    uint32 spawnMap = data->uiMapId;
+                    uint32 spawnZone = data->uiZoneId;
+                    float spawnX = data->fPosX;
+                    float spawnY = data->fPosY;
+                    float spawnZ = data->fPosZ;
+                    if (!spawnZone)
+                    {
+                        // Freshly provisioned characters persist their native
+                        // start coordinates before their first login, while
+                        // the character zone cache remains zero until then.
+                        // Recover only an exact native-start match so a citizen
+                        // with saved progress is never sent back to spawn.
+                        PlayerInfo const* start = sObjectMgr.GetPlayerInfo(data->uiRace, data->uiClass);
+                        if (!start || data->uiMapId != start->mapId ||
+                            start->mapId != target.first.first ||
+                            start->areaId != target.first.second ||
+                            std::fabs(data->fPosX - start->positionX) > 0.01f ||
+                            std::fabs(data->fPosY - start->positionY) > 0.01f ||
+                            std::fabs(data->fPosZ - start->positionZ) > 0.01f)
+                            continue;
+                        spawnZone = start->areaId;
+                        spawnX = start->positionX;
+                        spawnY = start->positionY;
+                        spawnZ = start->positionZ;
+                    }
+                    if (spawnMap != target.first.first || spawnZone != target.first.second ||
+                        !MaNGOS::IsValidMapCoord(spawnX, spawnY, spawnZ))
+                        continue;
+                    Team const citizenTeam = Player::TeamForRace(data->uiRace);
+                    if (area && ((area->Team == AREATEAM_ALLY && citizenTeam != ALLIANCE) ||
+                                 (area->Team == AREATEAM_HORDE && citizenTeam != HORDE)))
+                        continue;
+                    citizen->ai->PrepareZoneSpawn(spawnMap, spawnZone, citizenTeam,
+                                                  spawnX, spawnY, spawnZ);
+                    m_zoneWorldCursor = (uint32)citizen->playerGUID;
+                    if (!AddBot((uint32)citizen->playerGUID, false))
+                    {
+                        citizen->ai->ClearZoneSpawn();
+                        citizen->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
+                        continue;
+                    }
+                    ++inZone;
+                    ++seeded;
+                    ++active;
+                    queued = true;
+                    sLog.outString("[ZoneCitizen] start-zone seed queued guid:%u map:%u zone:%u team:%u",
+                                   (uint32)citizen->playerGUID, spawnMap, spawnZone, citizenTeam);
+                    break;
+                }
+                if (!queued || active >= confZoneWorldTarget)
+                    break;
+            }
+            if (seeded >= seedLimit || active >= confZoneWorldTarget)
+                break;
+        }
+        if (seeded)
+            return;
+    }
+
     Player* anchor = nullptr;
     for (auto const& item : sObjectAccessor.GetPlayers())
     {
@@ -1518,10 +1735,10 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                 continue;
             PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)candidate->playerGUID);
             if (!data || (data->uiMapId != 0 && data->uiMapId != 1) || !data->uiZoneId ||
-                Player::TeamForRace(data->uiRace) != ALLIANCE ||
                 !MaNGOS::IsValidMapCoord(data->fPosX, data->fPosY, data->fPosZ))
                 continue;
-            candidate->ai->PrepareZoneSpawn(data->uiMapId, data->uiZoneId, ALLIANCE,
+            candidate->ai->PrepareZoneSpawn(data->uiMapId, data->uiZoneId,
+                                            Player::TeamForRace(data->uiRace),
                                             data->fPosX, data->fPosY, data->fPosZ);
             m_zoneWorldCursor = (uint32)candidate->playerGUID;
             if (!AddBot((uint32)candidate->playerGUID, false))
@@ -1733,8 +1950,9 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         if (safetyRelocationWaiting && !e->zoneWorldSafetyRelocation)
             continue;
         PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)e->playerGUID);
-        if (!data || Player::TeamForRace(data->uiRace) != anchor->GetTeam())
+        if (!data)
             continue;
+        Team const citizenTeam = Player::TeamForRace(data->uiRace);
 
         uint32 const citizenLevel = data->uiLevel;
         uint32 const currentMap = e->zoneWorldSafetyRelocation
@@ -1755,8 +1973,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         {
             AreaEntry const* area = AreaEntry::GetById(zoneId);
             return area &&
-                (area->Team != AREATEAM_ALLY || anchor->GetTeam() == ALLIANCE) &&
-                (area->Team != AREATEAM_HORDE || anchor->GetTeam() == HORDE);
+                (area->Team != AREATEAM_ALLY || citizenTeam == ALLIANCE) &&
+                (area->Team != AREATEAM_HORDE || citizenTeam == HORDE);
         };
         auto zoneLevelAllowed = [&](ZonePlan const& plan) -> bool
         {
@@ -1861,8 +2079,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             for (auto const& playerItem : sObjectAccessor.GetPlayers())
             {
                 Player const* other = playerItem.second;
-                if (!other || !other->IsInWorld() || other->GetMapId() != anchor->GetMapId() ||
-                    other->GetZoneId() != anchor->GetZoneId())
+                if (!other || !other->IsInWorld() || other->GetMapId() != targetPlan->key.first ||
+                    other->GetZoneId() != targetPlan->key.second)
                     continue;
                 float const dx = candidateX - other->GetPositionX();
                 float const dy = candidateY - other->GetPositionY();
@@ -1903,7 +2121,7 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             continue;
         }
         e->ai->PrepareZoneSpawn(targetPlan->key.first, targetPlan->key.second,
-                                anchor->GetTeam(), x, y, z);
+                                citizenTeam, x, y, z);
         if (!AddBot((uint32)e->playerGUID, false))
         {
             e->ai->ClearZoneSpawn();
@@ -2463,9 +2681,10 @@ void PlayerBotMgr::ProvisionPersistentBot(const std::string& name, bool zoneCiti
     }
     if (zoneCitizen)
         DeriveCitizenAppearance(spec);
-    if (zoneCitizen && Player::TeamForRace(spec.race) != ALLIANCE)
+    if (zoneCitizen && Player::TeamForRace(spec.race) != ALLIANCE &&
+        Player::TeamForRace(spec.race) != HORDE)
     {
-        sLog.outError("Playerbot zone provisioning: '%s' is not Alliance; rejected", characterName.c_str());
+        sLog.outError("Playerbot zone provisioning: '%s' has no playable faction; rejected", characterName.c_str());
         return;
     }
     // Identity sanity: WoW 1.x character names are letters-only (2..12). Digits

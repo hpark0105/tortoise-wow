@@ -24,6 +24,9 @@ PLAYERBOT_ZONE_WORLD_ZONE_TARGETS=
 PLAYERBOT_ZONE_PROVISION=
 PLAYERBOT_ZONE_PROVISION_LEVEL=1
 PLAYERBOT_ZONE_PROVISION_COUNT=0
+PLAYERBOT_ZONE_HORDE_PROVISION_COUNT=0
+PLAYERBOT_ZONE_NIGHTELF_PROVISION_COUNT=0
+PLAYERBOT_ZONE_TAUREN_PROVISION_COUNT=0
 PLAYERBOT_WORLD_INTENT_ENABLE=0
 PLAYERBOT_WORLD_INTENT_INTERVAL_MS=600000
 PLAYERBOT_WORLD_INTENT_GLOBAL_PACE_MS=10000
@@ -39,14 +42,15 @@ quest 456 is the single bounded automated quest used by the MVP lab.
 The owned-world target and shared local-model intent are independent opt-ins;
 see [living-world scale](../docs/bots/living-world-scale.md) for scope, limits,
 and disposable validation. The separate `PLAYERBOT_ZONE_PROVISION` list creates
-independent citizens from `Name,race,class,gender` specs. Only Alliance races
-are accepted; these characters have no owner binding and are never included in
+independent citizens from `Name,race,class,gender` specs. Playable Alliance and
+Horde races are accepted; these characters have no owner binding and are never included in
 `.botinit`. `PLAYERBOT_ZONE_PROVISION_LEVEL` sets their initial level at native
 creation (default 1); it does not change existing characters. Set
-`PLAYERBOT_ZONE_WORLD_TARGET` to opt into same-zone presence. Four-field human
-citizen specs receive a name-derived, persistent appearance at first creation; explicit
-nine-field specs keep their stated appearance. Citizens receive varied,
-level-appropriate common gear rather than the ambient bots' best eligible kit.
+`PLAYERBOT_ZONE_WORLD_TARGET` to opt into same-zone presence. Four-field Human
+and Forsaken citizen specs receive a name-derived, persistent appearance at
+first creation; explicit nine-field specs keep their stated appearance.
+Citizens receive varied, modest level-appropriate gear rather than the ambient
+bots' best eligible kit.
 On login, the controller spreads citizens across walkable creature-spawn areas
 of the human's current zone, falling back to the configured nearby radius if
 none are usable. The radius setting is a fallback, not a zone-wide bound.
@@ -60,6 +64,12 @@ The owned-world target and local-model intent do not create characters.
 (for example `Aldenash` or `Brinabell`) to the explicit cohort; it is capped at
 500 and should be increased gradually. Names remain stable across restarts so
 characters keep their identity and progress.
+`PLAYERBOT_ZONE_HORDE_PROVISION_COUNT`, `PLAYERBOT_ZONE_NIGHTELF_PROVISION_COUNT`,
+and `PLAYERBOT_ZONE_TAUREN_PROVISION_COUNT` each add up to 100 citizens of that
+race with stable pseudo-random legal class, gender, and appearance choices.
+Configured zone targets can include starting zones on either continent. The
+allocator filters targets by each citizen's faction and seeds new citizens at
+their saved native starting position before normal zone placement takes over.
 The build explicitly enables `-DALLOW_TURTLE_ADDONS=ON` for Turtle client addon
 support, as required for this installation.
 

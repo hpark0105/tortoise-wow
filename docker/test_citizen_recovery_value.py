@@ -1,5 +1,5 @@
-"""TW-BOTS-002 (S1): value-level runner for the citizen retreat progress and
-bounded retry policies. Compiles docker/test_citizen_recovery_value.cpp with any available
+"""TW-BOTS-002 (S1): value-level runner for citizen recovery and group-duty
+policies. Compiles docker/test_citizen_recovery_value.cpp with any available
 C++ compiler (native or WSL fallback) and checks no-start, restart/reset,
 no-movement combat-clear is not success, the five-yard escape, movement
 without combat clearance, the 2-yard stall threshold, the 5-second stall
@@ -7,8 +7,9 @@ check, the 15-second lifetime timeout, successive progress checkpoints,
 huge-diff saturation, nonfinite coordinates, and the retry policy's
 failure escalation, cooldown boundary/huge-diff, deferred state, failed
 endpoint exclusion/alternate/expiry, duplicate refresh, bounded memory
-eviction, invalid coordinates, saturation, reset, and a three-failed-Progress
-escalation simulation. No Docker, no database,
+eviction, invalid coordinates, saturation, reset, a three-failed-Progress
+escalation simulation, follower movement versus stall, and recovery priority
+over voluntary group duty. No Docker, no database,
 no game server needed. Skips when no compiler is available.
 """
 import os
