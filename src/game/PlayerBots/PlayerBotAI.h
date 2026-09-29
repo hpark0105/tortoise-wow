@@ -125,7 +125,7 @@ class PlayerBotAI: public PlayerAI
         uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
         uint64_t _vendorTargetGuid = 0; // PORT-025: resolved vendor within the declared radius (0 = none)
         uint32_t _vendorScanTimer = 0;  // PORT-025: re-scan pace accumulation (ms)
-        uint32_t _citizenRepairScanMs = 0; // citizen repair-vendor proximity scan pace
+        uint32_t _repairScanMs = 0; // persistent-bot repair-vendor proximity scan pace
         uint32_t _vendorFailTimer = 0;  // PORT-025: no-vendor report pace (ms)
         bool _vendorFailReported = false; // PORT-025: first no-vendor report emitted
         bool _pressureReported = false;   // PORT-025: episode status line emitted
@@ -370,7 +370,7 @@ class PlayerBotAI: public PlayerAI
         uint8_t CountFreeSlots() const;
         Companion::Inventory::ItemInfo FillItemInfo(Item* item) const;
         bool VendorPressureStep(uint32 diff);
-        bool CitizenRepairStep(uint32 diff);
+        bool BotRepairStep(uint32 diff);
         void ExecuteVendor(Companion::Intent const& intent, uint32 diff);
         void SellJunkToVendor(Creature* vendor);
         Player* FindOwnerByAccount() const;
@@ -396,12 +396,9 @@ class PlayerBotAI: public PlayerAI
         Creature* FindQuestGiver() const;
         Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
-        // PORT-029 (KAP-558): fixture-seeded item instances may carry
-        // zero durability (born broken) and non-1 counts; the engine
-        // excludes broken items from spell equipment requirements,
-        // which silently strips every weapon/armor-requiring ability.
-        // Repair owned-companion equipment in memory at login.
-        void RepairBrokenEquipment();
+        // Persistent bot gear is restored to full durability at login so
+        // reconnecting citizens and owned companions resume with usable gear.
+        void RepairBotEquipmentAtLogin();
         uint32 SelectOffensiveSpell(Unit* target) const;
         // Independent citizens use this only for a real low-health solo
         // emergency; party healing continues through the declared triage
