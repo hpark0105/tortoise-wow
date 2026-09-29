@@ -2060,7 +2060,33 @@ void PlayerBotAI::RepairBotEquipmentAtLogin()
     if (!me || (!IsZoneCitizen() && !IsOwnedCompanion()))
         return;
 
+    auto countWornCarriedItems = [this]() -> uint32
+    {
+        uint32 worn = 0;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        {
+            Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (item && item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
+                            item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+                ++worn;
+        }
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+            for (uint8 slot = 0; slot < MAX_BAG_SIZE; ++slot)
+            {
+                Item* item = me->GetItemByPos(bag, slot);
+                if (item && item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
+                                item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+                    ++worn;
+            }
+        return worn;
+    };
+
+    uint32 const wornBefore = countWornCarriedItems();
     me->DurabilityRepairAll(false, 0.0f);
+    uint32 const wornAfter = countWornCarriedItems();
+    uint32 const restored = wornBefore > wornAfter ? wornBefore - wornAfter : 0;
+    sLog.outString("[BotLogin][Durability] GUID:%u restored:%u remaining:%u",
+                   me->GetGUIDLow(), restored, wornAfter);
 
     if (!IsOwnedCompanion())
         return;
