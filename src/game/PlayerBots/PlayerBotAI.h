@@ -125,6 +125,7 @@ class PlayerBotAI: public PlayerAI
         uint8 _inventoryPressure = 0; // PORT-024: bounded (<=8) full-bag loot events pending PORT-025 vendor handling
         uint64_t _vendorTargetGuid = 0; // PORT-025: resolved vendor within the declared radius (0 = none)
         uint32_t _vendorScanTimer = 0;  // PORT-025: re-scan pace accumulation (ms)
+        uint32_t _citizenRepairScanMs = 0; // citizen repair-vendor proximity scan pace
         uint32_t _vendorFailTimer = 0;  // PORT-025: no-vendor report pace (ms)
         bool _vendorFailReported = false; // PORT-025: first no-vendor report emitted
         bool _pressureReported = false;   // PORT-025: episode status line emitted
@@ -292,10 +293,9 @@ class PlayerBotAI: public PlayerAI
         float _citizenRetreatStartX = 0.0f, _citizenRetreatStartY = 0.0f;
         float _citizenRetreatEndX = 0.0f, _citizenRetreatEndY = 0.0f;
         uint32 _citizenGroupFollowTimer = 0;
-        // AC-10 R2: accumulated ms the same-map follower has kept a
-        // usable leader out of follow range; at kFollowStallDeadlineMs
-        // the follower leaves the group and resumes solo activity.
-        uint32 _citizenGroupFollowStallMs = 0;
+        // AC-10 R2: accumulated no-progress samples while a usable leader
+        // remains out of follow range. Distance alone does not count as stall.
+        Companion::CitizenRecovery::FollowProgress _citizenGroupFollowProgress;
         uint32 _citizenGroupLeaderLostMs = 0;
         bool TryCitizenDisengage(Unit* threat);
         bool UpdateCitizenRetreat(uint32 diff);
@@ -370,6 +370,7 @@ class PlayerBotAI: public PlayerAI
         uint8_t CountFreeSlots() const;
         Companion::Inventory::ItemInfo FillItemInfo(Item* item) const;
         bool VendorPressureStep(uint32 diff);
+        bool CitizenRepairStep(uint32 diff);
         void ExecuteVendor(Companion::Intent const& intent, uint32 diff);
         void SellJunkToVendor(Creature* vendor);
         Player* FindOwnerByAccount() const;

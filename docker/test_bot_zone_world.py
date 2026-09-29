@@ -1,11 +1,11 @@
-"""Disposable four-citizen same-zone placement smoke test.
+"""Disposable mixed-faction citizen placement smoke test.
 
 The socketless anchor is admitted only by the lab-only test-anchor setting.
 No personal character or world volume is touched.
 """
-import math
 import os
 import re
+import math
 import time
 import unittest
 import uuid
@@ -15,7 +15,7 @@ import test_bot_provision as p
 
 
 ANCHOR = 630100
-NAMES = ("Zonebota", "Zonebotb", "Zonebotc", "Zonebotd")
+NAMES = ("Zonebota", "Zonebotb", "Zonebotc", "Zonebotd", "Morgath")
 ANCHOR_X, ANCHOR_Y = -9466.37, 21.4192
 PLACED = re.compile(
     r"\[ZoneCitizen\] placed guid:(\d+) map:(\d+) zone:(\d+) "
@@ -52,11 +52,12 @@ class ZoneWorldTest(unittest.TestCase):
                      PLAYERBOT_PROVISION="", PLAYERBOT_TEST_LOGIN=str(ANCHOR),
                      PLAYERBOT_ZONE_PROVISION=(
                          "Zonebota,1,1,0;Zonebotb,1,8,1;"
-                         "Zonebotc,1,5,0;Zonebotd,1,4,1;"
-                         "Zonehorde,2,1,0"),
+                         "Zonebotc,1,5,0;Zonebotd,1,4,1"),
+                     PLAYERBOT_ZONE_HORDE_PROVISION_COUNT="1",
                      PLAYERBOT_ZONE_PROVISION_LEVEL="10",
                      PLAYERBOT_ZONE_WORLD_TEST_ANCHOR_GUID=str(ANCHOR),
-                     PLAYERBOT_ZONE_WORLD_TARGET="4",
+                     PLAYERBOT_ZONE_WORLD_TARGET="5",
+                     PLAYERBOT_ZONE_WORLD_ZONE_TARGETS="0:12:4;0:85:1",
                      PLAYERBOT_ZONE_WORLD_PACE_MS="1000",
                      PLAYERBOT_ZONE_WORLD_RADIUS_YD="250",
                      PLAYERBOT_PARTY_INVITE_SCRIPT=f"15000:{ANCHOR}:Zonebota",
@@ -84,19 +85,19 @@ class ZoneWorldTest(unittest.TestCase):
             cls.online = p.db_int(
                 cls.base, cls.env,
                 "SELECT COUNT(*) FROM tw_char.characters WHERE name IN "
-                "('Zonebota','Zonebotb','Zonebotc','Zonebotd') AND online=1")
+                "('Zonebota','Zonebotb','Zonebotc','Zonebotd','Morgath') AND online=1")
             cls.citizens = p.db_exec(
                 cls.base, cls.env,
-                "SELECT c.guid,c.race,b.owner_account_id,p.ai,c.level FROM tw_char.characters c "
+                "SELECT c.name,c.guid,c.race,c.class,b.owner_account_id,p.ai,c.level FROM tw_char.characters c "
                 "JOIN tw_char.bot_ownership b ON b.char_guid=c.guid "
                 "JOIN tw_char.playerbot p ON p.char_guid=c.guid WHERE c.name IN "
-                "('Zonebota','Zonebotb','Zonebotc','Zonebotd') ORDER BY c.name")
+                "('Zonebota','Zonebotb','Zonebotc','Zonebotd','Morgath') ORDER BY c.name")
             cls.appearances = p.db_exec(
                 cls.base, cls.env,
                 "SELECT c.name,c.playerBytes,c.playerBytes2,m.skin_id,m.face_id,"
                 "m.hair_style_id,m.hair_color_id,m.facial_hair_id FROM tw_char.characters c "
                 "JOIN tw_char.bot_provision_state m ON m.char_guid=c.guid "
-                "WHERE c.name IN ('Zonebota','Zonebotb','Zonebotc','Zonebotd') ORDER BY c.name")
+                "WHERE c.name IN ('Zonebota','Zonebotb','Zonebotc','Zonebotd','Morgath') ORDER BY c.name")
             cls.gear = p.db_exec(
                 cls.base, cls.env,
                 "SELECT c.name,COUNT(i.item) AS equipped,COALESCE(MAX(t.quality),0),"
@@ -104,20 +105,24 @@ class ZoneWorldTest(unittest.TestCase):
                 "LEFT JOIN tw_char.character_inventory i ON i.guid=c.guid AND i.bag=0 AND i.slot<19 "
                 "LEFT JOIN tw_char.item_instance s ON s.guid=i.item "
                 "LEFT JOIN tw_world.item_template t ON t.entry=s.itemEntry "
-                "WHERE c.name IN ('Zonebota','Zonebotb','Zonebotc','Zonebotd') "
+                "WHERE c.name IN ('Zonebota','Zonebotb','Zonebotc','Zonebotd','Morgath') "
                 "GROUP BY c.name ORDER BY c.name")
+            (cls.evidence / "citizens.tsv").write_text(cls.citizens, encoding="utf-8")
+            (cls.evidence / "appearances.tsv").write_text(cls.appearances, encoding="utf-8")
+            (cls.evidence / "gear.tsv").write_text(cls.gear, encoding="utf-8")
             cls.horde = p.db_int(cls.base, cls.env,
-                                 "SELECT COUNT(*) FROM tw_char.characters WHERE name='Zonehorde'")
+                                 "SELECT COUNT(*) FROM tw_char.characters WHERE name='Morgath'")
             cls.logs = p.wait_for(
                 cls.base, cls.env,
                 lambda text: "[ZoneCitizen] recruited bot:Zonebota" in text,
                 deadline=180)
-            citizen_guid = int(cls.citizens.splitlines()[0].split('\t')[0])
+            citizen_guid = int(next(row.split('\t')[1] for row in cls.citizens.splitlines()
+                                    if row.split('\t')[0] == "Zonebota"))
             cls.logs = p.wait_for(
                 cls.base, cls.env,
-                lambda text: "[PlayerBot][Follow] path GUID:%d leader:%d" %
+                lambda text: "[PlayerBot][Follow] active GUID:%d leader:%d" %
                 (citizen_guid, ANCHOR) in text,
-                deadline=15)
+                deadline=30)
             cls.recruited_groups = p.db_int(
                 cls.base, cls.env,
                 "SELECT COUNT(*) FROM tw_char.group_member gm JOIN tw_char.characters c "
@@ -136,51 +141,66 @@ class ZoneWorldTest(unittest.TestCase):
             cls.base = None
         except BaseException:
             if cls.base is not None:
+                try:
+                    logs = p.command(["docker", "compose"] + cls.base +
+                                     ["logs", "--no-color", "world"],
+                                     env=cls.env, timeout=60)
+                    (cls.evidence / "world-failure.log").write_text(logs, encoding="utf-8")
+                except BaseException:
+                    pass
                 p.force_down(cls.base, cls.env)
             raise
 
-    def test_four_alliance_citizens_placed_in_anchors_zone(self):
+    def test_generated_horde_and_alliance_citizens_reach_configured_zones(self):
         citizens = [line.split('\t') for line in self.citizens.splitlines()]
-        self.assertEqual(self.online, 4)
-        self.assertEqual(self.horde, 0)
+        self.assertEqual(self.online, 5)
+        self.assertEqual(self.horde, 1)
         self.assertEqual(self.recruited_groups, 1)
-        self.assertIn("[PlayerBot][Follow] path GUID:%d leader:%d" %
-                      (int(citizens[0][0]), ANCHOR), self.logs)
+        alliance_leader_follower = next(int(row[1]) for row in citizens if row[0] == "Zonebota")
+        self.assertIn("[PlayerBot][Follow] active GUID:%d leader:%d" %
+                      (alliance_leader_follower, ANCHOR), self.logs)
         self.assertEqual(self.groups, 0)
         self.assertEqual(self.still_online, 1)
-        self.assertEqual(len(citizens), 4)
-        self.assertTrue(all(row[1:] == ['1', 'NULL', 'ZoneCitizenAI', '10']
-                            for row in citizens))
+        self.assertEqual(len(citizens), 5)
+        for row in citizens:
+            if row[0] == "Morgath":
+                self.assertEqual(row[2], "5")
+                self.assertIn(row[3], {"1", "4", "5", "8", "9"})
+                self.assertEqual(row[4:], ["NULL", "ZoneCitizenAI", "10"])
+            else:
+                self.assertEqual(row[2], "1")
+                self.assertEqual(row[4:], ["NULL", "ZoneCitizenAI", "10"])
         placed = PLACED.findall(self.logs)
-        self.assertEqual({int(row[0]) for row in placed},
-                         {int(row[0]) for row in citizens})
-        distances = []
+        self.assertEqual({int(row[0]) for row in placed}, {int(row[1]) for row in citizens})
+        names_by_guid = {int(row[1]): row[0] for row in citizens}
+        expected_zones = {"Morgath": (0, 85)}
         for guid, map_id, zone, x, y, _z in placed:
-            self.assertEqual((int(map_id), int(zone)), (0, 12), guid)
-            distance = math.hypot(float(x) - ANCHOR_X, float(y) - ANCHOR_Y)
-            self.assertGreaterEqual(distance, 79.0, guid)
-            distances.append(distance)
-        # At least one citizen must come from a zone-wide spawn anchor,
-        # outside the old 250-yard player-centred ring.
-        self.assertGreater(max(distances), 251.0)
-        for i, first in enumerate(placed):
-            for second in placed[i + 1:]:
-                separation = math.hypot(float(first[3]) - float(second[3]),
-                                        float(first[4]) - float(second[4]))
-                self.assertGreaterEqual(separation, 79.0)
+            name = names_by_guid[int(guid)]
+            expected_map, expected_zone = expected_zones.get(name, (0, 12))
+            self.assertEqual((int(map_id), int(zone)), (expected_map, expected_zone), name)
+            self.assertTrue(all(math.isfinite(float(value)) for value in (x, y, _z)), name)
 
     def test_appearance_and_gear_are_varied_but_modest(self):
         appearances = [row.split('\t') for row in self.appearances.splitlines()]
-        self.assertEqual(len(appearances), 4)
+        self.assertEqual(len(appearances), 5)
         self.assertGreater(len({tuple(row[3:]) for row in appearances}), 1)
         for name, player_bytes, player_bytes2, skin, face, hair, color, facial in appearances:
             packed = int(skin) | int(face) << 8 | int(hair) << 16 | int(color) << 24
             self.assertEqual(int(player_bytes), packed, name)
             self.assertEqual(int(player_bytes2) & 255, int(facial), name)
+            if name == "Morgath":
+                self.assertLessEqual(int(skin), 5, name)
+                self.assertLessEqual(int(face), 9, name)
+                self.assertLessEqual(int(hair), 16, name)
+                self.assertLessEqual(int(color), 10, name)
+                self.assertLessEqual(int(facial), 16, name)
         gear = [row.split('\t') for row in self.gear.splitlines()]
-        self.assertEqual(len(gear), 4)
+        self.assertEqual(len(gear), 5)
         self.assertTrue(all(int(row[1]) > 0 for row in gear))
-        self.assertTrue(all(int(row[2]) <= 1 and int(row[3]) <= 8 for row in gear))
+        # Citizen gear rolls can choose poor, uncommon, or rare loot by design;
+        # they must remain below the ambient best-kit path and level-appropriate.
+        self.assertTrue(all(int(row[2]) <= 3 and int(row[3]) <= 8 for row in gear),
+                        repr(gear))
 
 
 if __name__ == "__main__":

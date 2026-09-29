@@ -281,6 +281,9 @@ class PlayerBotMgr
         void UpdateOwnedWorldPopulation();
         uint32 confZoneWorldTarget = 0; // opt-in independent population count
         uint32 confZoneProvisionCount = 0; // deterministic generated citizens
+        uint32 confZoneHordeProvisionCount = 0; // deterministic generated Forsaken citizens
+        uint32 confZoneNightElfProvisionCount = 0; // deterministic generated Night Elf citizens
+        uint32 confZoneTaurenProvisionCount = 0; // deterministic generated Tauren citizens
         uint32 confZoneWorldPaceMs = 5000;
         uint32 confZoneWorldLoginBatch = 4; // bounded citizens queued per pace interval
         float confZoneWorldRadiusYd = 250.0f;
@@ -309,7 +312,7 @@ class PlayerBotMgr
         uint32 confUpdateDiff;
         bool confDebug;
         std::string confProvisionName; // TW-010: stable identity (name) provisioned at load
-        std::string confZoneProvisionName; // Alliance-only independent citizens
+        std::string confZoneProvisionName; // independent citizens from any playable faction
         uint32 confOwnerAccount; // KAP-558 review: human account bound to new provisions (0 = unowned)
         bool confMirrorMarkerBackfill; // KAP-558 review: one-shot legacy mirror-marker backfill at login (default on)
         std::string confTestLoginGuids; // R3 probe: comma-separated guids temp-logged-in at load (lab only)

@@ -292,6 +292,40 @@ private:
     float m_dist;
 };
 
+// Citizens repair worn gear only when a repair NPC is already within normal
+// interaction range. The repair executor re-checks the normal NPC interaction
+// guards before charging the citizen the standard repair cost.
+class BotRepairVendorSearcher
+{
+public:
+    explicit BotRepairVendorSearcher(Unit const* source)
+        : me(source), m_best(nullptr), m_dist(0.0f) {}
+
+    bool operator()(Creature* u)
+    {
+        if (u == me || !u->IsAlive() || !u->IsInWorld() ||
+            !(u->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_REPAIR) ||
+            u->IsInEvadeMode())
+            return false;
+        float const d = me->GetDistance(u);
+        if (!m_best || d < m_dist ||
+            (d == m_dist && u->GetGUIDLow() < m_best->GetGUIDLow()))
+        {
+            m_best = u;
+            m_dist = d;
+        }
+        return true;
+    }
+
+    Creature* Best() const { return m_best; }
+
+private:
+    BotRepairVendorSearcher(BotRepairVendorSearcher const&);
+    Unit const* me;
+    Creature* m_best;
+    float m_dist;
+};
+
 // Citizens seek ordinary, untapped, level-appropriate creatures only. The
 // nearest eligible target wins so a patrol never pulls a distant pack or a
 // mob already engaged by a player. This scan is paced by the AI below.
@@ -439,7 +473,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         // AC-10 R5: a teleport is a position discontinuity; the
         // hunting-group episode age does not survive it.
         _citizenGroupLeaderLostMs = 0;
-        _citizenGroupFollowStallMs = 0;
+        _citizenGroupFollowProgress.Reset();
     }
 
     if (me->IsBeingTeleportedNear())
@@ -484,7 +518,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
             (_citizenRetreatMap != 0 && me->GetMapId() != _citizenRetreatMap))
         {
             _citizenGroupLeaderLostMs = 0;
-            _citizenGroupFollowStallMs = 0;
+            _citizenGroupFollowProgress.Reset();
         }
     }
     else if (!_citizenRetreat.Active() && !me->IsInCombat() && !me->GetVictim() &&
@@ -593,6 +627,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (botEntry && botEntry->persistent && autonomousGroup &&
         !_following && !_held && !_assistTargetGuid &&
         UpdateCitizenGroupActivity(diff))
+        return;
+    if (CitizenRepairStep(diff))
         return;
     if (botEntry && botEntry->persistent && (!citizenGroup || autonomousGroupLeader) &&
         !_following && !_held && !_assistTargetGuid &&
@@ -1280,7 +1316,7 @@ void PlayerBotAI::RememberCombatTarget(Unit* unit)
 void PlayerBotAI::ClearCitizenGroupState()
 {
     _citizenGroupLeaderLostMs = 0;
-    _citizenGroupFollowStallMs = 0;
+    _citizenGroupFollowProgress.Reset();
 }
 
 bool PlayerBotAI::CitizenCombatReady() const
@@ -1336,7 +1372,7 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         // AC-10 R5: a new group identity (joined, left, disbanded)
         // starts a fresh episode; no timer survives the change.
         _citizenGroupLeaderLostMs = 0;
-        _citizenGroupFollowStallMs = 0;
+        _citizenGroupFollowProgress.Reset();
         return false;
     }
 
@@ -1383,7 +1419,7 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
                     me->GetMotionMaster()->MoveIdle();
                 }
                 _citizenGroupLeaderLostMs = 0;
-                _citizenGroupFollowStallMs = 0;
+                _citizenGroupFollowProgress.Reset();
                 group->RemoveMember(me->GetObjectGuid(), GROUP_LEAVE);
                 return true;
             }
@@ -1394,7 +1430,7 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
                            Companion::CitizenRecovery::kLeaderLostDeadlineMs);
             me->Say("I am resuming my own hunt without the group.", LANG_UNIVERSAL);
             _citizenGroupLeaderLostMs = 0;
-            _citizenGroupFollowStallMs = 0;
+            _citizenGroupFollowProgress.Reset();
             group->Disband(true, me->GetObjectGuid());
             return true;
         case Companion::CitizenRecovery::LeaderLoss::Wait:
@@ -1410,7 +1446,6 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         return true;
     }
     _citizenGroupLeaderLostMs = 0;
-    _citizenGroupFollowStallMs = 0;
 
     bool levelSpread = false;
     for (auto const& slot : group->GetMemberSlots())
@@ -1430,6 +1465,14 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         group->Disband(true, group->GetLeaderGuid());
         return true;
     }
+
+    // Recovery has priority over all voluntary group duty. Do not follow a
+    // leader or join its target while resting, retreat-deferred, or waiting
+    // on corpse loot. If already under attack, fall through so self-defense
+    // and retreat remain available.
+    if (Companion::CitizenRecovery::ShouldPauseGroupDuty(
+            CitizenCombatReady(), me->IsInCombat() || me->GetVictim() != nullptr))
+        return true;
 
     if (leader != me)
     {
@@ -1451,23 +1494,21 @@ bool PlayerBotAI::UpdateCitizenGroupActivity(uint32 diff)
         // distance to a usable leader (blocked path, lagging member)
         // gets a bounded progress deadline; on expiry it leaves the
         // group and resumes solo activity instead of orbiting forever.
+        bool followStalled = false;
         if (distance <= 6.0f)
-            _citizenGroupFollowStallMs = 0;
-        else if (diff >= Companion::CitizenRecovery::kFollowStallDeadlineMs ||
-                 _citizenGroupFollowStallMs >=
-                     Companion::CitizenRecovery::kFollowStallDeadlineMs - diff)
-            _citizenGroupFollowStallMs = Companion::CitizenRecovery::kFollowStallDeadlineMs;
+            _citizenGroupFollowProgress.Reset();
         else
-            _citizenGroupFollowStallMs += diff;
-        if (_citizenGroupFollowStallMs >= Companion::CitizenRecovery::kFollowStallDeadlineMs)
+            followStalled = _citizenGroupFollowProgress.Update(
+                diff, me->GetPositionX(), me->GetPositionY());
+        if (followStalled)
         {
             sLog.outString("[ZoneCitizen][HuntingGroup] leave follow-stall group:%u member:%u leader-guid:%u distance:%.1f stall-ms:%u deadline-ms:%u",
                            group->GetId(), me->GetGUIDLow(),
                            group->GetLeaderGuid().GetCounter(), distance,
-                           _citizenGroupFollowStallMs,
-                           Companion::CitizenRecovery::kFollowStallDeadlineMs);
+                           _citizenGroupFollowProgress.StalledMs(),
+                            Companion::CitizenRecovery::kFollowStallDeadlineMs);
             me->Say("My hunting party is out of reach. I am resuming my own hunt.", LANG_UNIVERSAL);
-            _citizenGroupFollowStallMs = 0;
+            _citizenGroupFollowProgress.Reset();
             _citizenGroupLeaderLostMs = 0;
             if (!MotionIdle())
             {
@@ -6253,6 +6294,60 @@ bool PlayerBotAI::VendorPressureStep(uint32 diff)
         _inventoryPressure = 0; // episode resolved: stored loot is acceptable again
     }
     return pressure;
+}
+
+bool PlayerBotAI::CitizenRepairStep(uint32 diff)
+{
+    if (!IsZoneCitizen() || !me || !me->IsAlive() || !me->GetMap() ||
+        me->IsInCombat() || me->GetVictim() || _following || _held ||
+        _assistTargetGuid || me->IsNonMeleeSpellCasted(true))
+    {
+        _citizenRepairScanMs = 0;
+        return false;
+    }
+
+    static uint32 const kRepairScanPaceMs = 5000;
+    if (_citizenRepairScanMs < kRepairScanPaceMs)
+    {
+        _citizenRepairScanMs += diff;
+        if (_citizenRepairScanMs < kRepairScanPaceMs)
+            return false;
+    }
+    _citizenRepairScanMs = 0;
+
+    bool damaged = false;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (item && item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
+                        item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+        {
+            damaged = true;
+            break;
+        }
+    }
+    if (!damaged)
+        return false;
+
+    BotRepairVendorSearcher probe(me);
+    Creature* repairer = nullptr;
+    MaNGOS::CreatureLastSearcher<BotRepairVendorSearcher> searcher(repairer, probe);
+    Cell::VisitGridObjects(me, searcher, INTERACTION_DISTANCE);
+    repairer = probe.Best();
+    if (!repairer)
+        return false;
+
+    Creature* npc = me->GetNPCIfCanInteractWith(
+        repairer->GetObjectGuid(), UNIT_NPC_FLAG_REPAIR);
+    if (!npc)
+        return false;
+
+    uint32 const repairedCost = me->DurabilityRepairAll(
+        true, me->GetReputationPriceDiscount(npc));
+    if (sPlayerBotMgr.IsDebugEnabled())
+        sLog.outString("[CitizenRepair] GUID:%u vendor:%u cost:%u",
+                       me->GetGUIDLow(), npc->GetGUIDLow(), repairedCost);
+    return repairedCost != 0;
 }
 
 void PlayerBotAI::ExecuteVendor(Companion::Intent const& intent, uint32 diff)

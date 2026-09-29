@@ -26,6 +26,8 @@ using Companion::CitizenRecovery::Progress;
 using Companion::CitizenRecovery::EvaluateLeaderLoss;
 using Companion::CitizenRecovery::LeaderLoss;
 using Companion::CitizenRecovery::RetryPolicy;
+using Companion::CitizenRecovery::FollowProgress;
+using Companion::CitizenRecovery::ShouldPauseGroupDuty;
 using Companion::CitizenRecovery::ShouldRetreat;
 
 void TestRetreatHealthThreshold()
@@ -541,6 +543,43 @@ void TestFollowStallDeadlineBounds()
     Check(kFollowStallDeadlineMs < 600000u,
           "follow-stall: deadline stays within ten minutes");
 }
+
+void TestFollowProgressDistinguishesMovementFromStall()
+{
+    FollowProgress moving;
+    moving.Begin(0.0f, 0.0f);
+    float x = 0.0f;
+    for (std::uint32_t i = 0; i <
+         Companion::CitizenRecovery::kFollowStallDeadlineMs /
+             Companion::CitizenRecovery::kFollowProgressSampleMs; ++i)
+    {
+        x += 3.0f;
+        Check(!moving.Update(Companion::CitizenRecovery::kFollowProgressSampleMs,
+                             x, 0.0f),
+              "follow-progress: steady movement beyond the deadline is not stalled");
+    }
+    Check(moving.Active(), "follow-progress: moving tracker remains active");
+
+    FollowProgress blocked;
+    blocked.Begin(0.0f, 0.0f);
+    std::uint32_t const sampleMs = Companion::CitizenRecovery::kFollowProgressSampleMs;
+    std::uint32_t const samples = Companion::CitizenRecovery::kFollowStallDeadlineMs / sampleMs;
+    for (std::uint32_t i = 1; i < samples; ++i)
+        Check(!blocked.Update(sampleMs, 0.0f, 0.0f),
+              "follow-progress: blocked follower waits for the bounded deadline");
+    Check(blocked.Update(sampleMs, 0.0f, 0.0f),
+          "follow-progress: blocked follower stalls at the deadline");
+}
+
+void TestRecoveryPausesVoluntaryGroupDuty()
+{
+    Check(ShouldPauseGroupDuty(false, false),
+          "group-recovery: unready member pauses follow and assistance");
+    Check(!ShouldPauseGroupDuty(false, true),
+          "group-recovery: self-defense remains available while unready");
+    Check(!ShouldPauseGroupDuty(true, false),
+          "group-recovery: ready member can perform group duty");
+}
 } // namespace
 
 int main()
@@ -573,6 +612,8 @@ int main()
     TestLeaderLossThreatenedFallsThrough();
     TestLeaderLossWaitAndDisband();
     TestFollowStallDeadlineBounds();
+    TestFollowProgressDistinguishesMovementFromStall();
+    TestRecoveryPausesVoluntaryGroupDuty();
 
     if (g_failures != 0)
     {
