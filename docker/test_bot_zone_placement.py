@@ -26,6 +26,27 @@ class ZonePlacementConfigurationTest(unittest.TestCase):
         self.assertIn("SelectCitizenProgressionDestination", manager)
         self.assertIn("zoneWorldSafetyExcludeZone", manager)
 
+    def test_blocked_safety_relocation_cannot_starve_normal_population_fill(self):
+        manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
+            encoding="utf-8")
+        manager = manager.replace("\r\n", "\n")
+        self.assertIn("if (safetyRelocationWaiting)\n        collectCandidates(true)", manager)
+        self.assertIn("collectCandidates(false)", manager)
+        self.assertIn("e->zoneWorldSafetyRelocation != safetyPass", manager)
+        self.assertIn("no_suitable_zone:%u", manager)
+
+    def test_population_fallback_keeps_a_minimum_productive_and_level_safety_gate(self):
+        manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
+            encoding="utf-8")
+        header = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.h").read_text(
+            encoding="utf-8")
+        self.assertIn("CitizenZoneFallbackMinimumProductiveSharePercent = 5", header)
+        self.assertIn("CitizenZoneFallbackMaximumOverlevelSharePercent = 5", header)
+        self.assertIn("candidateLevel > citizenLevel + 3", manager)
+        self.assertIn("share <= currentProductiveShare", manager)
+        self.assertIn("safeWeight * 100 < totalWeight *", manager)
+        self.assertIn("e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;", manager)
+
 
 class CitizenProgressionTest(unittest.TestCase):
     @classmethod
