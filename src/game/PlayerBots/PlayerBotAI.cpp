@@ -292,9 +292,9 @@ private:
     float m_dist;
 };
 
-// Citizens repair worn gear only when a repair NPC is already within normal
-// interaction range. The repair executor re-checks the normal NPC interaction
-// guards before charging the citizen the standard repair cost.
+// Persistent bots repair worn gear only when a repair NPC is already within
+// normal interaction range. The repair executor re-checks the normal NPC
+// interaction guards before charging the bot the standard repair cost.
 class BotRepairVendorSearcher
 {
 public:
@@ -628,7 +628,7 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         !_following && !_held && !_assistTargetGuid &&
         UpdateCitizenGroupActivity(diff))
         return;
-    if (CitizenRepairStep(diff))
+    if (BotRepairStep(diff))
         return;
     if (botEntry && botEntry->persistent && (!citizenGroup || autonomousGroupLeader) &&
         !_following && !_held && !_assistTargetGuid &&
@@ -1890,10 +1890,10 @@ void PlayerBotAI::OnPlayerLogin()
         }
     }
     RefreshCitizenProgression(true);
-    RepairBrokenEquipment();
     AutoLearnSpellsForLevel();
     AutoAssignCitizenTalents();
     AutoEquipForLevel();
+    RepairBotEquipmentAtLogin();
     InitQuestState();
     BackfillMirrorQuestMarkers(); // KAP-558 review: legacy in-flight mirrors
     // A login is one authoritative observation of the citizen's current
@@ -2049,19 +2049,20 @@ void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
     }
 }
 
-// PORT-029 (KAP-558): repair broken equipment for owned companions
-// at login. Fixture/lab-seeded item instances (character_inventory /
-// item_instance rows written directly by tests) may carry zero
-// durability and non-1 counts. IsBroken() items are excluded from
-// Player::HasItemFitToSpellReqirements, so a "born broken" weapon or
-// shield rejects every spell with an equipment requirement
-// (SPELL_FAILED_EQUIPPED_ITEM_CLASS) and leaves the rotation on
-// ordinary attacks. Durability is restored to the prototype maximum;
-// non-stackable counts are normalized to 1. Idempotent; the next
-// autosave persists the corrected values.
-void PlayerBotAI::RepairBrokenEquipment()
+// Restore carried gear at login for persistent citizens and owned
+// companions. Use the core repair path so equipped stats and item dirty
+// state are updated correctly, while `cost=false` makes this a free
+// reconnect service. Run after auto-equipping so the whole carried loadout
+// starts at full durability. Preserve the fixture count correction that
+// prevents invalid stack counts on owned-companion equipment.
+void PlayerBotAI::RepairBotEquipmentAtLogin()
 {
-    if (!me || !IsOwnedCompanion())
+    if (!me || (!IsZoneCitizen() && !IsOwnedCompanion()))
+        return;
+
+    me->DurabilityRepairAll(false, 0.0f);
+
+    if (!IsOwnedCompanion())
         return;
 
     for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
@@ -2072,8 +2073,6 @@ void PlayerBotAI::RepairBrokenEquipment()
         ItemPrototype const* proto = item->GetProto();
         if (!proto)
             continue;
-        if (item->IsBroken())
-            item->SetUInt32Value(ITEM_FIELD_DURABILITY, proto->MaxDurability);
         if (proto->Stackable <= 1 && item->GetCount() != 1)
             item->SetCount(1);
     }
@@ -6296,34 +6295,36 @@ bool PlayerBotAI::VendorPressureStep(uint32 diff)
     return pressure;
 }
 
-bool PlayerBotAI::CitizenRepairStep(uint32 diff)
+bool PlayerBotAI::BotRepairStep(uint32 diff)
 {
-    if (!IsZoneCitizen() || !me || !me->IsAlive() || !me->GetMap() ||
-        me->IsInCombat() || me->GetVictim() || _following || _held ||
+    if ((!IsZoneCitizen() && !IsOwnedCompanion()) || !me ||
+        !me->IsAlive() || !me->GetMap() || me->IsInCombat() ||
+        me->GetVictim() || _held ||
         _assistTargetGuid || me->IsNonMeleeSpellCasted(true))
     {
-        _citizenRepairScanMs = 0;
+        _repairScanMs = 0;
         return false;
     }
 
     static uint32 const kRepairScanPaceMs = 5000;
-    if (_citizenRepairScanMs < kRepairScanPaceMs)
+    if (_repairScanMs < kRepairScanPaceMs)
     {
-        _citizenRepairScanMs += diff;
-        if (_citizenRepairScanMs < kRepairScanPaceMs)
+        _repairScanMs += diff;
+        if (_repairScanMs < kRepairScanPaceMs)
             return false;
     }
-    _citizenRepairScanMs = 0;
+    _repairScanMs = 0;
 
     bool damaged = false;
+    uint32 durabilityBefore[EQUIPMENT_SLOT_END] = {};
     for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
     {
         Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-        if (item && item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
-                        item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+        if (item)
         {
-            damaged = true;
-            break;
+            durabilityBefore[slot] = item->GetUInt32Value(ITEM_FIELD_DURABILITY);
+            if (durabilityBefore[slot] < item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+                damaged = true;
         }
     }
     if (!damaged)
@@ -6344,10 +6345,23 @@ bool PlayerBotAI::CitizenRepairStep(uint32 diff)
 
     uint32 const repairedCost = me->DurabilityRepairAll(
         true, me->GetReputationPriceDiscount(npc));
+    bool repairedEquipment = false;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (item && item->GetUInt32Value(ITEM_FIELD_DURABILITY) > durabilityBefore[slot])
+        {
+            repairedEquipment = true;
+            break;
+        }
+    }
+    if (repairedEquipment)
+        me->Say("I've got my gear repaired. Let's keep moving.", LANG_UNIVERSAL);
     if (sPlayerBotMgr.IsDebugEnabled())
-        sLog.outString("[CitizenRepair] GUID:%u vendor:%u cost:%u",
-                       me->GetGUIDLow(), npc->GetGUIDLow(), repairedCost);
-    return repairedCost != 0;
+        sLog.outString("[BotRepair] GUID:%u vendor:%u cost:%u repaired:%u",
+                       me->GetGUIDLow(), npc->GetGUIDLow(), repairedCost,
+                       repairedEquipment ? 1 : 0);
+    return repairedEquipment;
 }
 
 void PlayerBotAI::ExecuteVendor(Companion::Intent const& intent, uint32 diff)
@@ -7357,6 +7371,12 @@ void PlayerBotAI::ExecuteCompanion(Companion::Intent const& intent, uint32 diff)
     }
     if (intent.action == Companion::Action::Follow)
     {
+        // Repairing is an opportunistic service stop. Keep the follow order
+        // intact, pause its motion for this tick only when a repair completes,
+        // and resume following on the next update. Combat, assist, defend,
+        // loot, hold and bag-pressure intents retain their normal priority.
+        if (BotRepairStep(diff))
+            return;
         UpdateFollow(diff);
         return;
     }
