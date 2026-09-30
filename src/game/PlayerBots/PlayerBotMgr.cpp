@@ -2255,6 +2255,71 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         {
             ++noSuitableZone;
             e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
+            if (e->zoneWorldSafetyRelocation)
+            {
+                sLog.outString("[ZoneCitizen][Allocator] no-destination guid:%u level:%u faction:%u current-map:%u current-zone:%u excluded-map:%u excluded-zone:%u current-productive:%u plans:%u",
+                               (uint32)e->playerGUID, citizenLevel, (uint32)citizenTeam,
+                               currentMap, currentZone, e->zoneWorldSafetyExcludeMap,
+                               e->zoneWorldSafetyExcludeZone, currentProductiveShare,
+                               (uint32)plans.size());
+                // Emit one bounded line per map/zone candidate only on the
+                // once-per-minute failed-relocation path. This makes the
+                // individual safety rejection visible without adding work or
+                // log volume to successful population fills.
+                for (ZonePlan const& candidatePlan : plans)
+                {
+                    uint32 const candidateLevel = GetCitizenZoneDifficulty(
+                        candidatePlan.key.first, candidatePlan.key.second);
+                    uint32 const productiveShare = GetCitizenZoneProductiveSharePercent(
+                        candidatePlan.key.first, candidatePlan.key.second,
+                        productiveMinimum, citizenLevel);
+                    char const* reason = "eligible-but-not-selected";
+                    if (candidatePlan.key.first == e->zoneWorldSafetyExcludeMap &&
+                        candidatePlan.key.second == e->zoneWorldSafetyExcludeZone)
+                        reason = "excluded-danger-zone";
+                    else if (!factionAllowed(candidatePlan.key.second))
+                        reason = "faction-or-area-rejected";
+                    else if (!candidateLevel)
+                        reason = "no-verified-creature-profile";
+                    else if (productiveShare >= CitizenZoneMinimumProductiveSharePercent)
+                        reason = "eligible-normal-but-not-selected";
+                    else if (candidateLevel > citizenLevel + 3)
+                        reason = "fallback-level-too-high";
+                    else if (productiveShare < CitizenZoneFallbackMinimumProductiveSharePercent)
+                        reason = "fallback-productive-share-too-low";
+                    else if (needsProgressionMove && productiveShare <= currentProductiveShare)
+                        reason = "fallback-no-progression-improvement";
+                    else
+                    {
+                        std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty>::const_iterator const profile =
+                            m_zoneSpawnDifficulty.find(candidatePlan.key);
+                        if (profile == m_zoneSpawnDifficulty.end() || !profile->second.samples)
+                            reason = "fallback-no-creature-samples";
+                        else
+                        {
+                            uint64 totalWeight = 0;
+                            uint64 safeWeight = 0;
+                            for (uint32 level = 1; level <= 60; ++level)
+                            {
+                                totalWeight += profile->second.levelWeight[level];
+                                if (level <= citizenLevel + 3)
+                                    safeWeight += profile->second.levelWeight[level];
+                            }
+                            if (!totalWeight)
+                                reason = "fallback-no-level-weight";
+                            else if (safeWeight * 100 < totalWeight *
+                                     (100 - CitizenZoneFallbackMaximumOverlevelSharePercent))
+                                reason = "fallback-overlevel-mix";
+                            else
+                                reason = "eligible-fallback-but-not-selected";
+                        }
+                    }
+                    sLog.outString("[ZoneCitizen][Allocator] destination-rejected guid:%u map:%u zone:%u level:%u productive-share:%u reason:%s",
+                                   (uint32)e->playerGUID, candidatePlan.key.first,
+                                   candidatePlan.key.second, candidateLevel,
+                                   productiveShare, reason);
+                }
+            }
             continue;
         }
         std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>>::const_iterator targetAnchorsIt =
