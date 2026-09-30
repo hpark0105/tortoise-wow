@@ -1555,19 +1555,27 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         citizenAI->GetSafetyRelocationExclusion(e->zoneWorldSafetyExcludeMap,
                                                 e->zoneWorldSafetyExcludeZone);
         if (!e->zoneWorldSafetyExcludeMap || !e->zoneWorldSafetyExcludeZone)
+        {
+            sLog.outString("[ZoneCitizen][Survival] relocation-deferred guid:%u reason:missing-exclusion",
+                           (uint32)e->playerGUID);
             continue;
+        }
         e->zoneWorldSafetyRelocation = true;
-        citizenAI->AcknowledgeSafetyRelocation();
         // A fatal hit normally logs a solo citizen out before this periodic
         // controller runs.  Preserve the request in either state; only a
         // still-live bot needs an explicit logout.
         if (e->state == PB_STATE_ONLINE)
         {
             if (!DeleteBot((uint32)e->playerGUID))
+            {
+                sLog.outString("[ZoneCitizen][Survival] relocation-deferred guid:%u reason:logout-failed state:%u",
+                               (uint32)e->playerGUID, uint32(e->state));
                 continue;
+            }
             if (active)
                 --active;
         }
+        citizenAI->AcknowledgeSafetyRelocation();
         ++safetyQueued;
         sLog.outString("[ZoneCitizen][Survival] relocation queued guid:%u exclude_map:%u exclude_zone:%u batch:%u/%u",
                        (uint32)e->playerGUID, e->zoneWorldSafetyExcludeMap,
@@ -1612,6 +1620,7 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         uint32 const seedLimit = std::min<uint32>(confZoneWorldLoginBatch,
                                                   confZoneWorldTarget - active);
         uint32 seeded = 0;
+        std::vector<std::pair<float, float>> seededPositions;
         for (auto const& target : confZoneWorldZoneTargets)
         {
             uint32 inZone = countInZone(target.first);
@@ -1663,6 +1672,86 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                     if (area && ((area->Team == AREATEAM_ALLY && citizenTeam != ALLIANCE) ||
                                  (area->Team == AREATEAM_HORDE && citizenTeam != HORDE)))
                         continue;
+
+                    // Configured-zone startup is the common restart path. Use
+                    // the same faction-neutral peer placement as ordinary
+                    // population logins, while retaining the saved position
+                    // whenever no safe walkable cluster point is available.
+                    uint32 clusterPeerGuid = 0;
+                    for (auto const& playerItem : sObjectAccessor.GetPlayers())
+                    {
+                        Player* peer = playerItem.second;
+                        PlayerBotAI* peerAI = peer
+                            ? dynamic_cast<PlayerBotAI*>(peer->AI()) : nullptr;
+                        if (!peer || !peer->IsInWorld() || !peer->IsAlive() ||
+                            peer->GetMapId() != spawnMap || peer->GetZoneId() != spawnZone ||
+                            peer->GetTeam() != citizenTeam || peer->GetGroup() ||
+                            peer->IsInCombat() || peer->GetVictim() || !peerAI ||
+                            !peerAI->IsZoneCitizen() || !peerAI->botEntry ||
+                            !peerAI->botEntry->persistent || peerAI->botEntry->ownerAccountId ||
+                            peerAI->botEntry->recruiterAccountId ||
+                            std::abs(int(peer->GetLevel()) - int(data->uiLevel)) > 3 ||
+                            !peerAI->CitizenCombatReady())
+                            continue;
+
+                        Map* peerMap = peer->GetMap();
+                        if (!peerMap)
+                            continue;
+                        for (uint32 attempt = 0; attempt < 24; ++attempt)
+                        {
+                            float candidateX = peer->GetPositionX();
+                            float candidateY = peer->GetPositionY();
+                            float candidateZ = peer->GetPositionZ();
+                            if (!peerMap->GetWalkRandomPosition(nullptr, candidateX, candidateY,
+                                                               candidateZ, 25.0f))
+                                continue;
+                            float const peerDx = candidateX - peer->GetPositionX();
+                            float const peerDy = candidateY - peer->GetPositionY();
+                            float const peerDistanceSq = peerDx * peerDx + peerDy * peerDy;
+                            if (peerDistanceSq < 8.0f * 8.0f || peerDistanceSq > 30.0f * 30.0f ||
+                                peerMap->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) !=
+                                    spawnZone)
+                                continue;
+
+                            bool safeSpacing = true;
+                            for (auto const& otherItem : sObjectAccessor.GetPlayers())
+                            {
+                                Player const* other = otherItem.second;
+                                if (!other || other == peer || !other->IsInWorld() ||
+                                    other->GetMapId() != spawnMap || other->GetZoneId() != spawnZone)
+                                    continue;
+                                float const dx = candidateX - other->GetPositionX();
+                                float const dy = candidateY - other->GetPositionY();
+                                if (dx * dx + dy * dy < 80.0f * 80.0f)
+                                {
+                                    safeSpacing = false;
+                                    break;
+                                }
+                            }
+                            if (!safeSpacing)
+                                continue;
+                            for (auto const& queuedPosition : seededPositions)
+                            {
+                                float const dx = candidateX - queuedPosition.first;
+                                float const dy = candidateY - queuedPosition.second;
+                                if (dx * dx + dy * dy < 80.0f * 80.0f)
+                                {
+                                    safeSpacing = false;
+                                    break;
+                                }
+                            }
+                            if (!safeSpacing)
+                                continue;
+
+                            spawnX = candidateX;
+                            spawnY = candidateY;
+                            spawnZ = candidateZ;
+                            clusterPeerGuid = peer->GetGUIDLow();
+                            break;
+                        }
+                        if (clusterPeerGuid)
+                            break;
+                    }
                     citizen->ai->PrepareZoneSpawn(spawnMap, spawnZone, citizenTeam,
                                                   spawnX, spawnY, spawnZ);
                     m_zoneWorldCursor = (uint32)citizen->playerGUID;
@@ -1675,9 +1764,11 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                     ++inZone;
                     ++seeded;
                     ++active;
+                    seededPositions.emplace_back(spawnX, spawnY);
                     queued = true;
-                    sLog.outString("[ZoneCitizen] start-zone seed queued guid:%u map:%u zone:%u team:%u",
-                                   (uint32)citizen->playerGUID, spawnMap, spawnZone, citizenTeam);
+                    sLog.outString("[ZoneCitizen] start-zone seed queued guid:%u map:%u zone:%u team:%u cluster-peer:%u",
+                                   (uint32)citizen->playerGUID, spawnMap, spawnZone, citizenTeam,
+                                   clusterPeerGuid);
                     break;
                 }
                 if (!queued || active >= confZoneWorldTarget)
@@ -2154,11 +2245,98 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         float x = 0.0f, y = 0.0f, z = 0.0f;
         bool placed = false;
         float bestSpacing = -1.0f;
+        uint32 clusterPeerGuid = 0;
+        // Give citizens a safe nearby peer when one is available.
+        // Formation still happens through the normal active-hunt path and
+        // retains its 30-yard/readiness gates; this only changes login
+        // placement for future spawns.
+        {
+            Player* clusterPeer = nullptr;
+            for (auto const& playerItem : sObjectAccessor.GetPlayers())
+            {
+                Player* candidate = playerItem.second;
+                PlayerBotAI* ai = candidate
+                    ? dynamic_cast<PlayerBotAI*>(candidate->AI()) : nullptr;
+                if (!candidate || !candidate->IsInWorld() || !candidate->IsAlive() ||
+                    candidate->GetMapId() != targetPlan->key.first ||
+                    candidate->GetZoneId() != targetPlan->key.second ||
+                    candidate->GetTeam() != citizenTeam || candidate->GetGroup() ||
+                    candidate->IsInCombat() || candidate->GetVictim() || !ai ||
+                    !ai->IsZoneCitizen() || !ai->botEntry || !ai->botEntry->persistent ||
+                    ai->botEntry->ownerAccountId || ai->botEntry->recruiterAccountId ||
+                    std::abs(int(candidate->GetLevel()) - int(citizenLevel)) > 3 ||
+                    !ai->CitizenCombatReady())
+                    continue;
+                clusterPeer = candidate;
+                break;
+            }
+
+            if (clusterPeer)
+            {
+                // Try walkable points around the peer first. Keep the normal
+                // 80-yard spacing from every other player and queued spawn;
+                // only this intended same-level peer is exempt.
+                for (uint32 attempt = 0; attempt < 24; ++attempt)
+                {
+                    float candidateX = clusterPeer->GetPositionX();
+                    float candidateY = clusterPeer->GetPositionY();
+                    float candidateZ = clusterPeer->GetPositionZ();
+                    if (!map->GetWalkRandomPosition(nullptr, candidateX, candidateY,
+                                                    candidateZ, 25.0f))
+                        continue;
+                    float const peerDx = candidateX - clusterPeer->GetPositionX();
+                    float const peerDy = candidateY - clusterPeer->GetPositionY();
+                    float const peerDistanceSq = peerDx * peerDx + peerDy * peerDy;
+                    if (peerDistanceSq < 8.0f * 8.0f || peerDistanceSq > 30.0f * 30.0f ||
+                        map->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) !=
+                            targetPlan->key.second)
+                        continue;
+
+                    bool safeSpacing = true;
+                    for (auto const& playerItem : sObjectAccessor.GetPlayers())
+                    {
+                        Player const* other = playerItem.second;
+                        if (!other || other == clusterPeer || !other->IsInWorld() ||
+                            other->GetMapId() != targetPlan->key.first ||
+                            other->GetZoneId() != targetPlan->key.second)
+                            continue;
+                        float const dx = candidateX - other->GetPositionX();
+                        float const dy = candidateY - other->GetPositionY();
+                        if (dx * dx + dy * dy < 80.0f * 80.0f)
+                        {
+                            safeSpacing = false;
+                            break;
+                        }
+                    }
+                    if (!safeSpacing)
+                        continue;
+                    for (auto const& other : queuedPositions)
+                    {
+                        float const dx = candidateX - other.first;
+                        float const dy = candidateY - other.second;
+                        if (dx * dx + dy * dy < 80.0f * 80.0f)
+                        {
+                            safeSpacing = false;
+                            break;
+                        }
+                    }
+                    if (!safeSpacing)
+                        continue;
+
+                    x = candidateX; y = candidateY; z = candidateZ;
+                    clusterPeerGuid = clusterPeer->GetGUIDLow();
+                    placed = true;
+                    break;
+                }
+            }
+        }
+
         // Sample the entire zone, not a circle around the player. Favor the
         // candidate furthest from players/citizens already there so a dense
-        // spawn cluster does not make the new population look cloned.
+        // spawn cluster does not make the new population look cloned. This is
+        // the fallback when no safe peer placement is available.
         std::vector<WorldLocation> const& zoneAnchors = targetAnchorsIt->second;
-        for (uint32 attempt = 0; attempt < 24 && !zoneAnchors.empty(); ++attempt)
+        for (uint32 attempt = 0; !placed && attempt < 24 && !zoneAnchors.empty(); ++attempt)
         {
             WorldLocation const& origin = zoneAnchors[urand(0, zoneAnchors.size() - 1)];
             float candidateX = origin.x, candidateY = origin.y, candidateZ = origin.z;
@@ -2229,11 +2407,12 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         queuedPositions.push_back(std::make_pair(x, y));
         ++queued;
         ++targetPlan->active;
-        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u level:%u progression:%u relocation:%u fallback:%u active:%u target:%u batch:%u/%u",
+        sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u level:%u progression:%u relocation:%u fallback:%u cluster-peer:%u active:%u target:%u batch:%u/%u",
                        (uint32)e->playerGUID, targetPlan->key.second, citizenLevel,
                        needsProgressionMove ? 1 : 0,
                        safetyRelocation ? 1 : 0,
                        usedConservativeFallback ? 1 : 0,
+                       clusterPeerGuid,
                        active + queued,
                        confZoneWorldTarget, queued, queueLimit);
     }
