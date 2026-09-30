@@ -33,6 +33,13 @@
 
 namespace
 {
+uint32 const kCitizenNoTargetFirstExpansionMs = 5 * 60 * 1000;
+uint32 const kCitizenNoTargetSecondExpansionMs = 15 * 60 * 1000;
+uint32 const kCitizenNoTargetRecenterMs = 30 * 60 * 1000;
+float const kCitizenPatrolRadiusNormal = 240.0f;
+float const kCitizenPatrolRadiusExpanded = 600.0f;
+float const kCitizenPatrolRadiusWide = 1200.0f;
+
 class NearestTameableCreatureCheck
 {
 public:
@@ -411,9 +418,9 @@ class BotCitizenHuntingGroundScan
 {
 public:
     BotCitizenHuntingGroundScan(Player* source, float homeX, float homeY,
-                                uint32 zone, uint32 excludedGuid)
+                                uint32 zone, uint32 excludedGuid, float homeRadius)
         : me(source), m_homeX(homeX), m_homeY(homeY), m_zone(zone),
-          m_excludedGuid(excludedGuid) {}
+          m_excludedGuid(excludedGuid), m_homeRadius(homeRadius) {}
 
     bool operator()(Creature* u)
     {
@@ -424,7 +431,7 @@ public:
         float const distance = me->GetDistance(u);
         float const hx = u->GetPositionX() - m_homeX;
         float const hy = u->GetPositionY() - m_homeY;
-        if (distance < 30.0f || hx * hx + hy * hy > 240.0f * 240.0f ||
+        if (distance < 30.0f || hx * hx + hy * hy > m_homeRadius * m_homeRadius ||
             me->GetMap()->GetTerrain()->GetZoneId(u->GetPositionX(),
                 u->GetPositionY(), u->GetPositionZ()) != m_zone)
             return false;
@@ -443,6 +450,7 @@ private:
     Player* me;
     float m_homeX, m_homeY;
     uint32 m_zone, m_excludedGuid;
+    float m_homeRadius;
     Creature* m_best = nullptr;
     float m_distance = 0.0f;
 };
@@ -4630,6 +4638,8 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         _travelNudging = false;
         _activityPauseMs = 0;
         _destinationScanMs = 0;
+        _noHuntTargetMs = 0;
+        _noHuntTargetTier = 0;
         _activityNodeCount = 1;
         _activityCurrentNode = 0;
         _activityNodes[0] = ActivityNode();
@@ -4637,6 +4647,16 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         _activityNodes[0].y = _activityHomeY;
         _activityNodes[0].z = _activityHomeZ;
     }
+
+    // A zone can have a broad level profile while this citizen's local pocket
+    // has no suitable prey. After sustained healthy misses, widen ordinary
+    // walkable patrol within the same zone so its existing combat scan can
+    // find real, currently available targets. Never treat walking itself as
+    // hunting or progression.
+    float const patrolRadius = _noHuntTargetMs >= kCitizenNoTargetSecondExpansionMs
+        ? kCitizenPatrolRadiusWide
+        : (_noHuntTargetMs >= kCitizenNoTargetFirstExpansionMs
+            ? kCitizenPatrolRadiusExpanded : kCitizenPatrolRadiusNormal);
 
     _destinationScanMs = _destinationScanMs > diff ? _destinationScanMs - diff : 0;
     if (_failedHuntMs)
@@ -4679,6 +4699,11 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
             Cell::VisitGridObjects(me, searcher, 25.0f);
             if (Creature* target = scan.Best())
             {
+                if (IsZoneCitizen() && _noHuntTargetTier)
+                    sLog.outString("[ZoneCitizen][Hunt] prey-found guid:%u after-no-target-ms:%u",
+                                   me->GetGUIDLow(), _noHuntTargetMs);
+                _noHuntTargetMs = 0;
+                _noHuntTargetTier = 0;
                 _travelActive = false;
                 _travelHuntGuid = 0;
                 _travelNudging = false;
@@ -4690,6 +4715,21 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
                 sLog.outString("[ZoneCitizen] hunt guid:%u target:%u level:%u",
                                me->GetGUIDLow(), target->GetGUIDLow(), target->GetLevel());
                 return true;
+            }
+            if (IsZoneCitizen())
+            {
+                _noHuntTargetMs = std::min<uint32>(kCitizenNoTargetRecenterMs,
+                                                   _noHuntTargetMs + _huntScanMs);
+                uint8 const tier = _noHuntTargetMs >= kCitizenNoTargetSecondExpansionMs ? 2
+                    : (_noHuntTargetMs >= kCitizenNoTargetFirstExpansionMs ? 1 : 0);
+                if (tier > _noHuntTargetTier)
+                {
+                    _noHuntTargetTier = tier;
+                    sLog.outString("[ZoneCitizen][Hunt] no-target-expand guid:%u zone:%u level:%u minutes:%u radius:%u",
+                                   me->GetGUIDLow(), me->GetZoneId(), me->GetLevel(),
+                                   tier == 1 ? 5 : 15,
+                                   (uint32)(tier == 1 ? kCitizenPatrolRadiusExpanded : kCitizenPatrolRadiusWide));
+                }
             }
         }
     }
@@ -4814,12 +4854,26 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
     }
     _activityPauseMs = 0;
 
+    // Keep exploration bounded while allowing it to continue through large
+    // zones. Once the wide patrol area has been searched for another 15
+    // minutes, move the local center to the citizen's current walked-to spot.
+    if (IsZoneCitizen() && _noHuntTargetMs >= kCitizenNoTargetRecenterMs && MotionIdle())
+    {
+        _activityHomeX = me->GetPositionX();
+        _activityHomeY = me->GetPositionY();
+        _activityHomeZ = me->GetPositionZ();
+        _noHuntTargetMs = 0;
+        _noHuntTargetTier = 0;
+        sLog.outString("[ZoneCitizen][Hunt] patrol-center-advanced guid:%u zone:%u",
+                       me->GetGUIDLow(), me->GetZoneId());
+    }
+
     Map* map = me->GetMap();
     if (!_destinationScanMs && me->GetHealth() * 100 >= me->GetMaxHealth() * 50)
     {
         _destinationScanMs = 10000;
         BotCitizenHuntingGroundScan scan(me, _activityHomeX, _activityHomeY,
-                                          _activityZone, _failedHuntGuid);
+                                          _activityZone, _failedHuntGuid, patrolRadius);
         Creature* found = nullptr;
         MaNGOS::CreatureLastSearcher<BotCitizenHuntingGroundScan> searcher(found, scan);
         Cell::VisitGridObjects(me, searcher, 110.0f);
@@ -4831,6 +4885,29 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
             sLog.outString("[ZoneCitizen] travel guid:%u zone:%u purpose:hunt target:%u to:%.1f/%.1f",
                            me->GetGUIDLow(), _activityZone, ground->GetGUIDLow(),
                            _travelX, _travelY);
+            return true;
+        }
+    }
+    if (IsZoneCitizen() && _noHuntTargetMs >= kCitizenNoTargetFirstExpansionMs &&
+        me->GetHealth() * 100 >= me->GetMaxHealth() * 80)
+    {
+        // Random patrol widening can keep a citizen walking through empty
+        // pockets. After sustained misses, route it to a static spawn that
+        // can produce ordinary prey in its safe level band. This is a normal
+        // pathfinding trip; nearby combat scans and retreat checks still run
+        // while it travels and at the destination.
+        float const anchorSearchRadius = _noHuntTargetMs >= kCitizenNoTargetSecondExpansionMs
+            ? 2000.0f : patrolRadius;
+        WorldLocation anchor;
+        if (sPlayerBotMgr.SelectCitizenHuntAnchor(me->GetMapId(), _activityZone,
+                me->GetLevel(), me->GetPositionX(), me->GetPositionY(),
+                anchorSearchRadius, anchor))
+        {
+            StartActivityTravel(anchor.x, anchor.y, anchor.z, 0);
+            SetCitizenActivityIntent(2, "hunting-spawn-anchor");
+            sLog.outString("[ZoneCitizen][Hunt] spawn-anchor guid:%u zone:%u level:%u radius:%u to:%.1f/%.1f",
+                           me->GetGUIDLow(), _activityZone, me->GetLevel(),
+                           (uint32)anchorSearchRadius, anchor.x, anchor.y);
             return true;
         }
     }
@@ -4881,7 +4958,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         float const hx = x - _activityHomeX;
         float const hy = y - _activityHomeY;
         if (dx * dx + dy * dy < 30.0f * 30.0f ||
-            hx * hx + hy * hy > 240.0f * 240.0f ||
+            hx * hx + hy * hy > patrolRadius * patrolRadius ||
             map->GetTerrain()->GetZoneId(x, y, z) != _activityZone)
             continue;
         StartActivityTravel(x, y, z, 0);

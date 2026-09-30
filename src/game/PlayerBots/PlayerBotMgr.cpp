@@ -1554,7 +1554,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             continue;
         citizenAI->GetSafetyRelocationExclusion(e->zoneWorldSafetyExcludeMap,
                                                 e->zoneWorldSafetyExcludeZone);
-        if (!e->zoneWorldSafetyExcludeMap || !e->zoneWorldSafetyExcludeZone)
+        // Map 0 is a valid world map; zone 0 remains the missing-value sentinel.
+        if (!e->zoneWorldSafetyExcludeZone)
         {
             sLog.outString("[ZoneCitizen][Survival] relocation-deferred guid:%u reason:missing-exclusion",
                            (uint32)e->playerGUID);
@@ -1878,6 +1879,11 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                     if (!info || info->npc_flags || info->civilian || info->rank != 0 ||
                         !info->xp_multiplier || info->level_min < 1 || info->level_max > 60)
                         continue;
+                    uint32 const minLevel = std::max<uint32>(1, info->level_min);
+                    uint32 const maxLevel = std::min<uint32>(60, info->level_max);
+                    for (uint32 creatureLevel = minLevel; creatureLevel <= maxLevel; ++creatureLevel)
+                        m_zoneHuntSpawnAnchors[std::make_tuple(zoneKey.first, spawnZone,
+                                                               creatureLevel)].push_back(pos);
                     CitizenZoneDifficulty& profile = difficulty[spawnZone];
                     profile.totalLevel += (info->level_min + info->level_max) / 2;
                     ++profile.samples;
@@ -2513,6 +2519,52 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
     x = bestAnchor->x;
     y = bestAnchor->y;
     z = bestAnchor->z;
+    return true;
+}
+
+bool PlayerBotMgr::SelectCitizenHuntAnchor(uint32 mapId, uint32 zoneId, uint32 level,
+                                          float fromX, float fromY, float maxDistance,
+                                          WorldLocation& destination) const
+{
+    if (!zoneId || !level || maxDistance <= 0.0f)
+        return false;
+
+    uint32 const minimumLevel = level > 3 ? level - 3 : 1;
+    float const maxDistanceSq = maxDistance * maxDistance;
+    float bestDistanceSq = maxDistanceSq;
+    WorldLocation const* best = nullptr;
+
+    // Sample a bounded number of real spawn anchors from each level bucket.
+    // This avoids scanning large zone spawn lists on every citizen update.
+    uint32 sampled = 0;
+    for (uint32 creatureLevel = minimumLevel;
+         creatureLevel <= level && sampled < 48; ++creatureLevel)
+    {
+        auto const anchors = m_zoneHuntSpawnAnchors.find(
+            std::make_tuple(mapId, zoneId, creatureLevel));
+        if (anchors == m_zoneHuntSpawnAnchors.end() || anchors->second.empty())
+            continue;
+
+        uint32 const attempts = std::min<uint32>(12, anchors->second.size());
+        for (uint32 i = 0; i < attempts && sampled < 48; ++i, ++sampled)
+        {
+            WorldLocation const& candidate = anchors->second[urand(0, anchors->second.size() - 1)];
+            float const dx = candidate.x - fromX;
+            float const dy = candidate.y - fromY;
+            float const distanceSq = dx * dx + dy * dy;
+            if (distanceSq < 60.0f * 60.0f || distanceSq > maxDistanceSq)
+                continue;
+            if (!best || distanceSq < bestDistanceSq)
+            {
+                best = &candidate;
+                bestDistanceSq = distanceSq;
+            }
+        }
+    }
+    if (!best)
+        return false;
+
+    destination = *best;
     return true;
 }
 

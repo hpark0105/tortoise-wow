@@ -10,6 +10,7 @@
 #include "Companion/Personality.h"
 
 #include <vector>
+#include <tuple>
 
 class PlayerBotAI;
 class WorldSession;
@@ -158,6 +159,12 @@ class PlayerBotMgr
         // this method never moves, logs out, or teleports a character.
         bool SelectCitizenProgressionDestination(Player const* citizen, uint32& zone,
                                                  float& x, float& y, float& z) const;
+        // Pick a nearby static spawn anchor whose ordinary creature level
+        // range can yield prey suitable for this citizen. The AI still walks
+        // there and revalidates live targets before combat.
+        bool SelectCitizenHuntAnchor(uint32 mapId, uint32 zoneId, uint32 level,
+                                     float fromX, float fromY, float maxDistance,
+                                     WorldLocation& destination) const;
         // Creature-spawn difficulty is the authoritative fallback where the
         // client AreaTable has a zero or missing level. It is derived once
         // from ordinary, non-NPC creature spawns when map anchors are built.
@@ -299,6 +306,7 @@ class PlayerBotMgr
         // Static creature locations provide zone-wide spawn candidates. Build
         // each map/zone list once rather than scanning the world per login.
         std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>> m_zoneSpawnAnchors;
+        std::map<std::tuple<uint32, uint32, uint32>, std::vector<WorldLocation>> m_zoneHuntSpawnAnchors;
         struct CitizenZoneDifficulty
         {
             uint32 samples = 0;
