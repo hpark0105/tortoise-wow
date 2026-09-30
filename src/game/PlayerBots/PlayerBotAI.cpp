@@ -594,6 +594,22 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
     if (UpdateRecovery(diff) || !me->IsAlive())
         return;
 
+    // Repeated deaths have already escalated this citizen to a durable
+    // population-manager relocation. Do not let combat, group following,
+    // repair, or ordinary retreat delay that safety handoff for another loop.
+    // DeleteBot is the existing safe logout path; the manager will queue the
+    // replacement placement on its next bounded population pass.
+    if (IsZoneCitizen() && botEntry && botEntry->zoneWorldSafetyRelocation &&
+        (!me->GetGroup() || sPlayerBotMgr.IsAutonomousCitizenGroup(me->GetGroup())))
+    {
+        sLog.outString("[ZoneCitizen][Survival] leaving-danger guid:%u map:%u zone:%u reason:relocation-pending",
+                       me->GetGUIDLow(), me->GetMapId(), me->GetZoneId());
+        if (sPlayerBotMgr.DeleteBot(me->GetGUIDLow()))
+            return;
+        sLog.outString("[ZoneCitizen][Survival] relocation-logout-failed guid:%u map:%u zone:%u",
+                       me->GetGUIDLow(), me->GetMapId(), me->GetZoneId());
+    }
+
     if (UpdateCompanion(diff))
         return;
 

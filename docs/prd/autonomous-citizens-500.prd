@@ -251,6 +251,14 @@ and authority policy.
   difference at most three, out of combat, and each candidate at or above
   the hunt-ready health percentage (initially 80%). Recruitment is bounded
   by group capacity; candidates below any gate stay on solo activity.
+- Placement: on ordinary login or configured-zone restart seeding, when a
+  citizen has a same-team, same-zone, similarly
+  leveled, healthy, ungrouped citizen available, prefer a safe walkable spawn
+  8–30 yards from that peer. Preserve the existing 80-yard separation from
+  other players and queued spawns; use normal dispersed placement if no safe
+  cluster point is available. Apply this to every citizen faction and class.
+  This creates opportunities for ordinary hunt formation without forcing
+  citizens into a group or across long distances.
 - Authority: the leader provides the shared target and travel direction.
   Members keep independent survival authority: a member's own combat,
   retreat, recovery and loot completion always preempt voluntary following
@@ -303,9 +311,11 @@ leader); recruit a member into a human party mid-route (assert companion
 priority and safe group exit); let one member rest, lag behind or change
 maps (assert bounded separation into solo activity); restart with followers
 logging in before the leader (assert bounded regroup deadline, no frozen
-members, per-member progress intact). The staged zone hunting-group fixture
-establishes formation and membership only; these failure paths still need
-world evidence.
+members, per-member progress intact). For placement, log in or restart-seed
+a same-band citizen beside an eligible peer (assert a walkable point within 30 yards,
+80-yard separation from everyone else, then normal group formation after a
+pull). The staged zone hunting-group fixture establishes formation and
+membership only; these failure paths still need world evidence.
 
 ## 5. Delivery and acceptance
 
