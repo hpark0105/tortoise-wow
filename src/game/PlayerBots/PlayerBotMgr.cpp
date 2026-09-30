@@ -1541,6 +1541,7 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
     // pocket cannot create a logout storm.  The next allocator pass gives
     // each citizen a verified, level-matched zone other than this one.
     uint32 safetyQueued = 0;
+    uint32 sessionBusyCandidates = 0;
     for (auto const& item : m_bots)
     {
         PlayerBotEntry* e = item.second;
@@ -1638,6 +1639,16 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                         citizen->zoneWorldSafetyRelocation ||
                         (citizen->zoneWorldRetryAfterMs && m_elapsedTime < citizen->zoneWorldRetryAfterMs))
                         continue;
+                    // PlayerBotMgr updates before World::UpdateSessions. A
+                    // just-logged-out citizen can still own a session until
+                    // that later phase removes it. Defer without applying the
+                    // normal login-failure backoff; AddBot retains the final
+                    // duplicate-session guard.
+                    if (citizen->accountId && sWorld.FindSession(citizen->accountId))
+                    {
+                        ++sessionBusyCandidates;
+                        continue;
+                    }
                     PlayerCacheData* data = sObjectMgr.GetPlayerDataByGUID((uint32)citizen->playerGUID);
                     if (!data)
                         continue;
@@ -2051,6 +2062,13 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                 !e->ai || !e->ai->IsZoneCitizen() || e->state != PB_STATE_OFFLINE ||
                 (e->zoneWorldRetryAfterMs && m_elapsedTime < e->zoneWorldRetryAfterMs))
                 continue;
+            // Let World::UpdateSessions finish asynchronous logout cleanup
+            // before queuing a replacement session for this account.
+            if (e->accountId && sWorld.FindSession(e->accountId))
+            {
+                ++sessionBusyCandidates;
+                continue;
+            }
             if (safetyRelocationWaiting && e->zoneWorldSafetyRelocation != safetyPass)
                 continue;
             allocationCandidates.push_back(e);
@@ -2426,9 +2444,10 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         m_elapsedTime - m_lastZoneWorldStallLog >= 60000)
     {
         m_lastZoneWorldStallLog = m_elapsedTime;
-        sLog.outString("[ZoneCitizen][Allocator] under-target active:%u target:%u queued_this_pass:%u offline_candidates:%u no_suitable_zone:%u no_spawn_anchors:%u safety_priority:%u",
+        sLog.outString("[ZoneCitizen][Allocator] under-target active:%u target:%u queued_this_pass:%u offline_candidates:%u session_busy:%u no_suitable_zone:%u no_spawn_anchors:%u safety_priority:%u",
                        active, confZoneWorldTarget, queued, offlineCandidates,
-                       noSuitableZone, noSpawnAnchors, safetyRelocationWaiting ? 1 : 0);
+                       sessionBusyCandidates, noSuitableZone, noSpawnAnchors,
+                       safetyRelocationWaiting ? 1 : 0);
     }
 }
 

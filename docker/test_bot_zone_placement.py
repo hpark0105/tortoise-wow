@@ -35,6 +35,15 @@ class ZonePlacementConfigurationTest(unittest.TestCase):
         self.assertIn("e->zoneWorldSafetyRelocation != safetyPass", manager)
         self.assertIn("no_suitable_zone:%u", manager)
 
+    def test_population_allocator_waits_for_old_account_session_to_drain(self):
+        manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
+            encoding="utf-8").replace("\r\n", "\n")
+        allocator = manager[
+            manager.index("void PlayerBotMgr::UpdateZoneWorldPopulation"):]
+        self.assertIn("sWorld.FindSession(citizen->accountId)", allocator)
+        self.assertIn("sWorld.FindSession(e->accountId)", allocator)
+        self.assertIn("session_busy:%u", allocator)
+
     def test_population_fallback_keeps_a_minimum_productive_and_level_safety_gate(self):
         manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
             encoding="utf-8")
