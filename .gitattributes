@@ -1,2 +1,4 @@
 docker/*.sh text eol=lf
 Dockerfile text eol=lf
+sql/database_updates/character/20260928195000_character.sql text eol=lf
+sql/database_updates/character/20261001150000_character.sql text eol=lf

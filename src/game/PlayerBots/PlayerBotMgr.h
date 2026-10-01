@@ -8,6 +8,7 @@
 #include "Companion/LearningStore.h"
 #include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
+#include "Companion/CitizenTravel.h"
 
 #include <vector>
 #include <tuple>
@@ -158,7 +159,19 @@ class PlayerBotMgr
         // that has outgrown its current zone. The AI still walks every leg;
         // this method never moves, logs out, or teleports a character.
         bool SelectCitizenProgressionDestination(Player const* citizen, uint32& zone,
-                                                 float& x, float& y, float& z) const;
+                                                 float& x, float& y, float& z,
+                                                 std::vector<Companion::CitizenTravel::Waypoint>* waypoints = nullptr,
+                                                 Companion::CitizenTravel::BlockedAnchor const* blockedAnchor = nullptr,
+                                                 bool* partial = nullptr,
+                                                 uint32 candidateCursor = 0,
+                                                 uint32* nextCandidateCursor = nullptr) const;
+        // Build a bounded navmesh route to a previously selected destination.
+        // Partial paths are valid only as advancing intermediate legs; the AI
+        // replans from each reached endpoint and still owns final arrival.
+        bool BuildCitizenProgressionRoute(Player const* citizen, uint32 zone,
+                                          float x, float y, float z,
+                                          std::vector<Companion::CitizenTravel::Waypoint>& waypoints,
+                                          bool& partial, float& estimatedYards) const;
         // Pick a nearby static spawn anchor whose ordinary creature level
         // range can yield prey suitable for this citizen. The AI still walks
         // there and revalidates live targets before combat.

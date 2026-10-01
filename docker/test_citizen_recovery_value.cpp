@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <optional>
+#include <vector>
 
 namespace {
 
@@ -29,6 +31,56 @@ using Companion::CitizenRecovery::RetryPolicy;
 using Companion::CitizenRecovery::FollowProgress;
 using Companion::CitizenRecovery::ShouldPauseGroupDuty;
 using Companion::CitizenRecovery::ShouldRetreat;
+using Companion::CitizenRecovery::HasDangerAreaEvidence;
+using Companion::CitizenRecovery::ShouldAvoidDangerCell;
+using Companion::CitizenRecovery::DangerCellBufferYards;
+using Companion::CitizenRecovery::IsOutsideDangerCell;
+using Companion::CitizenRecovery::FirstUnsafeRememberedCell;
+using Companion::CitizenRecovery::IsUnsafeForRememberedCell;
+using Companion::CitizenRecovery::RememberedDangerCell;
+
+void TestDangerCellGeometry()
+{
+    Check(!IsOutsideDangerCell(5.0f, 5.0f, 0, 0, 0.0f),
+          "danger-cell: point inside remembered cell is unsafe");
+    Check(!IsOutsideDangerCell(45.0f, 20.0f, 0, 0, 5.0f),
+          "danger-cell: buffer boundary is unsafe");
+    Check(IsOutsideDangerCell(45.01f, 20.0f, 0, 0, 5.0f),
+          "danger-cell: point beyond buffer is safe");
+    Check(!IsOutsideDangerCell(-45.0f, -20.0f, -2, -1, 5.0f),
+          "danger-cell: negative grid cells use floor-coordinate geometry");
+    Check(IsOutsideDangerCell(0.0f, 0.0f, -2, -1, 5.0f),
+          "danger-cell: distant point outside negative grid cell is safe");
+    float const nan = std::nanf("");
+    Check(!IsOutsideDangerCell(nan, 0.0f, 0, 0, 0.0f),
+          "danger-cell: nonfinite candidate is unsafe");
+    Check(!IsOutsideDangerCell(100.0f, 100.0f, 0, 0, nan),
+          "danger-cell: nonfinite buffer is unsafe");
+    Check(!IsOutsideDangerCell(100.0f, 100.0f, 0, 0, -1.0f),
+          "danger-cell: negative buffer is unsafe");
+}
+
+void TestDangerMemoryEvidenceAndExpiry()
+{
+    Check(HasDangerAreaEvidence(1u),
+          "danger-memory: any recorded death confirms the pending fatal zone");
+    Check(!HasDangerAreaEvidence(0u),
+          "danger-memory: an empty history does not confirm a fatal zone");
+    Check(ShouldAvoidDangerCell(true, 1u, 30000u),
+          "danger-memory: active cooldown keeps the cell avoided");
+    Check(ShouldAvoidDangerCell(false, 3u, 21599u),
+          "danger-memory: repeated-death cell is avoided within six hours");
+    Check(!ShouldAvoidDangerCell(false, 3u, 21600u),
+          "danger-memory: old cell avoidance expires at six hours");
+    Check(!ShouldAvoidDangerCell(false, 2u, 1u),
+          "danger-memory: low-count history alone does not avoid a cell");
+    Check(DangerCellBufferYards(true, 1u) == 120.0f,
+          "danger-memory: active cooldown uses widest buffer");
+    Check(DangerCellBufferYards(false, 3599u) == 80.0f,
+          "danger-memory: recent repeated deaths use medium buffer");
+    Check(DangerCellBufferYards(false, 3600u) == 40.0f,
+          "danger-memory: older repeated deaths use narrow buffer");
+}
 
 void TestRetreatHealthThreshold()
 {
@@ -580,10 +632,95 @@ void TestRecoveryPausesVoluntaryGroupDuty()
     Check(!ShouldPauseGroupDuty(true, false),
           "group-recovery: ready member can perform group duty");
 }
+void TestLoginRelocationUnsafePosition()
+{
+    RememberedDangerCell active{0, 0, 3u, true, 30u};
+    Check(IsUnsafeForRememberedCell(10.0f, 10.0f, active),
+          "login-guard: position inside the remembered cell is unsafe");
+    Check(IsUnsafeForRememberedCell(160.0f, 20.0f, active),
+          "login-guard: position at the active buffer edge is unsafe");
+    Check(FirstUnsafeRememberedCell(10.0f, 10.0f, {active}) == 0u,
+          "login-guard: a single unsafe cell reports its own index");
+    RememberedDangerCell far{10, 10, 3u, true, 30u};
+    Check(FirstUnsafeRememberedCell(10.0f, 10.0f, {far, active}) == 1u,
+          "login-guard: the unsafe cell is found among several rows");
+    Check(FirstUnsafeRememberedCell(10.0f, 10.0f, {active, far}) == 0u,
+          "login-guard: the first unsafe row in order is reported");
+}
+
+void TestLoginRelocationSafeAnchor()
+{
+    RememberedDangerCell active{0, 0, 3u, true, 30u};
+    Check(!IsUnsafeForRememberedCell(165.0f, 20.0f, active),
+          "login-guard: a same-zone anchor beyond the buffer is safe");
+    Check(FirstUnsafeRememberedCell(165.0f, 20.0f, {active}) == std::nullopt,
+          "login-guard: a safe anchor does not re-arm relocation");
+    Check(FirstUnsafeRememberedCell(165.0f, 20.0f, {}) == std::nullopt,
+          "login-guard: no active rows never re-arm relocation");
+
+    RememberedDangerCell stale{0, 0, 2u, false, 30u};
+    Check(!IsUnsafeForRememberedCell(10.0f, 10.0f, stale),
+          "login-guard: an inactive low-death row is not a danger cell");
+    RememberedDangerCell recent{0, 0, 3u, false, 3599u};
+    Check(IsUnsafeForRememberedCell(110.0f, 20.0f, recent),
+          "login-guard: a recent repeated cell keeps its 80-yard buffer");
+    Check(!IsUnsafeForRememberedCell(125.0f, 20.0f, recent),
+          "login-guard: a point beyond the 80-yard buffer is safe");
+    RememberedDangerCell old{0, 0, 3u, false, 3600u};
+    Check(IsUnsafeForRememberedCell(80.0f, 20.0f, old),
+          "login-guard: an older repeated cell keeps its 40-yard buffer");
+    Check(!IsUnsafeForRememberedCell(80.01f, 20.0f, old),
+          "login-guard: a point beyond the 40-yard buffer is safe");
+}
+
+void TestLoginRelocationBufferBoundary()
+{
+    // IsOutsideDangerCell is strictly greater-than, so the exact buffer
+    // edge stays unsafe and just beyond it is safe, at every tier.
+    RememberedDangerCell active{0, 0, 3u, true, 30u};
+    Check(IsUnsafeForRememberedCell(160.0f, 20.0f, active),
+          "login-guard: exactly at the 120-yard edge is unsafe");
+    Check(!IsUnsafeForRememberedCell(160.01f, 20.0f, active),
+          "login-guard: just beyond the 120-yard edge is safe");
+    Check(IsUnsafeForRememberedCell(112.0f, 136.0f, active),
+          "login-guard: a diagonal exactly 120 yards from the corner is unsafe");
+    Check(!IsUnsafeForRememberedCell(113.0f, 136.0f, active),
+          "login-guard: a diagonal just beyond 120 yards is safe");
+    RememberedDangerCell recent{0, 0, 3u, false, 3599u};
+    Check(IsUnsafeForRememberedCell(120.0f, 20.0f, recent),
+          "login-guard: exactly at the 80-yard edge is unsafe");
+    Check(!IsUnsafeForRememberedCell(120.01f, 20.0f, recent),
+          "login-guard: just beyond the 80-yard edge is safe");
+    RememberedDangerCell old{0, 0, 3u, false, 3600u};
+    Check(IsUnsafeForRememberedCell(80.0f, 20.0f, old),
+          "login-guard: exactly at the 40-yard edge is unsafe");
+    Check(!IsUnsafeForRememberedCell(80.01f, 20.0f, old),
+          "login-guard: just beyond the 40-yard edge is safe");
+}
+
+void TestLoginRelocationInvalidInputs()
+{
+    float const nan = std::nanf("");
+    float const inf = std::numeric_limits<float>::infinity();
+    RememberedDangerCell active{0, 0, 3u, true, 30u};
+    Check(IsUnsafeForRememberedCell(nan, 0.0f, active),
+          "login-guard: a NaN login position is unsafe");
+    Check(IsUnsafeForRememberedCell(inf, 0.0f, active),
+          "login-guard: an inf login position is unsafe");
+    Check(IsUnsafeForRememberedCell(0.0f, nan, active),
+          "login-guard: a NaN y login position is unsafe");
+    Check(FirstUnsafeRememberedCell(nan, 0.0f, {active}) == 0u,
+          "login-guard: an untrusted position still reports the unsafe cell");
+    RememberedDangerCell stale{0, 0, 2u, false, 30u};
+    Check(!IsUnsafeForRememberedCell(nan, 0.0f, stale),
+          "login-guard: an inactive row never reports an unsafe cell");
+}
 } // namespace
 
 int main()
 {
+    TestDangerCellGeometry();
+    TestDangerMemoryEvidenceAndExpiry();
     TestRetreatHealthThreshold();
     TestNoStart();
     TestResetAndRestart();
@@ -614,6 +751,10 @@ int main()
     TestFollowStallDeadlineBounds();
     TestFollowProgressDistinguishesMovementFromStall();
     TestRecoveryPausesVoluntaryGroupDuty();
+    TestLoginRelocationUnsafePosition();
+    TestLoginRelocationSafeAnchor();
+    TestLoginRelocationBufferBoundary();
+    TestLoginRelocationInvalidInputs();
 
     if (g_failures != 0)
     {

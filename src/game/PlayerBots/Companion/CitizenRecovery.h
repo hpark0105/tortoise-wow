@@ -12,6 +12,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <vector>
 
 namespace Companion {
 namespace CitizenRecovery {
@@ -28,6 +30,91 @@ constexpr std::uint32_t kCriticalHealthPercent = 5u;
 // requires at least this health percentage; below it the citizen rests or
 // recovers instead. Necessary self-defense is never gated by it.
 constexpr std::uint32_t kHuntReadyHealthPercent = 80u;
+
+// Danger memory stores the death location as a 40-yard grid cell. A spawn
+// candidate is unsafe when it lies in that cell or within the caller's
+// additional response radius around the cell. Measuring from the rectangle
+// (rather than its center) keeps cell edges conservative and deterministic.
+constexpr float kDangerMemoryCellSizeYards = 40.0f;
+constexpr std::uint32_t kDangerMemoryRepeatedDeathThreshold = 3u;
+constexpr std::uint32_t kDangerMemoryAvoidanceWindowSeconds = 6u * 60u * 60u;
+constexpr std::uint32_t kDangerMemoryLongBufferWindowSeconds = 60u * 60u;
+
+inline bool HasDangerAreaEvidence(std::uint32_t deaths)
+{
+    return deaths > 0u;
+}
+
+inline bool ShouldAvoidDangerCell(bool cooldownActive, std::uint32_t deaths,
+                                 std::uint32_t ageSeconds)
+{
+    return cooldownActive ||
+        (deaths >= kDangerMemoryRepeatedDeathThreshold &&
+         ageSeconds < kDangerMemoryAvoidanceWindowSeconds);
+}
+
+inline float DangerCellBufferYards(bool cooldownActive, std::uint32_t ageSeconds)
+{
+    return cooldownActive ? 120.0f :
+        (ageSeconds < kDangerMemoryLongBufferWindowSeconds ? 80.0f : 40.0f);
+}
+
+inline bool IsOutsideDangerCell(float x, float y, std::int32_t cellX,
+                                std::int32_t cellY, float bufferYards)
+{
+    if (!std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(bufferYards) || bufferYards < 0.0f)
+        return false;
+    float const minX = static_cast<float>(cellX) * kDangerMemoryCellSizeYards;
+    float const minY = static_cast<float>(cellY) * kDangerMemoryCellSizeYards;
+    float const maxX = minX + kDangerMemoryCellSizeYards;
+    float const maxY = minY + kDangerMemoryCellSizeYards;
+    float const dx = x < minX ? minX - x : (x > maxX ? x - maxX : 0.0f);
+    float const dy = y < minY ? minY - y : (y > maxY ? y - maxY : 0.0f);
+    float const distanceSquared = dx * dx + dy * dy;
+    float const bufferSquared = bufferYards * bufferYards;
+    return std::isfinite(distanceSquared) && std::isfinite(bufferSquared) &&
+        distanceSquared > bufferSquared;
+}
+
+// One active danger-memory row as observed by a caller (login-time
+// relocation guard). The helpers below reuse ShouldAvoidDangerCell,
+// DangerCellBufferYards, and IsOutsideDangerCell, so a login check cannot
+// drift from the allocator's geometry or radii.
+struct RememberedDangerCell
+{
+    std::int32_t cellX = 0;
+    std::int32_t cellY = 0;
+    std::uint32_t deaths = 0u;
+    bool cooldownActive = false;
+    std::uint32_t ageSeconds = 0u;
+};
+
+// True when the caller must treat (x, y) as inside the danger of this row:
+// the row is an active danger cell and the position is not outside the cell
+// plus its configured buffer. Nonfinite position data is untrusted and
+// counts as unsafe, matching IsOutsideDangerCell's conservative answer.
+inline bool IsUnsafeForRememberedCell(float x, float y,
+                                      RememberedDangerCell const& cell)
+{
+    return ShouldAvoidDangerCell(cell.cooldownActive, cell.deaths,
+                                 cell.ageSeconds) &&
+        !IsOutsideDangerCell(x, y, cell.cellX, cell.cellY,
+                             DangerCellBufferYards(cell.cooldownActive,
+                                                   cell.ageSeconds));
+}
+
+// Index of the first row (in supplied order) whose danger makes (x, y)
+// unsafe, or no value when the position is safe for every row. Callers
+// supply rows in a deterministic order; an empty list is safe.
+inline std::optional<std::size_t> FirstUnsafeRememberedCell(
+        float x, float y, std::vector<RememberedDangerCell> const& cells)
+{
+    for (std::size_t i = 0; i < cells.size(); ++i)
+        if (IsUnsafeForRememberedCell(x, y, cells[i]))
+            return i;
+    return std::nullopt;
+}
 
 inline bool ShouldRetreat(std::uint32_t health, std::uint32_t maxHealth,
                           bool dangerZone, std::uint32_t targetHealth = 0u,

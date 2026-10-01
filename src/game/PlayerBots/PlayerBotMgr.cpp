@@ -20,6 +20,7 @@
 #include "MasterPlayer.h"
 #include "PlayerBotAI.h"
 #include "Map.h"
+#include "PathFinder.h"
 #include "Anticheat.h"
 #include <cctype>
 #include <cmath>
@@ -28,6 +29,9 @@
 
 namespace
 {
+uint32 const kCitizenProgressionPathQueryLimit = 8;
+uint32 const kCitizenBlockedAnchorRadiusYards = 45;
+
 struct BotIdentitySpec
 {
     std::string name;
@@ -2078,6 +2082,61 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
     if (safetyRelocationWaiting)
         collectCandidates(true);
     collectCandidates(false);
+
+    struct CitizenDangerCell
+    {
+        uint32 mapId;
+        uint32 zoneId;
+        int32 cellX;
+        int32 cellY;
+        float bufferYards;
+    };
+    std::map<uint32, std::vector<CitizenDangerCell>> dangerCellsByCitizen;
+    std::map<uint32, std::map<std::pair<uint32, uint32>, bool>> dangerZonesByCitizen;
+    std::string safetyGuidList;
+    for (PlayerBotEntry const* candidate : allocationCandidates)
+    {
+        if (!candidate->zoneWorldSafetyRelocation)
+            continue;
+        if (!safetyGuidList.empty())
+            safetyGuidList += ",";
+        safetyGuidList += std::to_string((uint32)candidate->playerGUID);
+    }
+    // Read danger history only for citizens currently awaiting relocation.
+    // Any recorded death can confirm which zone triggered a still-pending
+    // request; that evidence must outlive the short cell-avoidance window.
+    // Only active/recent repeated-death cells affect anchor selection, so old
+    // history cannot pin citizens away from a zone indefinitely.
+    if (!safetyGuidList.empty())
+    {
+        QueryResult* dangerResult = CharacterDatabase.PQuery(
+            "SELECT char_guid,map_id,zone_id,cell_x,cell_y,deaths, "
+            "safe_until>UNIX_TIMESTAMP(),GREATEST(0,UNIX_TIMESTAMP()-updated_at) "
+            "FROM bot_citizen_danger_memory WHERE char_guid IN (%s)",
+            safetyGuidList.c_str());
+        if (dangerResult)
+        {
+            do
+            {
+                Field* fields = dangerResult->Fetch();
+                uint32 const deaths = fields[5].GetUInt32();
+                bool const cooldownActive = fields[6].GetUInt32() != 0;
+                uint32 const ageSeconds = fields[7].GetUInt32();
+                uint32 const guid = fields[0].GetUInt32();
+                uint32 const mapId = fields[1].GetUInt32();
+                uint32 const zoneId = fields[2].GetUInt32();
+                if (Companion::CitizenRecovery::HasDangerAreaEvidence(deaths))
+                    dangerZonesByCitizen[guid][std::make_pair(mapId, zoneId)] = true;
+                if (Companion::CitizenRecovery::ShouldAvoidDangerCell(
+                        cooldownActive, deaths, ageSeconds))
+                    dangerCellsByCitizen[guid].push_back({
+                        mapId, zoneId, fields[3].GetInt32(), fields[4].GetInt32(),
+                        Companion::CitizenRecovery::DangerCellBufferYards(
+                            cooldownActive, ageSeconds)});
+            } while (dangerResult->NextRow());
+            delete dangerResult;
+        }
+    }
     for (size_t candidateIndex = 0;
          candidateIndex < allocationCandidates.size() && queued < queueLimit;
          ++candidateIndex)
@@ -2095,13 +2154,13 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             ? e->zoneWorldSafetyExcludeZone : data->uiZoneId;
         int32 const currentZoneLevel = GetCitizenZoneDifficulty(currentMap, currentZone);
         uint32 const productiveMinimum = citizenLevel > 3 ? citizenLevel - 3 : 1;
-        // A danger relocation is first a survival decision.  It may use an
-        // equally difficult verified zone (but never the fatal one); forcing
-        // an immediate level-up zone here can leave a citizen offline when
-        // the local map has no such anchor.
+        // Survival relocation prefers a safe anchor in the current zone when
+        // that zone still has enough level-appropriate prey. If the citizen
+        // has outgrown it, destination selection should find a more productive
+        // zone while keeping the move classified as relocation.
         uint32 const currentProductiveShare = GetCitizenZoneProductiveSharePercent(
             currentMap, currentZone, productiveMinimum, citizenLevel);
-        bool const needsProgressionMove = !e->zoneWorldSafetyRelocation && currentZoneLevel > 0 &&
+        bool const needsProgressionMove = currentZoneLevel > 0 &&
             currentProductiveShare < CitizenZoneMinimumProductiveSharePercent;
         auto factionAllowed = [&](uint32 zoneId) -> bool
         {
@@ -2110,6 +2169,52 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                 (area->Team != AREATEAM_ALLY || citizenTeam == ALLIANCE) &&
                 (area->Team != AREATEAM_HORDE || citizenTeam == HORDE);
         };
+        auto positionAvoidsRememberedDanger = [&](uint32 mapId, uint32 zoneId,
+                                                   float x, float y) -> bool
+        {
+            std::map<uint32, std::vector<CitizenDangerCell>>::const_iterator const found =
+                dangerCellsByCitizen.find((uint32)e->playerGUID);
+            if (found == dangerCellsByCitizen.end())
+                return std::isfinite(x) && std::isfinite(y);
+            for (CitizenDangerCell const& cell : found->second)
+                if (cell.mapId == mapId && cell.zoneId == zoneId &&
+                    !Companion::CitizenRecovery::IsOutsideDangerCell(
+                        x, y, cell.cellX, cell.cellY, cell.bufferYards))
+                    return false;
+            return std::isfinite(x) && std::isfinite(y);
+        };
+        if (e->zoneWorldSafetyRelocation)
+        {
+            std::map<uint32, std::map<std::pair<uint32, uint32>, bool>>::const_iterator const found =
+                dangerZonesByCitizen.find((uint32)e->playerGUID);
+            bool const hasFatalAreaEvidence = found != dangerZonesByCitizen.end() &&
+                found->second.find(std::make_pair(e->zoneWorldSafetyExcludeMap,
+                                                   e->zoneWorldSafetyExcludeZone)) !=
+                    found->second.end();
+            // A failed/missing journal read must never make the fatal zone
+            // appear safe by omission. Other eligible zones remain usable
+            // only when the triggering exclusion has verified DB evidence.
+            if (!hasFatalAreaEvidence)
+            {
+                e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
+                sLog.outString("[ZoneCitizen][Survival] relocation-deferred guid:%u reason:danger-memory-unavailable map:%u zone:%u",
+                    (uint32)e->playerGUID, e->zoneWorldSafetyExcludeMap,
+                    e->zoneWorldSafetyExcludeZone);
+                continue;
+            }
+        }
+        auto planHasSafeAnchor = [&](ZonePlan const& plan) -> bool
+        {
+            std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>>::const_iterator const found =
+                m_zoneSpawnAnchors.find(plan.key);
+            if (found == m_zoneSpawnAnchors.end())
+                return false;
+            for (WorldLocation const& position : found->second)
+                if (positionAvoidsRememberedDanger(plan.key.first, plan.key.second,
+                                                    position.x, position.y))
+                    return true;
+            return false;
+        };
         auto zoneLevelAllowed = [&](ZonePlan const& plan) -> bool
         {
             if (e->zoneWorldSafetyRelocation &&
@@ -2117,6 +2222,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                 plan.key.second == e->zoneWorldSafetyExcludeZone)
                 return false;
             if (!factionAllowed(plan.key.second))
+                return false;
+            if (e->zoneWorldSafetyRelocation && !planHasSafeAnchor(plan))
                 return false;
             uint32 const planLevel = GetCitizenZoneDifficulty(plan.key.first, plan.key.second);
             // A zero profile means the zone has no verified ordinary-creature
@@ -2137,7 +2244,25 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         };
         ZonePlan* targetPlan = nullptr;
         bool usedConservativeFallback = false;
-        for (size_t planIndex = 0; planIndex < plans.size(); ++planIndex)
+        bool usedCurrentZoneSafeAnchor = false;
+        bool usedSafeAnchorFallback = false;
+        if (e->zoneWorldSafetyRelocation && !needsProgressionMove && currentZoneLevel > 0 &&
+            currentProductiveShare >= CitizenZoneMinimumProductiveSharePercent)
+        {
+            // Keep citizens in their current zone when it remains productive;
+            // move them to a different safe anchor there before considering a
+            // zone transition. The exact danger zone is otherwise excluded.
+            for (ZonePlan& candidatePlan : plans)
+                if (candidatePlan.key.first == e->zoneWorldSafetyExcludeMap &&
+                    candidatePlan.key.second == e->zoneWorldSafetyExcludeZone &&
+                    factionAllowed(candidatePlan.key.second) && planHasSafeAnchor(candidatePlan))
+                {
+                    targetPlan = &candidatePlan;
+                    usedCurrentZoneSafeAnchor = true;
+                    break;
+                }
+        }
+        for (size_t planIndex = 0; !targetPlan && planIndex < plans.size(); ++planIndex)
         {
             ZonePlan& candidatePlan = plans[planIndex];
             if (!zoneLevelAllowed(candidatePlan))
@@ -2166,6 +2291,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                     candidatePlan.key.second == e->zoneWorldSafetyExcludeZone)
                     continue;
                 if (!factionAllowed(candidatePlan.key.second))
+                    continue;
+                if (e->zoneWorldSafetyRelocation && !planHasSafeAnchor(candidatePlan))
                     continue;
                 uint32 const candidateLevel = GetCitizenZoneDifficulty(
                     candidatePlan.key.first, candidatePlan.key.second);
@@ -2209,6 +2336,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                      candidatePlan.key.second == currentZone) ||
                     !factionAllowed(candidatePlan.key.second))
                     continue;
+                if (e->zoneWorldSafetyRelocation && !planHasSafeAnchor(candidatePlan))
+                    continue;
                 uint32 const candidateLevel = GetCitizenZoneDifficulty(
                     candidatePlan.key.first, candidatePlan.key.second);
                 if (!candidateLevel || candidateLevel > citizenLevel + 3)
@@ -2251,6 +2380,46 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                 }
             }
         }
+        if (!targetPlan && e->zoneWorldSafetyRelocation && !needsProgressionMove)
+        {
+            // If no other eligible zone survives the faction, prey, and
+            // level gates, let a citizen remain in its current zone only
+            // when that zone has a terrain-validated anchor outside every
+            // remembered death cell. The fatal zone is never reused blindly.
+            for (ZonePlan& candidatePlan : plans)
+            {
+                if (candidatePlan.key.first != e->zoneWorldSafetyExcludeMap ||
+                    candidatePlan.key.second != e->zoneWorldSafetyExcludeZone ||
+                    !factionAllowed(candidatePlan.key.second) || !planHasSafeAnchor(candidatePlan))
+                    continue;
+                uint32 const candidateLevel = GetCitizenZoneDifficulty(
+                    candidatePlan.key.first, candidatePlan.key.second);
+                uint32 const share = GetCitizenZoneProductiveSharePercent(
+                    candidatePlan.key.first, candidatePlan.key.second,
+                    productiveMinimum, citizenLevel);
+                if (!candidateLevel || candidateLevel > citizenLevel + 3 ||
+                    share < CitizenZoneFallbackMinimumProductiveSharePercent)
+                    continue;
+                std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty>::const_iterator const profile =
+                    m_zoneSpawnDifficulty.find(candidatePlan.key);
+                if (profile == m_zoneSpawnDifficulty.end() || !profile->second.samples)
+                    continue;
+                uint64 totalWeight = 0;
+                uint64 safeWeight = 0;
+                for (uint32 level = 1; level <= 60; ++level)
+                {
+                    totalWeight += profile->second.levelWeight[level];
+                    if (level <= citizenLevel + 3)
+                        safeWeight += profile->second.levelWeight[level];
+                }
+                if (!totalWeight || safeWeight * 100 < totalWeight *
+                    (100 - CitizenZoneFallbackMaximumOverlevelSharePercent))
+                    continue;
+                targetPlan = &candidatePlan;
+                usedSafeAnchorFallback = true;
+                break;
+            }
+        }
         if (!targetPlan)
         {
             ++noSuitableZone;
@@ -2258,6 +2427,7 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             if (e->zoneWorldSafetyRelocation)
             {
                 uint32 rejectedDangerZone = 0;
+                uint32 rejectedRememberedDanger = 0;
                 uint32 rejectedFactionArea = 0;
                 uint32 rejectedNoProfile = 0;
                 uint32 eligibleNormalNotSelected = 0;
@@ -2280,6 +2450,8 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                         ++rejectedDangerZone;
                     else if (!factionAllowed(candidatePlan.key.second))
                         ++rejectedFactionArea;
+                    else if (!planHasSafeAnchor(candidatePlan))
+                        ++rejectedRememberedDanger;
                     else if (!candidateLevel)
                         ++rejectedNoProfile;
                     else if (productiveShare >= CitizenZoneMinimumProductiveSharePercent)
@@ -2316,13 +2488,13 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                         }
                     }
                 }
-                sLog.outString("[ZoneCitizen][Allocator] no-destination guid:%u level:%u faction:%u current-map:%u current-zone:%u excluded-map:%u excluded-zone:%u current-productive:%u plan-map:%u plans:%u reject-danger:%u reject-faction-area:%u reject-no-profile:%u eligible-normal:%u reject-level:%u reject-share:%u reject-progression:%u reject-no-samples:%u reject-no-weight:%u reject-overlevel:%u eligible-fallback:%u",
+                sLog.outString("[ZoneCitizen][Allocator] no-destination guid:%u level:%u faction:%u current-map:%u current-zone:%u excluded-map:%u excluded-zone:%u current-productive:%u plan-map:%u plans:%u reject-danger:%u reject-memory:%u reject-faction-area:%u reject-no-profile:%u eligible-normal:%u reject-level:%u reject-share:%u reject-progression:%u reject-no-samples:%u reject-no-weight:%u reject-overlevel:%u eligible-fallback:%u",
                                (uint32)e->playerGUID, citizenLevel, (uint32)citizenTeam,
                                currentMap, currentZone, e->zoneWorldSafetyExcludeMap,
                                e->zoneWorldSafetyExcludeZone, currentProductiveShare,
                                plans.empty() ? 0 : plans.front().key.first,
                                (uint32)plans.size(), rejectedDangerZone,
-                               rejectedFactionArea, rejectedNoProfile,
+                               rejectedRememberedDanger, rejectedFactionArea, rejectedNoProfile,
                                eligibleNormalNotSelected, rejectedLevel,
                                rejectedProductiveShare, rejectedProgression,
                                rejectedNoSamples, rejectedNoLevelWeight,
@@ -2337,6 +2509,20 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             ++noSpawnAnchors;
             e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
             continue;
+        }
+        std::vector<WorldLocation> safeZoneAnchors;
+        if (e->zoneWorldSafetyRelocation)
+        {
+            for (WorldLocation const& position : targetAnchorsIt->second)
+                if (positionAvoidsRememberedDanger(targetPlan->key.first,
+                    targetPlan->key.second, position.x, position.y))
+                    safeZoneAnchors.push_back(position);
+            if (safeZoneAnchors.empty())
+            {
+                ++noSpawnAnchors;
+                e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;
+                continue;
+            }
         }
 
         float x = 0.0f, y = 0.0f, z = 0.0f;
@@ -2386,7 +2572,10 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
                     float const peerDistanceSq = peerDx * peerDx + peerDy * peerDy;
                     if (peerDistanceSq < 8.0f * 8.0f || peerDistanceSq > 30.0f * 30.0f ||
                         map->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) !=
-                            targetPlan->key.second)
+                            targetPlan->key.second ||
+                        (e->zoneWorldSafetyRelocation &&
+                         !positionAvoidsRememberedDanger(targetPlan->key.first,
+                             targetPlan->key.second, candidateX, candidateY)))
                         continue;
 
                     bool safeSpacing = true;
@@ -2432,14 +2621,23 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         // candidate furthest from players/citizens already there so a dense
         // spawn cluster does not make the new population look cloned. This is
         // the fallback when no safe peer placement is available.
-        std::vector<WorldLocation> const& zoneAnchors = targetAnchorsIt->second;
+        std::vector<WorldLocation> const& zoneAnchors = e->zoneWorldSafetyRelocation
+            ? safeZoneAnchors : targetAnchorsIt->second;
         for (uint32 attempt = 0; !placed && attempt < 24 && !zoneAnchors.empty(); ++attempt)
         {
             WorldLocation const& origin = zoneAnchors[urand(0, zoneAnchors.size() - 1)];
+            if (e->zoneWorldSafetyRelocation &&
+                !positionAvoidsRememberedDanger(targetPlan->key.first,
+                    targetPlan->key.second, origin.x, origin.y))
+                continue;
             float candidateX = origin.x, candidateY = origin.y, candidateZ = origin.z;
             if (!map->GetWalkRandomPosition(nullptr, candidateX, candidateY, candidateZ, 25.0f))
                 continue;
             if (map->GetTerrain()->GetZoneId(candidateX, candidateY, candidateZ) != targetPlan->key.second)
+                continue;
+            if (e->zoneWorldSafetyRelocation &&
+                !positionAvoidsRememberedDanger(targetPlan->key.first,
+                    targetPlan->key.second, candidateX, candidateY))
                 continue;
             float spacing = std::numeric_limits<float>::max();
             for (auto const& playerItem : sObjectAccessor.GetPlayers())
@@ -2474,7 +2672,10 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
             float const dx = x - anchor->GetPositionX();
             float const dy = y - anchor->GetPositionY();
             if (dx * dx + dy * dy < 80.0f * 80.0f ||
-                map->GetTerrain()->GetZoneId(x, y, z) != targetPlan->key.second)
+                map->GetTerrain()->GetZoneId(x, y, z) != targetPlan->key.second ||
+                (e->zoneWorldSafetyRelocation &&
+                 !positionAvoidsRememberedDanger(targetPlan->key.first,
+                     targetPlan->key.second, x, y)))
                 continue;
             placed = true;
         }
@@ -2506,12 +2707,20 @@ void PlayerBotMgr::UpdateZoneWorldPopulation()
         ++targetPlan->active;
         sLog.outString("[ZoneCitizen] login queued guid:%u zone:%u level:%u progression:%u relocation:%u fallback:%u cluster-peer:%u active:%u target:%u batch:%u/%u",
                        (uint32)e->playerGUID, targetPlan->key.second, citizenLevel,
-                       needsProgressionMove ? 1 : 0,
+                       (!safetyRelocation && needsProgressionMove) ? 1 : 0,
                        safetyRelocation ? 1 : 0,
                        usedConservativeFallback ? 1 : 0,
                        clusterPeerGuid,
                        active + queued,
                        confZoneWorldTarget, queued, queueLimit);
+        if (usedSafeAnchorFallback)
+            sLog.outString("[ZoneCitizen][Survival] safe-anchor-fallback guid:%u map:%u zone:%u",
+                           (uint32)e->playerGUID, targetPlan->key.first,
+                           targetPlan->key.second);
+        if (usedCurrentZoneSafeAnchor)
+            sLog.outString("[ZoneCitizen][Survival] safe-anchor-current-zone guid:%u map:%u zone:%u productive:%u",
+                           (uint32)e->playerGUID, targetPlan->key.first,
+                           targetPlan->key.second, currentProductiveShare);
     }
     if (active + queued < confZoneWorldTarget &&
         m_elapsedTime - m_lastZoneWorldStallLog >= 60000)
@@ -2543,7 +2752,12 @@ bool PlayerBotMgr::SubmitWorldIntent(PlayerBotEntry* e, std::string const& conte
 
 bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
                                                         uint32& zone,
-                                                        float& x, float& y, float& z) const
+                                                        float& x, float& y, float& z,
+                                                        std::vector<Companion::CitizenTravel::Waypoint>* waypoints,
+                                                        Companion::CitizenTravel::BlockedAnchor const* blockedAnchor,
+                                                        bool* partial,
+                                                        uint32 candidateCursor,
+                                                        uint32* nextCandidateCursor) const
 {
     if (!citizen || !citizen->GetMap() || !citizen->GetZoneId())
         return false;
@@ -2551,14 +2765,17 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
     uint32 const productiveMinimum = citizenLevel > 3 ? citizenLevel - 3 : 1;
     uint32 const currentProductiveShare = GetCitizenZoneProductiveSharePercent(
         citizen->GetMapId(), citizen->GetZoneId(), productiveMinimum, citizenLevel);
-    if (!GetCitizenZoneDifficulty(citizen->GetMapId(), citizen->GetZoneId()) ||
-        currentProductiveShare >= CitizenZoneMinimumProductiveSharePercent)
+    if (currentProductiveShare >= CitizenZoneMinimumProductiveSharePercent)
         return false;
 
-    WorldLocation const* bestAnchor = nullptr;
-    uint32 bestZone = 0;
-    uint32 bestLevelGap = std::numeric_limits<uint32>::max();
-    float bestDistance = std::numeric_limits<float>::max();
+    struct CandidateAnchor
+    {
+        WorldLocation position;
+        uint32 zone;
+        uint32 levelGap;
+        float straightDistanceSq;
+    };
+    std::vector<CandidateAnchor> candidates;
     for (auto const& item : m_zoneSpawnAnchors)
     {
         if (item.first.first != citizen->GetMapId() ||
@@ -2574,44 +2791,173 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
             GetCitizenZoneProductiveSharePercent(item.first.first, item.first.second,
                 productiveMinimum, citizenLevel) < CitizenZoneMinimumProductiveSharePercent)
             continue;
-        WorldLocation const* closestAnchor = nullptr;
-        float closestDistance = std::numeric_limits<float>::max();
+        std::vector<CandidateAnchor> zoneCandidates;
+        uint32 const levelGap = candidateLevel > citizenLevel
+            ? candidateLevel - citizenLevel : citizenLevel - candidateLevel;
         for (WorldLocation const& anchor : item.second)
         {
             float const dx = anchor.x - citizen->GetPositionX();
             float const dy = anchor.y - citizen->GetPositionY();
-            float const distance = dx * dx + dy * dy;
-            if (distance < closestDistance)
+            float const distanceSq = dx * dx + dy * dy;
+            if (blockedAnchor && blockedAnchor->active &&
+                blockedAnchor->mapId == item.first.first &&
+                blockedAnchor->zoneId == item.first.second)
             {
-                closestAnchor = &anchor;
-                closestDistance = distance;
+                float const blockedDx = anchor.x - blockedAnchor->x;
+                float const blockedDy = anchor.y - blockedAnchor->y;
+                if (blockedDx * blockedDx + blockedDy * blockedDy <=
+                    float(kCitizenBlockedAnchorRadiusYards * kCitizenBlockedAnchorRadiusYards))
+                    continue;
             }
+            zoneCandidates.push_back({anchor, item.first.second, levelGap, distanceSq});
         }
-        if (!closestAnchor)
+        if (zoneCandidates.empty())
             continue;
-        // Prefer the nearest zone with enough real creature spawns in the
-        // citizen's productive band. Zone averages are diagnostic only: they
-        // must not prevent a valid adjacent destination (or pull a citizen
-        // toward a distant zone merely because its average is a closer match).
-        uint32 const levelGap = candidateLevel > citizenLevel
-            ? candidateLevel - citizenLevel : citizenLevel - candidateLevel;
-        if (!bestAnchor || closestDistance < bestDistance ||
-            (closestDistance == bestDistance && levelGap < bestLevelGap))
-        {
-            bestAnchor = closestAnchor;
-            bestZone = item.first.second;
-            bestLevelGap = levelGap;
-            bestDistance = closestDistance;
-        }
+        std::sort(zoneCandidates.begin(), zoneCandidates.end(),
+            [](CandidateAnchor const& a, CandidateAnchor const& b)
+            {
+                return a.straightDistanceSq < b.straightDistanceSq;
+            });
+        // Keep two choices per zone so a blocked coastline anchor does not
+        // hide a reachable inland anchor in the same productive area.
+        if (zoneCandidates.size() > 2)
+            zoneCandidates.resize(2);
+        candidates.insert(candidates.end(), zoneCandidates.begin(), zoneCandidates.end());
     }
-    if (!bestAnchor)
+    std::sort(candidates.begin(), candidates.end(),
+        [](CandidateAnchor const& a, CandidateAnchor const& b)
+        {
+            return a.straightDistanceSq < b.straightDistanceSq;
+        });
+    uint32 const candidateCount = candidates.size();
+    if (nextCandidateCursor)
+        *nextCandidateCursor = 0;
+    if (candidateCount == 0)
         return false;
 
-    zone = bestZone;
-    x = bestAnchor->x;
-    y = bestAnchor->y;
-    z = bestAnchor->z;
+    CandidateAnchor const* bestCandidate = nullptr;
+    float bestTravelYards = std::numeric_limits<float>::max();
+    bool bestPartial = false;
+    if (partial)
+        *partial = false;
+    uint32 routeChecks = 0;
+    uint32 reachableRoutes = 0;
+    uint32 const startCursor = candidateCursor % candidateCount;
+    uint32 const queryCount = std::min<uint32>(kCitizenProgressionPathQueryLimit, candidateCount);
+    std::vector<Companion::CitizenTravel::Waypoint> bestWaypoints;
+    for (uint32 i = 0; i < queryCount; ++i)
+    {
+        CandidateAnchor const& candidate = candidates[(startCursor + i) % candidateCount];
+        ++routeChecks;
+        std::vector<Companion::CitizenTravel::Waypoint> candidateWaypoints;
+        bool candidatePartial = false;
+        float estimatedYards = 0.0f;
+        if (!BuildCitizenProgressionRoute(citizen, candidate.zone,
+                candidate.position.x, candidate.position.y, candidate.position.z,
+                candidateWaypoints, candidatePartial, estimatedYards))
+            continue;
+        ++reachableRoutes;
+        if (!bestCandidate || estimatedYards < bestTravelYards ||
+            (estimatedYards == bestTravelYards && candidate.levelGap < bestCandidate->levelGap))
+        {
+            bestCandidate = &candidate;
+            bestTravelYards = estimatedYards;
+            bestPartial = candidatePartial;
+            bestWaypoints.swap(candidateWaypoints);
+        }
+    }
+    if (!bestCandidate)
+    {
+        if (nextCandidateCursor)
+            *nextCandidateCursor = Companion::CitizenTravel::NextCandidateCursor(
+                startCursor, routeChecks, candidateCount);
+        if (routeChecks)
+            sLog.outString("[ZoneCitizen][Progression] no verified land route guid:%u map:%u zone:%u level:%u checked:%u total:%u reachable:%u next:%u",
+                           citizen->GetGUIDLow(), citizen->GetMapId(), citizen->GetZoneId(),
+                           citizenLevel, routeChecks, candidateCount, reachableRoutes,
+                           nextCandidateCursor ? *nextCandidateCursor : 0);
+        return false;
+    }
+
+    zone = bestCandidate->zone;
+    x = bestCandidate->position.x;
+    y = bestCandidate->position.y;
+    z = bestCandidate->position.z;
+    if (waypoints)
+        waypoints->swap(bestWaypoints);
+    if (partial)
+        *partial = bestPartial;
     return true;
+}
+
+bool PlayerBotMgr::BuildCitizenProgressionRoute(
+    Player const* citizen, uint32 zone, float x, float y, float z,
+    std::vector<Companion::CitizenTravel::Waypoint>& waypoints,
+    bool& partial, float& estimatedYards) const
+{
+    using namespace Companion::CitizenTravel;
+    waypoints.clear();
+    partial = false;
+    estimatedYards = 0.0f;
+    if (!citizen || !citizen->GetMap() || zone == 0 ||
+        !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        return false;
+
+    PathInfo path(citizen);
+    Vector3 const start(citizen->GetPositionX(), citizen->GetPositionY(), citizen->GetPositionZ());
+    Vector3 const destination(x, y, z);
+    if (!path.calculate(start, destination))
+        return false;
+
+    uint32 const type = (uint32)path.getPathType();
+    uint32 const unsupported = PATHFIND_SHORTCUT | PATHFIND_NOPATH |
+        PATHFIND_NOT_USING_PATH | PATHFIND_FLYPATH | PATHFIND_UNDERWATER;
+    if (type & unsupported)
+        return false;
+    PathKind const kind = (type & PATHFIND_INCOMPLETE) ? PathKind::Partial :
+        ((type & PATHFIND_NORMAL) ? PathKind::Complete : PathKind::Unsupported);
+
+    Vector3 const actualEnd = path.getActualEndPosition();
+    float const dx = actualEnd.x - start.x;
+    float const dy = actualEnd.y - start.y;
+    float const dz = actualEnd.z - start.z;
+    float const progressYards = std::sqrt(dx * dx + dy * dy + dz * dz);
+    float const pathLength = path.Length();
+    if (DecidePath({kind, pathLength, progressYards}) == PathDecision::Reject)
+        return false;
+
+    PointsArray const& points = path.getPath();
+    if (points.size() < 2)
+        return false;
+    float const remainingX = x - actualEnd.x;
+    float const remainingY = y - actualEnd.y;
+    float const remainingZ = z - actualEnd.z;
+    estimatedYards = pathLength + std::sqrt(remainingX * remainingX +
+                                             remainingY * remainingY +
+                                             remainingZ * remainingZ);
+    if (!std::isfinite(estimatedYards) || estimatedYards <= 0.0f)
+        return false;
+
+    // Compress the navmesh path to bounded, server-verified intermediate
+    // waypoints. Movement still pathfinds locally to each point; long paths
+    // marked incomplete are recalculated at their reachable endpoint.
+    float sinceWaypoint = 0.0f;
+    for (size_t i = 1; i < points.size(); ++i)
+    {
+        Vector3 const& previous = points[i - 1];
+        Vector3 const& current = points[i];
+        float const sx = current.x - previous.x;
+        float const sy = current.y - previous.y;
+        float const sz = current.z - previous.z;
+        sinceWaypoint += std::sqrt(sx * sx + sy * sy + sz * sz);
+        bool const lastPoint = i + 1 == points.size();
+        if (sinceWaypoint < kWaypointSpacingYards && !lastPoint)
+            continue;
+        waypoints.push_back({current.x, current.y, current.z});
+        sinceWaypoint = 0.0f;
+    }
+    partial = kind == PathKind::Partial;
+    return !waypoints.empty();
 }
 
 bool PlayerBotMgr::SelectCitizenHuntAnchor(uint32 mapId, uint32 zoneId, uint32 level,

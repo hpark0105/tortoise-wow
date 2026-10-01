@@ -70,6 +70,46 @@ class ZonePlacementConfigurationTest(unittest.TestCase):
         self.assertIn("safeWeight * 100 < totalWeight *", manager)
         self.assertIn("e->zoneWorldRetryAfterMs = m_elapsedTime + 60000;", manager)
 
+    def test_safety_relocation_uses_recent_danger_cells_and_safe_same_zone_fallback(self):
+        manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
+            encoding="utf-8")
+        recovery = (ROOT / "src" / "game" / "PlayerBots" / "Companion" /
+                    "CitizenRecovery.h").read_text(encoding="utf-8")
+        self.assertIn("FROM bot_citizen_danger_memory WHERE char_guid IN (%s)", manager)
+        self.assertNotIn("updated_at>=UNIX_TIMESTAMP()-21600", manager)
+        self.assertIn("dangerZonesByCitizen[guid]", manager)
+        self.assertIn("ShouldAvoidDangerCell(", manager)
+        self.assertIn("HasDangerAreaEvidence(deaths)", manager)
+        self.assertIn("kDangerMemoryAvoidanceWindowSeconds", recovery)
+        self.assertIn("reject-memory:%u", manager)
+        self.assertIn("reason:danger-memory-unavailable", manager)
+        self.assertIn("!planHasSafeAnchor(plan)", manager)
+        self.assertIn("bool usedSafeAnchorFallback = false", manager)
+        self.assertIn("candidatePlan.key.second != e->zoneWorldSafetyExcludeZone", manager)
+        self.assertIn("safeZoneAnchors.push_back(position)", manager)
+        self.assertIn("safe-anchor-fallback guid:%u map:%u zone:%u", manager)
+
+    def test_danger_placement_filter_is_shared_value_policy_and_all_spawn_modes_use_it(self):
+        recovery = (ROOT / "src" / "game" / "PlayerBots" / "Companion" /
+                    "CitizenRecovery.h").read_text(encoding="utf-8")
+        manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("IsOutsideDangerCell", recovery)
+        self.assertGreaterEqual(manager.count("positionAvoidsRememberedDanger(targetPlan->key.first"), 5)
+
+    def test_citizen_gear_roll_tracks_level_and_uses_updated_quality_policy(self):
+        ai = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotAI.cpp").read_text(
+            encoding="utf-8")
+        policy = (ROOT / "src" / "game" / "PlayerBots" / "Companion" /
+                  "CitizenGearPolicy.h").read_text(encoding="utf-8")
+        migration = (ROOT / "sql" / "database_updates" / "character" /
+                     "20261001150000_character.sql").read_text(encoding="utf-8")
+        self.assertIn("uint8 const citizenGearLevel = level;", ai)
+        self.assertIn("kBlueGearPercent = 15u", policy)
+        self.assertIn("kGreenGearPercent = 45u", policy)
+        self.assertIn("lastRollPolicyVersion < Companion::CitizenGearPolicy::kPolicyVersion", ai)
+        self.assertIn("gear_roll_policy_version", migration)
+
 
 class CitizenProgressionTest(unittest.TestCase):
     @classmethod

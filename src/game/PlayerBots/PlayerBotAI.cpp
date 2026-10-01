@@ -9,6 +9,7 @@
 #include "ObjectMgr.h"
 #include "MoveSpline.h"
 #include "PlayerBotMgr.h"
+#include "Companion/CitizenGearPolicy.h"
 #include "ObjectAccessor.h"
 #include "Timer.h"
 #include "Group.h"
@@ -29,6 +30,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <cstring>
 
 
 namespace
@@ -1885,29 +1887,78 @@ void PlayerBotAI::OnPlayerLogin()
     LoadCitizenJournal();
     if (me && IsZoneCitizen())
     {
+        // PlayerBotAI is retained by the roster entry across logins. Rebuild
+        // this episode from the current position so a safe respawn does not
+        // keep a stale relocation request or zone-wide retreat timer.
+        _citizenSafetyRelocationRequested = false;
+        _citizenDeathsAtSpot = 0;
+        _citizenDeathMap = 0;
+        _citizenDeathZone = 0;
+        _citizenDeathX = 0.0f;
+        _citizenDeathY = 0.0f;
+        _citizenDangerZoneUntilMs = 0;
         QueryResult* danger = CharacterDatabase.PQuery(
-            "SELECT map_id,zone_id,deaths,safe_until FROM bot_citizen_danger_memory "
+            "SELECT map_id,zone_id,cell_x,cell_y,deaths,"
+            "safe_until>UNIX_TIMESTAMP(),"
+            "GREATEST(0,safe_until-UNIX_TIMESTAMP()),"
+            "GREATEST(0,UNIX_TIMESTAMP()-updated_at) "
+            "FROM bot_citizen_danger_memory "
             "WHERE char_guid=%u AND map_id=%u AND zone_id=%u "
-            "AND safe_until>UNIX_TIMESTAMP() ORDER BY safe_until DESC LIMIT 1",
+            "AND safe_until>UNIX_TIMESTAMP() ORDER BY safe_until DESC",
             me->GetGUIDLow(), me->GetMapId(), me->GetZoneId());
         if (danger)
         {
-            Field* fields = danger->Fetch();
-            _citizenDeathMap = fields[0].GetUInt32();
-            _citizenDeathZone = fields[1].GetUInt32();
-            _citizenDeathsAtSpot = fields[2].GetUInt8();
-            uint32 const remainingSeconds = fields[3].GetUInt32() - (uint32)time(nullptr);
-            _citizenDangerZoneUntilMs = WorldTimer::getMSTime() + remainingSeconds * 1000;
-            // A restarted citizen must not forget an active, durable warning
-            // and immediately return to hunting the same fatal ground.
-            if (!me->GetGroup())
+            // Restore the active danger-cell memory, but only re-arm safety
+            // relocation when this login position is still inside an active
+            // remembered cell and its configured buffer. A safe anchor
+            // elsewhere in the same zone must not recreate the request, and
+            // a missing query result must not invent one.
+            struct LoginDangerRow
             {
-                _citizenSafetyRelocationRequested = true;
-                if (botEntry)
+                Companion::CitizenRecovery::RememberedDangerCell cell;
+                uint32 mapId;
+                uint32 zoneId;
+                uint32 remainingSeconds;
+            };
+            std::vector<LoginDangerRow> rows;
+            std::vector<Companion::CitizenRecovery::RememberedDangerCell> cells;
+            do
+            {
+                Field* fields = danger->Fetch();
+                rows.push_back({
+                    {fields[2].GetInt32(), fields[3].GetInt32(),
+                     fields[4].GetUInt8(), fields[5].GetUInt32() != 0,
+                     fields[7].GetUInt32()},
+                    fields[0].GetUInt32(), fields[1].GetUInt32(),
+                    fields[6].GetUInt32()});
+                cells.push_back(rows.back().cell);
+            } while (danger->NextRow());
+            auto const triggered =
+                Companion::CitizenRecovery::FirstUnsafeRememberedCell(
+                    me->GetPositionX(), me->GetPositionY(), cells);
+            if (triggered)
+            {
+                LoginDangerRow const& row = rows[*triggered];
+                // Keep the death memory, retreat timer, and the bot entry
+                // exclusion synchronized with the cell that actually
+                // triggered the relocation.
+                _citizenDeathMap = row.mapId;
+                _citizenDeathZone = row.zoneId;
+                _citizenDeathsAtSpot = static_cast<uint8>(row.cell.deaths);
+                _citizenDangerZoneUntilMs =
+                    WorldTimer::getMSTime() + row.remainingSeconds * 1000;
+                // A restarted citizen must not forget an active, durable
+                // warning and immediately return to hunting the same fatal
+                // ground.
+                if (!me->GetGroup())
                 {
-                    botEntry->zoneWorldSafetyRelocation = true;
-                    botEntry->zoneWorldSafetyExcludeMap = _citizenDeathMap;
-                    botEntry->zoneWorldSafetyExcludeZone = _citizenDeathZone;
+                    _citizenSafetyRelocationRequested = true;
+                    if (botEntry)
+                    {
+                        botEntry->zoneWorldSafetyRelocation = true;
+                        botEntry->zoneWorldSafetyExcludeMap = _citizenDeathMap;
+                        botEntry->zoneWorldSafetyExcludeZone = _citizenDeathZone;
+                    }
                 }
             }
             delete danger;
@@ -1946,7 +1997,10 @@ void PlayerBotAI::LoadCitizenJournal()
         return;
     QueryResult* result = CharacterDatabase.PQuery(
         "SELECT intent, current_job, progression_band, last_level, target_map, target_zone, "
-        "target_x, target_y, target_z, visited_zones FROM bot_citizen_journal "
+        "target_x, target_y, target_z, visited_zones, route_failure_map, route_failure_zone, "
+        "route_failure_x, route_failure_y, route_failure_z, route_failure_reason, "
+        "GREATEST(0,route_failure_until-UNIX_TIMESTAMP()), route_search_cursor "
+        "FROM bot_citizen_journal "
         "WHERE char_guid = %u", me->GetGUIDLow());
     if (!result)
         return;
@@ -1961,15 +2015,32 @@ void PlayerBotAI::LoadCitizenJournal()
     _progressionFinalY = fields[7].GetFloat();
     _progressionFinalZ = fields[8].GetFloat();
     _citizenVisitedZones = fields[9].GetUInt32();
+    _progressionBlockedAnchor.mapId = fields[10].GetUInt32();
+    _progressionBlockedAnchor.zoneId = fields[11].GetUInt32();
+    _progressionBlockedAnchor.x = fields[12].GetFloat();
+    _progressionBlockedAnchor.y = fields[13].GetFloat();
+    _progressionBlockedAnchor.z = fields[14].GetFloat();
+    _progressionBlockedReason = static_cast<Companion::CitizenTravel::RouteFailureReason>(
+        fields[15].GetUInt8() <= (uint8)Companion::CitizenTravel::RouteFailureReason::AnchorBlocked
+            ? fields[15].GetUInt8() : 0);
+    _progressionBlockedRemainingMs =
+        std::min<uint32>(Companion::CitizenTravel::kBlockedAnchorCooldownMs / 1000,
+                         fields[16].GetUInt32()) * 1000;
+    _progressionCandidateCursor = fields[17].GetUInt32();
+    _progressionBlockedAnchor.active = _progressionBlockedRemainingMs > 0 &&
+        _progressionBlockedAnchor.mapId == me->GetMapId() &&
+        _progressionBlockedAnchor.zoneId != 0 &&
+        _progressionBlockedReason != Companion::CitizenTravel::RouteFailureReason::None;
     delete result;
 
     uint8 const currentBand = static_cast<uint8>((std::max<uint32>(1, me->GetLevel()) - 1) / 10);
     uint32 const productiveMinimum = me->GetLevel() > 3 ? me->GetLevel() - 3 : 1;
     uint32 const targetProductiveShare = sPlayerBotMgr.GetCitizenZoneProductiveSharePercent(
         targetMap, targetZone, productiveMinimum, me->GetLevel());
-    if (intent == 1 && recordedLevel == me->GetLevel() && band == currentBand &&
-        targetMap == me->GetMapId() && targetZone && targetZone != me->GetZoneId() &&
-        targetProductiveShare >= PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent)
+    if (recordedLevel == me->GetLevel() && band == currentBand &&
+        Companion::CitizenTravel::CanResumeRoute(intent, targetMap, me->GetMapId(),
+            targetZone, me->GetZoneId(), targetProductiveShare,
+            PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent))
     {
         _progressionTargetZone = targetZone;
         _progressionMap = me->GetMapId();
@@ -1989,17 +2060,32 @@ void PlayerBotAI::PersistCitizenJournal(uint8 intent, bool recordVisit)
     CharacterDatabase.DirectPExecute(
         "INSERT INTO bot_citizen_journal "
         "(char_guid, intent, current_job, progression_band, last_level, current_map, current_zone, "
-        "target_map, target_zone, target_x, target_y, target_z, visited_zones, updated_at) "
-        "VALUES (%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%f,%f,%u,UNIX_TIMESTAMP()) "
+        "target_map, target_zone, target_x, target_y, target_z, visited_zones, "
+        "route_failure_map, route_failure_zone, route_failure_x, route_failure_y, route_failure_z, "
+        "route_failure_until, route_failure_reason, route_search_cursor, updated_at) "
+        "VALUES (%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%f,%f,%u,%u,%u,%f,%f,%f,UNIX_TIMESTAMP()+%u,%u,%u,UNIX_TIMESTAMP()) "
         "ON DUPLICATE KEY UPDATE intent=VALUES(intent), current_job=VALUES(current_job), progression_band=VALUES(progression_band), "
         "last_level=VALUES(last_level), current_map=VALUES(current_map), current_zone=VALUES(current_zone), "
         "target_map=VALUES(target_map), target_zone=VALUES(target_zone), target_x=VALUES(target_x), "
         "target_y=VALUES(target_y), target_z=VALUES(target_z), visited_zones=VALUES(visited_zones), "
+        "route_failure_map=VALUES(route_failure_map), route_failure_zone=VALUES(route_failure_zone), "
+        "route_failure_x=VALUES(route_failure_x), route_failure_y=VALUES(route_failure_y), "
+        "route_failure_z=VALUES(route_failure_z), route_failure_until=VALUES(route_failure_until), "
+        "route_failure_reason=VALUES(route_failure_reason), "
+        "route_search_cursor=VALUES(route_search_cursor), "
         "updated_at=VALUES(updated_at)",
         me->GetGUIDLow(), intent, _citizenActivityIntent, _progressionBand, me->GetLevel(), me->GetMapId(), me->GetZoneId(),
         intent == 1 ? me->GetMapId() : 0, intent == 1 ? _progressionTargetZone : 0,
         intent == 1 ? _progressionFinalX : 0.0f, intent == 1 ? _progressionFinalY : 0.0f,
-        intent == 1 ? _progressionFinalZ : 0.0f, _citizenVisitedZones);
+        intent == 1 ? _progressionFinalZ : 0.0f, _citizenVisitedZones,
+        _progressionBlockedAnchor.active ? _progressionBlockedAnchor.mapId : 0,
+        _progressionBlockedAnchor.active ? _progressionBlockedAnchor.zoneId : 0,
+        _progressionBlockedAnchor.active ? _progressionBlockedAnchor.x : 0.0f,
+        _progressionBlockedAnchor.active ? _progressionBlockedAnchor.y : 0.0f,
+        _progressionBlockedAnchor.active ? _progressionBlockedAnchor.z : 0.0f,
+        _progressionBlockedAnchor.active ? (_progressionBlockedRemainingMs + 999) / 1000 : 0,
+        _progressionBlockedAnchor.active ? (uint8)_progressionBlockedReason : 0,
+        _progressionCandidateCursor);
     if (recordVisit)
         CharacterDatabase.DirectPExecute(
             "INSERT INTO bot_citizen_zone_visit (char_guid,map_id,zone_id,first_seen,last_seen,visits) "
@@ -2034,7 +2120,7 @@ void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
     uint32 const productiveShare = sPlayerBotMgr.GetCitizenZoneProductiveSharePercent(
         me->GetMapId(), zone, productiveMinimum, level);
     bool const levelCapped = level >= 60;
-    bool const overleveled = !levelCapped && zoneLevel > 0 &&
+    bool const overleveled = !levelCapped &&
         productiveShare < PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent;
     bool const changed = band != _progressionBand || zone != _progressionZone ||
                          zoneLevel != _progressionZoneLevel ||
@@ -2051,24 +2137,6 @@ void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
                        me->GetGUIDLow(), level, band * 10 + 1,
                        std::min<uint32>(60, (band + 1) * 10), zone, zoneLevel,
                        productiveShare, status);
-        if (overleveled && me->IsInWorld())
-        {
-            uint32 destinationZone = 0;
-            float destinationX = 0.0f, destinationY = 0.0f, destinationZ = 0.0f;
-            bool const hasDestination = sPlayerBotMgr.SelectCitizenProgressionDestination(
-                me, destinationZone, destinationX, destinationY, destinationZ);
-            AreaEntry const* destination = AreaEntry::GetById(destinationZone);
-            if (hasDestination && destinationZone != zone && destination &&
-                destination->Name && destination->Name[0])
-            {
-                std::string const line = "These creatures are too low level for me. I am bound for " +
-                    std::string(destination->Name) + ".";
-                me->Say(line.c_str(), LANG_UNIVERSAL);
-            }
-            else
-                me->Say("These creatures are too low level for me. I am moving on to a better hunting ground.",
-                        LANG_UNIVERSAL);
-        }
         _progressionReportMs = 60000;
     }
 }
@@ -3404,26 +3472,28 @@ void PlayerBotAI::AutoEquipForLevel()
     if (IsZoneCitizen())
     {
         QueryResult* roll = CharacterDatabase.PQuery(
-            "SELECT gear_roll_level FROM bot_citizen_journal WHERE char_guid=%u",
+            "SELECT gear_roll_level,gear_roll_policy_version "
+            "FROM bot_citizen_journal WHERE char_guid=%u",
             me->GetGUIDLow());
         uint8 lastRollLevel = 0;
+        uint8 lastRollPolicyVersion = 0;
         if (roll)
         {
-            lastRollLevel = roll->Fetch()[0].GetUInt8();
+            Field* fields = roll->Fetch();
+            lastRollLevel = fields[0].GetUInt8();
+            lastRollPolicyVersion = fields[1].GetUInt8();
             delete roll;
         }
         citizenInitialGearRoll = !lastRollLevel;
-        citizenGearRollDue = citizenInitialGearRoll || level > lastRollLevel;
+        citizenGearRollDue = citizenInitialGearRoll || level > lastRollLevel ||
+            lastRollPolicyVersion < Companion::CitizenGearPolicy::kPolicyVersion;
         if (!citizenGearRollDue)
             return;
     }
-    // Citizens should look like ordinary leveling characters, not receive
-    // the strongest free kit at every login. A GUID-derived level band makes
-    // their common gear varied but stable; earned better gear is never removed.
-    uint8 const citizenGearLevel = IsZoneCitizen()
-        ? std::max<uint8>(1, level > 2 + me->GetGUIDLow() % 4
-                                ? level - 2 - me->GetGUIDLow() % 4 : 1)
-        : level;
+    // Citizens receive items usable at their current level. Their stable
+    // per-slot quality roll keeps the equipment varied without giving them
+    // items above their level; earned better gear is never removed.
+    uint8 const citizenGearLevel = level;
     uint8 const citizenSpec = IsZoneCitizen() && level >= 10 ? GetCitizenSpecIndex() : 0;
     bool const protectionWarrior = IsZoneCitizen() && me->GetClass() == CLASS_WARRIOR && citizenSpec == 2;
     bool const shieldAndOneHandSpec = IsZoneCitizen() && level >= 10 &&
@@ -3522,9 +3592,17 @@ void PlayerBotAI::AutoEquipForLevel()
     auto desiredCitizenQuality = [&](uint16 slot) -> uint32
     {
         uint32 const roll = (me->GetGUIDLow() * 2654435761u + uint32(level) * 2246822519u +
-                             uint32(slot & 0xff) * 3266489917u) % 10;
-        return roll == 0 ? ITEM_QUALITY_RARE :
-               (roll <= 3 ? ITEM_QUALITY_UNCOMMON : ITEM_QUALITY_POOR);
+                             uint32(slot & 0xff) * 3266489917u) %
+                            Companion::CitizenGearPolicy::kRollRange;
+        switch (Companion::CitizenGearPolicy::QualityForRoll(roll))
+        {
+            case Companion::CitizenGearPolicy::QualityTier::Blue:
+                return ITEM_QUALITY_RARE;
+            case Companion::CitizenGearPolicy::QualityTier::Green:
+                return ITEM_QUALITY_UNCOMMON;
+            default:
+                return ITEM_QUALITY_NORMAL;
+        }
     };
 
     std::map<std::pair<uint16, uint32>, GearChoice> bestBySlotQuality;
@@ -3554,8 +3632,11 @@ void PlayerBotAI::AutoEquipForLevel()
             // crude estimate: item level maps roughly to 2/3 of required level
             effectiveLevel = proto.ItemLevel ? std::max<uint32>(1, (proto.ItemLevel * 2) / 3) : level;
         }
-        if (effectiveLevel > citizenGearLevel ||
-            std::abs(int(citizenGearLevel) - int(effectiveLevel)) > int(_gearMaxDiff))
+        bool const levelEligible = IsZoneCitizen()
+            ? Companion::CitizenGearPolicy::IsEligibleEffectiveLevel(citizenGearLevel, effectiveLevel)
+            : (effectiveLevel <= citizenGearLevel &&
+               std::abs(int(citizenGearLevel) - int(effectiveLevel)) <= int(_gearMaxDiff));
+        if (!levelEligible)
             continue;
 
         if (proto.RequiredSkill || proto.RequiredSpell || proto.RequiredHonorRank || proto.RequiredCityRank || proto.RequiredReputationRank)
@@ -3653,47 +3734,111 @@ void PlayerBotAI::AutoEquipForLevel()
     }
 
     std::map<uint16, GearChoice> selectedBySlot;
+    uint32 targetBlueSlots = 0;
+    uint32 targetGreenSlots = 0;
+    uint32 targetNormalSlots = 0;
+    uint32 selectedBlueSlots = 0;
+    uint32 selectedGreenSlots = 0;
+    uint32 selectedNormalSlots = 0;
+    uint32 selectedProtoBlueSlots = 0;
+    uint32 selectedProtoGreenSlots = 0;
+    uint32 selectedProtoNormalSlots = 0;
     for (auto const& candidate : bestBySlotQuality)
-        if (!selectedBySlot.count(candidate.first.first))
+    {
+        uint16 const dest = candidate.first.first;
+        if (selectedBySlot.count(dest))
+            continue;
+
+        // Enumerate each slot once and search by target tier. Iterating the
+        // (slot, quality) map directly selected its lowest key first.
+        uint32 const target = IsZoneCitizen() ? desiredCitizenQuality(dest) : ITEM_QUALITY_NORMAL;
+        if (target == ITEM_QUALITY_RARE)
+            ++targetBlueSlots;
+        else if (target == ITEM_QUALITY_UNCOMMON)
+            ++targetGreenSlots;
+        else
+            ++targetNormalSlots;
+        for (uint32 rank = 0; rank < 4; ++rank)
         {
-            uint16 const dest = candidate.first.first;
-            uint32 const target = IsZoneCitizen() ? desiredCitizenQuality(dest) : ITEM_QUALITY_NORMAL;
-            uint32 fallback[4];
-            if (target == ITEM_QUALITY_RARE)
+            uint32 const quality = IsZoneCitizen()
+                ? Companion::CitizenGearPolicy::FallbackQualityAt(target, rank)
+                : (rank == 0 ? ITEM_QUALITY_NORMAL :
+                   rank == 1 ? ITEM_QUALITY_UNCOMMON :
+                   rank == 2 ? ITEM_QUALITY_RARE : ITEM_QUALITY_POOR);
+            auto found = bestBySlotQuality.find(std::make_pair(dest, quality));
+            if (found != bestBySlotQuality.end())
             {
-                fallback[0] = ITEM_QUALITY_RARE;
-                fallback[1] = ITEM_QUALITY_UNCOMMON;
-                fallback[2] = ITEM_QUALITY_NORMAL;
-                fallback[3] = ITEM_QUALITY_POOR;
-            }
-            else if (target == ITEM_QUALITY_UNCOMMON)
-            {
-                fallback[0] = ITEM_QUALITY_UNCOMMON;
-                fallback[1] = ITEM_QUALITY_POOR;
-                fallback[2] = ITEM_QUALITY_NORMAL;
-                fallback[3] = ITEM_QUALITY_RARE;
-            }
-            else
-            {
-                fallback[0] = ITEM_QUALITY_POOR;
-                fallback[1] = ITEM_QUALITY_NORMAL;
-                fallback[2] = ITEM_QUALITY_UNCOMMON;
-                fallback[3] = ITEM_QUALITY_RARE;
-            }
-            for (uint32 quality : fallback)
-            {
-                auto found = bestBySlotQuality.find(std::make_pair(dest, quality));
-                if (found != bestBySlotQuality.end())
+                selectedBySlot[dest] = found->second;
+                if (quality == ITEM_QUALITY_RARE)
+                    ++selectedBlueSlots;
+                else if (quality == ITEM_QUALITY_UNCOMMON)
+                    ++selectedGreenSlots;
+                else
+                    ++selectedNormalSlots;
+                if (found->second.proto)
                 {
-                    selectedBySlot[dest] = found->second;
-                    break;
+                    if (found->second.proto->Quality == ITEM_QUALITY_RARE)
+                        ++selectedProtoBlueSlots;
+                    else if (found->second.proto->Quality == ITEM_QUALITY_UNCOMMON)
+                        ++selectedProtoGreenSlots;
+                    else
+                        ++selectedProtoNormalSlots;
                 }
+                break;
             }
         }
+    }
 
     // AC-10 R4: count equip failures so the gear-roll marker is never
     // written ahead of durable equipment changes.
     uint32 equipFailures = 0;
+    uint32 equipChanges = 0;
+    auto hasFreeCitizenInventorySlot = [&]() -> bool
+    {
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                return true;
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+            if (Bag* contents = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, bag))
+                for (uint8 slot = 0; slot < contents->GetBagSize(); ++slot)
+                    if (!me->GetItemByPos(bag, slot))
+                        return true;
+        return false;
+    };
+    auto discardOneCitizenInventoryItem = [&]() -> bool
+    {
+        if (!IsZoneCitizen())
+            return false;
+
+        auto discardAt = [&](uint8 bag, uint8 slot) -> bool
+        {
+            Item* item = me->GetItemByPos(bag, slot);
+            if (!item || item->GetEntry() == 6948) // Hearthstone is always retained.
+                return false;
+
+            uint32 const entry = item->GetEntry();
+            me->DestroyItem(bag, slot, true);
+            if (me->GetItemByPos(bag, slot))
+                return false;
+
+            sLog.outString("[ZoneCitizen][Gear] inventory item discarded guid:%u item:%u bag:%u slot:%u",
+                           me->GetGUIDLow(), entry, uint32(bag), uint32(slot));
+            return true;
+        };
+
+        // Clear carried contents only. Equipped bags and bank contents are
+        // preserved; any carried item except the Hearthstone may be discarded
+        // when a replacement needs room for the item it is replacing.
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            if (discardAt(INVENTORY_SLOT_BAG_0, slot))
+                return true;
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+            if (Bag* contents = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, bag))
+                for (uint8 slot = 0; slot < contents->GetBagSize(); ++slot)
+                    if (discardAt(bag, slot))
+                        return true;
+        return false;
+    };
     for (auto const& it : selectedBySlot)
     {
         uint16 dest = it.first;
@@ -3733,12 +3878,56 @@ void PlayerBotAI::AutoEquipForLevel()
                      (sameOrBetterQualityAtLevel || materiallyHigherLevel)))
                     continue;
             }
+            // First try the normal 1-for-1 replacement. If every carried
+            // slot is occupied, discard carried items until the old gear can
+            // be stored. The Hearthstone is excluded from cleanup.
             me->AutoUnequipItemFromSlot(slot, false);
+            while (me->GetItemByPos(bag, slot) && IsZoneCitizen() &&
+                   !hasFreeCitizenInventorySlot() && discardOneCitizenInventoryItem())
+                me->AutoUnequipItemFromSlot(slot, false);
+
+            // If no disposable item remains (for example, only a Hearthstone
+            // is carried), preserve the replaced gear in mail rather than
+            // blocking the selected upgrade.
+            if (me->GetItemByPos(bag, slot) && IsZoneCitizen())
+                me->AutoUnequipItemFromSlot(slot, true);
+            if (me->GetItemByPos(bag, slot))
+            {
+                ++equipFailures;
+                if (IsZoneCitizen())
+                    sLog.outError("[ZoneCitizen][Gear] replacement blocked guid:%u level:%u slot:%u reason:occupied",
+                                  me->GetGUIDLow(), level, uint32(slot));
+                continue;
+            }
         }
 
-        if (!me->EquipNewItem(dest, proto->ItemId, true))
+        Item* equipped = me->EquipNewItem(dest, proto->ItemId, true);
+        Item* actual = me->GetItemByPos(bag, slot);
+        if (!equipped || !actual || actual->GetEntry() != proto->ItemId)
+        {
             ++equipFailures;
+            if (IsZoneCitizen())
+                sLog.outError("[ZoneCitizen][Gear] equip verification failed guid:%u level:%u slot:%u item:%u",
+                              me->GetGUIDLow(), level, uint32(slot), proto->ItemId);
+        }
+        else
+            ++equipChanges;
     }
+
+    uint32 equippedBlueSlots = 0;
+    uint32 equippedGreenSlots = 0;
+    uint32 equippedNormalSlots = 0;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        if (Item* equipped = me->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            if (ItemPrototype const* proto = equipped->GetProto())
+            {
+                if (proto->Quality == ITEM_QUALITY_RARE)
+                    ++equippedBlueSlots;
+                else if (proto->Quality == ITEM_QUALITY_UNCOMMON)
+                    ++equippedGreenSlots;
+                else
+                    ++equippedNormalSlots;
+            }
 
     if (IsZoneCitizen() && citizenGearRollDue)
     {
@@ -3756,15 +3945,26 @@ void PlayerBotAI::AutoEquipForLevel()
         }
         me->SaveInventoryAndGoldToDB();
         bool const markerOk = CharacterDatabase.DirectPExecute(
-            "INSERT INTO bot_citizen_journal (char_guid, gear_roll_level) VALUES (%u,%u) "
-            "ON DUPLICATE KEY UPDATE gear_roll_level=GREATEST(gear_roll_level,VALUES(gear_roll_level))",
-            me->GetGUIDLow(), level);
+            "INSERT INTO bot_citizen_journal (char_guid, gear_roll_level, gear_roll_policy_version) "
+            "VALUES (%u,%u,%u) ON DUPLICATE KEY UPDATE "
+            "gear_roll_level=GREATEST(gear_roll_level,VALUES(gear_roll_level)), "
+            "gear_roll_policy_version=GREATEST(gear_roll_policy_version,VALUES(gear_roll_policy_version))",
+            me->GetGUIDLow(), level,
+            uint32(Companion::CitizenGearPolicy::kPolicyVersion));
         if (!markerOk)
             sLog.outError("[ZoneCitizen][Gear] marker write failed guid:%u level:%u (re-roll next login)",
                           me->GetGUIDLow(), level);
-        sLog.outString("[ZoneCitizen][Gear] roll-complete guid:%u level:%u initial:%u slots:%u",
+        sLog.outString("[ZoneCitizen][Gear] roll-complete guid:%u level:%u initial:%u slots:%u "
+                       "target-blue:%u target-green:%u target-normal:%u "
+                       "selected-blue:%u selected-green:%u selected-normal:%u "
+                       "proto-blue:%u proto-green:%u proto-normal:%u "
+                       "equipped-blue:%u equipped-green:%u equipped-normal:%u changed:%u",
                        me->GetGUIDLow(), level, citizenInitialGearRoll ? 1 : 0,
-                       uint32(selectedBySlot.size()));
+                       uint32(selectedBySlot.size()), targetBlueSlots, targetGreenSlots,
+                       targetNormalSlots, selectedBlueSlots, selectedGreenSlots,
+                       selectedNormalSlots, selectedProtoBlueSlots, selectedProtoGreenSlots,
+                       selectedProtoNormalSlots, equippedBlueSlots, equippedGreenSlots,
+                       equippedNormalSlots, equipChanges);
     }
 }
 
@@ -4324,19 +4524,37 @@ bool PlayerBotAI::BeginProgressionTravel()
         !_progressionOverleveled || _progressionRetryMs)
         return false;
     uint32 targetZone = 0;
+    std::vector<Companion::CitizenTravel::Waypoint> routeWaypoints;
+    bool routePartial = false;
+    uint32 nextCandidateCursor = _progressionCandidateCursor;
+    Companion::CitizenTravel::BlockedAnchor const* blockedAnchor =
+        _progressionBlockedRemainingMs && _progressionBlockedAnchor.active
+            ? &_progressionBlockedAnchor : nullptr;
     if (!sPlayerBotMgr.SelectCitizenProgressionDestination(
-            me, targetZone, _progressionFinalX, _progressionFinalY, _progressionFinalZ))
+            me, targetZone, _progressionFinalX, _progressionFinalY, _progressionFinalZ,
+            &routeWaypoints, blockedAnchor, &routePartial,
+            _progressionCandidateCursor, &nextCandidateCursor))
     {
         // Do not repeat a full zone scan every AI tick when the current
         // location has no verified, level-appropriate nearby destination.
         _progressionRetryMs = 60000;
+        _progressionCandidateCursor = nextCandidateCursor;
+        PersistCitizenJournal(0);
         sLog.outString("[ZoneCitizen][Progression] no verified suitable destination guid:%u map:%u zone:%u level:%u",
                        me->GetGUIDLow(), me->GetMapId(), me->GetZoneId(), me->GetLevel());
         return false;
     }
     _progressionTargetZone = targetZone;
+    _progressionCandidateCursor = 0;
     _progressionMap = me->GetMapId();
     _progressionTravelActive = true;
+    _progressionWaypoints.swap(routeWaypoints);
+    _progressionWaypointIndex = 0;
+    _progressionRoutePartial = routePartial;
+    _progressionPartialReplans = 0;
+    _progressionPartialEndpoints.clear();
+    if (routePartial && !_progressionWaypoints.empty())
+        _progressionPartialEndpoints.push_back(_progressionWaypoints.back());
     PersistCitizenJournal(1);
     AreaEntry const* target = AreaEntry::GetById(targetZone);
     sLog.outString("[ZoneCitizen][Progression] route start guid:%u from:%u to:%u (%s)",
@@ -4360,9 +4578,39 @@ bool PlayerBotAI::BeginProgressionTravel()
 
 void PlayerBotAI::FinishProgressionTravel(bool arrived, char const* reason)
 {
+    if (arrived)
+    {
+        _progressionBlockedAnchor = Companion::CitizenTravel::BlockedAnchor();
+        _progressionBlockedRemainingMs = 0;
+        _progressionBlockedReason = Companion::CitizenTravel::RouteFailureReason::None;
+    }
+    else if (_progressionTargetZone)
+    {
+        _progressionBlockedAnchor.active = true;
+        _progressionBlockedAnchor.mapId = _progressionMap;
+        _progressionBlockedAnchor.zoneId = _progressionTargetZone;
+        _progressionBlockedAnchor.x = _progressionFinalX;
+        _progressionBlockedAnchor.y = _progressionFinalY;
+        _progressionBlockedAnchor.z = _progressionFinalZ;
+        _progressionBlockedRemainingMs = Companion::CitizenTravel::kBlockedAnchorCooldownMs;
+        _progressionBlockedReason = reason && std::strstr(reason, "stalled")
+            ? Companion::CitizenTravel::RouteFailureReason::Stalled
+            : (reason && std::strstr(reason, "anchor")
+                ? Companion::CitizenTravel::RouteFailureReason::AnchorBlocked
+                : Companion::CitizenTravel::RouteFailureReason::NoPath);
+        sLog.outString("[ZoneCitizen][Progression] anchor cooldown guid:%u zone:%u reason:%u seconds:%u",
+                       me ? me->GetGUIDLow() : 0, _progressionTargetZone,
+                       (uint32)_progressionBlockedReason,
+                       _progressionBlockedRemainingMs / 1000);
+    }
     _progressionTravelActive = false;
     _progressionTargetZone = 0;
     _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
+    _progressionWaypoints.clear();
+    _progressionWaypointIndex = 0;
+    _progressionRoutePartial = false;
+    _progressionPartialReplans = 0;
+    _progressionPartialEndpoints.clear();
     if (arrived)
     {
         _activityHomeSet = false;
@@ -4427,26 +4675,78 @@ bool PlayerBotAI::AdvanceProgressionTravel()
         return false;
     }
 
-    float const leg = std::min(60.0f, distance);
-    float x = me->GetPositionX() + dx * leg / distance;
-    float y = me->GetPositionY() + dy * leg / distance;
-    // The final anchor height can be far above or below this short local
-    // leg. Resolve terrain at the leg itself; passing the distant
-    // destination Z makes otherwise walkable cross-zone routes look blocked.
-    float z = me->GetPositionZ();
-    me->UpdateGroundPositionZ(x, y, z);
-    if (!me->GetMap()->GetWalkHitPosition(nullptr, me->GetPositionX(), me->GetPositionY(),
-                                           me->GetPositionZ(), x, y, z))
+    if (_progressionWaypointIndex >= _progressionWaypoints.size())
     {
-        sLog.outError("[ZoneCitizen][Progression] route blocked guid:%u to-zone:%u",
-                      me->GetGUIDLow(), _progressionTargetZone);
-        FinishProgressionTravel(false, "progression-route-blocked");
-        return false;
+        if (_progressionRoutePartial &&
+            ++_progressionPartialReplans > Companion::CitizenTravel::kMaximumPartialRouteReplans)
+        {
+            sLog.outError("[ZoneCitizen][Progression] route partial-limit guid:%u to-zone:%u",
+                          me->GetGUIDLow(), _progressionTargetZone);
+            FinishProgressionTravel(false, "progression-route-stalled");
+            return false;
+        }
+        std::vector<Companion::CitizenTravel::Waypoint> replannedWaypoints;
+        bool partial = false;
+        float estimatedYards = 0.0f;
+        if (!sPlayerBotMgr.BuildCitizenProgressionRoute(me, _progressionTargetZone,
+                _progressionFinalX, _progressionFinalY, _progressionFinalZ,
+                replannedWaypoints, partial, estimatedYards) || replannedWaypoints.empty())
+        {
+            sLog.outError("[ZoneCitizen][Progression] route no-path guid:%u to-zone:%u",
+                          me->GetGUIDLow(), _progressionTargetZone);
+            FinishProgressionTravel(false, "progression-no-route");
+            return false;
+        }
+        if (partial)
+        {
+            Companion::CitizenTravel::Waypoint const& endpoint = replannedWaypoints.back();
+            for (Companion::CitizenTravel::Waypoint const& prior : _progressionPartialEndpoints)
+                if (std::hypot(endpoint.x - prior.x, endpoint.y - prior.y) <
+                    Companion::CitizenTravel::kRepeatedPartialEndpointToleranceYards)
+                {
+                    sLog.outError("[ZoneCitizen][Progression] route repeated-partial-endpoint guid:%u to-zone:%u",
+                                  me->GetGUIDLow(), _progressionTargetZone);
+                    FinishProgressionTravel(false, "progression-route-stalled");
+                    return false;
+                }
+            _progressionPartialEndpoints.push_back(endpoint);
+            if (_progressionPartialEndpoints.size() > 8)
+                _progressionPartialEndpoints.erase(_progressionPartialEndpoints.begin());
+        }
+        else
+        {
+            _progressionPartialReplans = 0;
+            _progressionPartialEndpoints.clear();
+        }
+        _progressionWaypoints.swap(replannedWaypoints);
+        _progressionWaypointIndex = 0;
+        _progressionRoutePartial = partial;
     }
-    StartActivityTravel(x, y, z, 0, 255, true);
-    sLog.outString("[ZoneCitizen][Progression] route leg guid:%u zone:%u to-zone:%u dist:%.1f",
-                   me->GetGUIDLow(), me->GetZoneId(), _progressionTargetZone, distance);
-    return true;
+
+    while (_progressionWaypointIndex < _progressionWaypoints.size())
+    {
+        Companion::CitizenTravel::Waypoint const& waypoint =
+            _progressionWaypoints[_progressionWaypointIndex++];
+        if (!std::isfinite(waypoint.x) || !std::isfinite(waypoint.y) || !std::isfinite(waypoint.z))
+            continue;
+        float const legDistance = std::sqrt(
+            std::pow(waypoint.x - me->GetPositionX(), 2.0f) +
+            std::pow(waypoint.y - me->GetPositionY(), 2.0f) +
+            std::pow(waypoint.z - me->GetPositionZ(), 2.0f));
+        if (legDistance < 8.0f)
+            continue;
+        StartActivityTravel(waypoint.x, waypoint.y, waypoint.z, 0, 255, true);
+        sLog.outString("[ZoneCitizen][Progression] route waypoint guid:%u zone:%u to-zone:%u dist:%.1f partial:%u remaining:%u",
+                       me->GetGUIDLow(), me->GetZoneId(), _progressionTargetZone,
+                       legDistance, _progressionRoutePartial ? 1 : 0,
+                       (uint32)(_progressionWaypoints.size() - _progressionWaypointIndex));
+        return true;
+    }
+
+    sLog.outError("[ZoneCitizen][Progression] route no-progress guid:%u to-zone:%u",
+                  me->GetGUIDLow(), _progressionTargetZone);
+    FinishProgressionTravel(false, "progression-route-stalled");
+    return false;
 }
 
 void PlayerBotAI::RememberActivityArrival()
@@ -4518,19 +4818,10 @@ void PlayerBotAI::AbandonActivityTravel()
     _travelActive = false;
     _travelHuntGuid = 0;
     _travelNudging = false;
-    _progressionTravelActive = false;
     if (abandonedProgression)
-    {
-        // A stalled path is evidence against this direct leg. Do not reload
-        // into the same target or restart it every world tick; return to a
-        // normal activity, persist the recovery state, and retry selection
-        // only after a bounded cooldown.
-        _progressionTargetZone = 0;
-        _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
-        _progressionRetryMs = 120000;
-        SetCitizenActivityIntent(4, "progression-route-stalled");
-        PersistCitizenJournal(0);
-    }
+        FinishProgressionTravel(false, "progression-route-stalled");
+    else
+        _progressionTravelActive = false;
     _activityPauseMs = 3000;
 }
 
@@ -4541,6 +4832,17 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
     uint32 const nowMs = WorldTimer::getMSTime();
     if (_progressionRetryMs)
         _progressionRetryMs = _progressionRetryMs > diff ? _progressionRetryMs - diff : 0;
+    if (_progressionBlockedRemainingMs)
+    {
+        _progressionBlockedRemainingMs = _progressionBlockedRemainingMs > diff
+            ? _progressionBlockedRemainingMs - diff : 0;
+        if (!_progressionBlockedRemainingMs)
+        {
+            _progressionBlockedAnchor.active = false;
+            _progressionBlockedReason = Companion::CitizenTravel::RouteFailureReason::None;
+            PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
+        }
+    }
     if (_progressionReportMs > diff)
         _progressionReportMs -= diff;
     else

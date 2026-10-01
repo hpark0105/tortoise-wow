@@ -23,7 +23,13 @@ void Check(bool condition, char const* label)
 
 using Companion::CitizenTravel::ArrivalDecision;
 using Companion::CitizenTravel::ArrivalInput;
+using Companion::CitizenTravel::CanResumeRoute;
+using Companion::CitizenTravel::NextCandidateCursor;
 using Companion::CitizenTravel::DecideArrival;
+using Companion::CitizenTravel::DecidePath;
+using Companion::CitizenTravel::PathDecision;
+using Companion::CitizenTravel::PathEvidence;
+using Companion::CitizenTravel::PathKind;
 using Companion::CitizenTravel::kArrivalRadiusYards;
 
 void TestMapLostOutranksEverything()
@@ -131,6 +137,62 @@ void TestWrongZoneAndNegativeDistance()
     }
 }
 
+void TestPathEvidenceRequiresReachableProgress()
+{
+    PathEvidence evidence;
+    evidence.kind = PathKind::Complete;
+    evidence.pathLengthYards = 450.0f;
+    evidence.progressYards = 450.0f;
+    Check(DecidePath(evidence) == PathDecision::Follow,
+          "route: a complete verified path is followed");
+
+    evidence.kind = PathKind::Partial;
+    evidence.pathLengthYards = 700.0f;
+    evidence.progressYards = 600.0f;
+    Check(DecidePath(evidence) == PathDecision::FollowPartial,
+          "route: a useful partial path becomes an intermediate leg");
+
+    evidence.progressYards = 20.0f;
+    Check(DecidePath(evidence) == PathDecision::Reject,
+          "route: a partial path with no meaningful progress is rejected");
+
+    evidence.kind = PathKind::Unsupported;
+    evidence.progressYards = 600.0f;
+    Check(DecidePath(evidence) == PathDecision::Reject,
+          "route: shortcut or unavailable pathfinding is rejected");
+
+    evidence.kind = PathKind::Complete;
+    evidence.pathLengthYards = std::numeric_limits<float>::infinity();
+    Check(DecidePath(evidence) == PathDecision::Reject,
+          "route: nonfinite path costs are rejected");
+}
+
+void TestRouteResumeSurvivesDestinationZoneEntry()
+{
+    Check(CanResumeRoute(1, 0, 0, 12, 0, 60, 50),
+          "route: resume after entering destination zone before anchor arrival");
+    Check(CanResumeRoute(1, 0, 0, 12, 12, 60, 50),
+          "route: resume from the same map and zone after restart");
+    Check(!CanResumeRoute(0, 0, 0, 12, 12, 60, 50),
+          "route: idle journal does not resume travel");
+    Check(!CanResumeRoute(1, 1, 0, 12, 0, 60, 50),
+          "route: cross-map travel remains unsupported");
+    Check(!CanResumeRoute(1, 0, 0, 12, 0, 20, 50),
+          "route: stale unproductive destination is discarded");
+}
+
+void TestCandidateCursorRotatesBoundedSearch()
+{
+    Check(NextCandidateCursor(0, 8, 20) == 8,
+          "route: failed bounded search advances to the next candidate window");
+    Check(NextCandidateCursor(16, 8, 20) == 4,
+          "route: candidate window wraps after reaching the end");
+    Check(NextCandidateCursor(7, 8, 8) == 7,
+          "route: a single full scan returns to its initial candidate");
+    Check(NextCandidateCursor(0, 8, 0) == 0,
+          "route: empty candidate set keeps a zero cursor");
+}
+
 } // namespace
 
 int main()
@@ -143,6 +205,9 @@ int main()
     TestUnusableAnchorNeverArrives();
     TestNonfiniteDistance();
     TestWrongZoneAndNegativeDistance();
+    TestPathEvidenceRequiresReachableProgress();
+    TestRouteResumeSurvivesDestinationZoneEntry();
+    TestCandidateCursorRotatesBoundedSearch();
 
     if (g_failures != 0)
     {

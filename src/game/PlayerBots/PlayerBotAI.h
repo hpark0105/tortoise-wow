@@ -280,6 +280,16 @@ class PlayerBotAI: public PlayerAI
         uint32 _progressionTargetZone = 0;
         uint32 _progressionMap = 0;
         float _progressionFinalX = 0.0f, _progressionFinalY = 0.0f, _progressionFinalZ = 0.0f;
+        std::vector<Companion::CitizenTravel::Waypoint> _progressionWaypoints;
+        size_t _progressionWaypointIndex = 0;
+        bool _progressionRoutePartial = false;
+        uint8 _progressionPartialReplans = 0;
+        std::vector<Companion::CitizenTravel::Waypoint> _progressionPartialEndpoints;
+        Companion::CitizenTravel::BlockedAnchor _progressionBlockedAnchor;
+        uint32 _progressionBlockedRemainingMs = 0;
+        Companion::CitizenTravel::RouteFailureReason _progressionBlockedReason =
+            Companion::CitizenTravel::RouteFailureReason::None;
+        uint32 _progressionCandidateCursor = 0;
         uint32 _citizenVisitedZones = 0;
         uint8 _citizenActivityIntent = 0; // durable: idle/progression/hunt/patrol/rest
         uint8 _citizenDeathsAtSpot = 0;
