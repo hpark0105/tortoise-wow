@@ -12,7 +12,10 @@ class ZoneCitizenActivityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         p.IMAGE = os.environ.get("ZONE_ACTIVITY_LAB_IMAGE", "tortoise-local:dev")
-        p.command(["docker", "image", "inspect", p.IMAGE])
+        try:
+            p.command(["docker", "image", "inspect", p.IMAGE])
+        except RuntimeError:
+            raise unittest.SkipTest(f"{p.IMAGE} image not present; build it first")
         cls.project = "tortoise-zone-activity-" + uuid.uuid4().hex[:12]
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         cls.evidence = p.ROOT / "local" / (cls.project + "-" + stamp)
