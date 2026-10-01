@@ -44,7 +44,7 @@ class ZonePlacementConfigurationTest(unittest.TestCase):
         self.assertIn("sWorld.FindSession(e->accountId)", allocator)
         self.assertIn("session_busy:%u", allocator)
 
-    def test_failed_safety_relocations_report_per_destination_rejection_reasons(self):
+    def test_failed_safety_relocations_summarize_rejections_by_plan_map(self):
         manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
             encoding="utf-8").replace("\r\n", "\n")
         failure = manager[manager.index("if (!targetPlan)",
@@ -52,11 +52,11 @@ class ZonePlacementConfigurationTest(unittest.TestCase):
         failure = failure[:failure.index("std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>>")]
         self.assertIn("if (e->zoneWorldSafetyRelocation)", failure)
         self.assertIn("no-destination guid:%u level:%u faction:%u", failure)
-        self.assertIn("destination-rejected guid:%u map:%u zone:%u", failure)
-        for reason in ("excluded-danger-zone", "faction-or-area-rejected",
-                       "no-verified-creature-profile", "fallback-level-too-high",
-                       "fallback-productive-share-too-low", "fallback-overlevel-mix"):
-            self.assertIn(reason, failure)
+        self.assertIn("plan-map:%u plans:%u", failure)
+        self.assertIn("reject-faction-area:%u", failure)
+        self.assertIn("reject-no-profile:%u", failure)
+        self.assertIn("reject-overlevel:%u", failure)
+        self.assertNotIn("destination-rejected guid:%u", failure)
 
     def test_population_fallback_keeps_a_minimum_productive_and_level_safety_gate(self):
         manager = (ROOT / "src" / "game" / "PlayerBots" / "PlayerBotMgr.cpp").read_text(
