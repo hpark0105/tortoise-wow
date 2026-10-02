@@ -335,9 +335,10 @@ private:
     float m_dist;
 };
 
-// Citizens seek ordinary, untapped, level-appropriate creatures only. The
-// nearest eligible target wins so a patrol never pulls a distant pack or a
-// mob already engaged by a player. This scan is paced by the AI below.
+// Citizens seek ordinary, untapped, level-appropriate creatures, including
+// passive neutral prey. The nearest eligible target wins so a patrol never
+// pulls a distant pack or a mob already engaged by a player. This scan is
+// paced by the AI below.
 class BotCitizenHuntScan
 {
 public:
@@ -345,11 +346,15 @@ public:
 
     static bool Eligible(Player const* me, Creature* u)
     {
+        // CanAttack rejects passive neutral reactions, although players can
+        // manually initiate against them. The friendliness and targetability
+        // checks below retain the safe faction and target guards.
         if (!u || !u->IsAlive() || !u->IsInWorld() || u->IsPet() ||
             u->IsInCombat() || u->HasLootRecipient() || u->IsInEvadeMode() ||
             !u->GetCreatureInfo() ||
+            u->GetCreatureType() == CREATURE_TYPE_CRITTER ||
             u->GetCreatureInfo()->rank != CREATURE_ELITE_NORMAL ||
-            me->IsFriendlyTo(u) || !me->CanAttack(u) ||
+            me->IsFriendlyTo(u) ||
             !u->IsTargetable(true, me->IsCharmerOrOwnerPlayerOrPlayerItself()))
             return false;
         uint32 const level = me->GetLevel();
@@ -1997,6 +2002,7 @@ void PlayerBotAI::LoadCitizenJournal()
         return;
     QueryResult* result = CharacterDatabase.PQuery(
         "SELECT intent, current_job, progression_band, last_level, target_map, target_zone, "
+        "progression_source_zone, "
         "target_x, target_y, target_z, visited_zones, route_failure_map, route_failure_zone, "
         "route_failure_x, route_failure_y, route_failure_z, route_failure_reason, "
         "GREATEST(0,route_failure_until-UNIX_TIMESTAMP()), route_search_cursor "
@@ -2011,22 +2017,23 @@ void PlayerBotAI::LoadCitizenJournal()
     uint8 const recordedLevel = fields[3].GetUInt8();
     uint32 const targetMap = fields[4].GetUInt32();
     uint32 const targetZone = fields[5].GetUInt32();
-    _progressionFinalX = fields[6].GetFloat();
-    _progressionFinalY = fields[7].GetFloat();
-    _progressionFinalZ = fields[8].GetFloat();
-    _citizenVisitedZones = fields[9].GetUInt32();
-    _progressionBlockedAnchor.mapId = fields[10].GetUInt32();
-    _progressionBlockedAnchor.zoneId = fields[11].GetUInt32();
-    _progressionBlockedAnchor.x = fields[12].GetFloat();
-    _progressionBlockedAnchor.y = fields[13].GetFloat();
-    _progressionBlockedAnchor.z = fields[14].GetFloat();
+    uint32 const sourceZone = fields[6].GetUInt32();
+    _progressionFinalX = fields[7].GetFloat();
+    _progressionFinalY = fields[8].GetFloat();
+    _progressionFinalZ = fields[9].GetFloat();
+    _citizenVisitedZones = fields[10].GetUInt32();
+    _progressionBlockedAnchor.mapId = fields[11].GetUInt32();
+    _progressionBlockedAnchor.zoneId = fields[12].GetUInt32();
+    _progressionBlockedAnchor.x = fields[13].GetFloat();
+    _progressionBlockedAnchor.y = fields[14].GetFloat();
+    _progressionBlockedAnchor.z = fields[15].GetFloat();
     _progressionBlockedReason = static_cast<Companion::CitizenTravel::RouteFailureReason>(
-        fields[15].GetUInt8() <= (uint8)Companion::CitizenTravel::RouteFailureReason::AnchorBlocked
-            ? fields[15].GetUInt8() : 0);
+        fields[16].GetUInt8() <= (uint8)Companion::CitizenTravel::RouteFailureReason::AnchorBlocked
+            ? fields[16].GetUInt8() : 0);
     _progressionBlockedRemainingMs =
         std::min<uint32>(Companion::CitizenTravel::kBlockedAnchorCooldownMs / 1000,
-                         fields[16].GetUInt32()) * 1000;
-    _progressionCandidateCursor = fields[17].GetUInt32();
+                         fields[17].GetUInt32()) * 1000;
+    _progressionCandidateCursor = fields[18].GetUInt32();
     _progressionBlockedAnchor.active = _progressionBlockedRemainingMs > 0 &&
         _progressionBlockedAnchor.mapId == me->GetMapId() &&
         _progressionBlockedAnchor.zoneId != 0 &&
@@ -2043,8 +2050,10 @@ void PlayerBotAI::LoadCitizenJournal()
             PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent))
     {
         _progressionTargetZone = targetZone;
+        _progressionSourceZone = sourceZone;
         _progressionMap = me->GetMapId();
         _progressionTravelActive = true;
+        _progressionObservedWalkingProgress = false;
         sLog.outString("[ZoneCitizen][Journal] resume guid:%u target-zone:%u visits:%u",
                        me->GetGUIDLow(), targetZone, _citizenVisitedZones);
     }
@@ -2060,13 +2069,14 @@ void PlayerBotAI::PersistCitizenJournal(uint8 intent, bool recordVisit)
     CharacterDatabase.DirectPExecute(
         "INSERT INTO bot_citizen_journal "
         "(char_guid, intent, current_job, progression_band, last_level, current_map, current_zone, "
-        "target_map, target_zone, target_x, target_y, target_z, visited_zones, "
+        "target_map, target_zone, progression_source_zone, target_x, target_y, target_z, visited_zones, "
         "route_failure_map, route_failure_zone, route_failure_x, route_failure_y, route_failure_z, "
         "route_failure_until, route_failure_reason, route_search_cursor, updated_at) "
-        "VALUES (%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%f,%f,%u,%u,%u,%f,%f,%f,UNIX_TIMESTAMP()+%u,%u,%u,UNIX_TIMESTAMP()) "
+        "VALUES (%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%f,%f,%u,%u,%u,%f,%f,%f,UNIX_TIMESTAMP()+%u,%u,%u,UNIX_TIMESTAMP()) "
         "ON DUPLICATE KEY UPDATE intent=VALUES(intent), current_job=VALUES(current_job), progression_band=VALUES(progression_band), "
         "last_level=VALUES(last_level), current_map=VALUES(current_map), current_zone=VALUES(current_zone), "
-        "target_map=VALUES(target_map), target_zone=VALUES(target_zone), target_x=VALUES(target_x), "
+        "target_map=VALUES(target_map), target_zone=VALUES(target_zone), "
+        "progression_source_zone=VALUES(progression_source_zone), target_x=VALUES(target_x), "
         "target_y=VALUES(target_y), target_z=VALUES(target_z), visited_zones=VALUES(visited_zones), "
         "route_failure_map=VALUES(route_failure_map), route_failure_zone=VALUES(route_failure_zone), "
         "route_failure_x=VALUES(route_failure_x), route_failure_y=VALUES(route_failure_y), "
@@ -2076,6 +2086,7 @@ void PlayerBotAI::PersistCitizenJournal(uint8 intent, bool recordVisit)
         "updated_at=VALUES(updated_at)",
         me->GetGUIDLow(), intent, _citizenActivityIntent, _progressionBand, me->GetLevel(), me->GetMapId(), me->GetZoneId(),
         intent == 1 ? me->GetMapId() : 0, intent == 1 ? _progressionTargetZone : 0,
+        intent == 1 ? _progressionSourceZone : 0,
         intent == 1 ? _progressionFinalX : 0.0f, intent == 1 ? _progressionFinalY : 0.0f,
         intent == 1 ? _progressionFinalZ : 0.0f, _citizenVisitedZones,
         _progressionBlockedAnchor.active ? _progressionBlockedAnchor.mapId : 0,
@@ -2120,8 +2131,15 @@ void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
     uint32 const productiveShare = sPlayerBotMgr.GetCitizenZoneProductiveSharePercent(
         me->GetMapId(), zone, productiveMinimum, level);
     bool const levelCapped = level >= 60;
-    bool const overleveled = !levelCapped &&
-        productiveShare < PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent;
+    bool const starterLevel = level <= 1 && me->GetHomeBindMap() == me->GetMapId();
+    uint32 const starterZone = me->GetHomeBindAreaId();
+    bool const returningToStart = starterLevel && starterZone && zone != starterZone;
+    // The spawn distribution is a weak signal at level one: starter zones
+    // can be viable despite having a small share of all level-one spawns.
+    // Keep a level-one citizen in its creation zone, and route it back there
+    // if an earlier low-share scan already sent it elsewhere.
+    bool const overleveled = !levelCapped && (returningToStart ||
+        (!starterLevel && productiveShare < PlayerBotMgr::CitizenZoneMinimumProductiveSharePercent));
     bool const changed = band != _progressionBand || zone != _progressionZone ||
                          zoneLevel != _progressionZoneLevel ||
                          overleveled != _progressionOverleveled;
@@ -2132,7 +2150,8 @@ void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
     _progressionOverleveled = overleveled;
     if (forceLog || changed)
     {
-        char const* status = levelCapped ? "level-cap" : (overleveled ? "outgrowing" : "in-band");
+        char const* status = levelCapped ? "level-cap" :
+            (returningToStart ? "returning-to-start" : (overleveled ? "outgrowing" : "in-band"));
         sLog.outString("[ZoneCitizen][Progression] guid:%u level:%u band:%u-%u zone:%u zone-level:%d productive:%u%% status:%s",
                        me->GetGUIDLow(), level, band * 10 + 1,
                        std::min<uint32>(60, (band + 1) * 10), zone, zoneLevel,
@@ -4545,9 +4564,11 @@ bool PlayerBotAI::BeginProgressionTravel()
         return false;
     }
     _progressionTargetZone = targetZone;
+    _progressionSourceZone = me->GetZoneId();
     _progressionCandidateCursor = 0;
     _progressionMap = me->GetMapId();
     _progressionTravelActive = true;
+    _progressionObservedWalkingProgress = false;
     _progressionWaypoints.swap(routeWaypoints);
     _progressionWaypointIndex = 0;
     _progressionRoutePartial = routePartial;
@@ -4580,6 +4601,13 @@ void PlayerBotAI::FinishProgressionTravel(bool arrived, char const* reason)
 {
     if (arrived)
     {
+        if (me && _progressionTargetZone != me->GetHomeBindAreaId() &&
+            Companion::CitizenMigrationHint::ShouldRecord(IsZoneCitizen(), true,
+                _progressionObservedWalkingProgress, _progressionSourceZone,
+                _progressionTargetZone) && me->GetMapId() == _progressionMap &&
+            me->GetZoneId() == _progressionTargetZone)
+            sPlayerBotMgr.RecordCitizenMigrationSuccess(_progressionMap,
+                _progressionSourceZone, _progressionTargetZone);
         _progressionBlockedAnchor = Companion::CitizenTravel::BlockedAnchor();
         _progressionBlockedRemainingMs = 0;
         _progressionBlockedReason = Companion::CitizenTravel::RouteFailureReason::None;
@@ -4605,6 +4633,8 @@ void PlayerBotAI::FinishProgressionTravel(bool arrived, char const* reason)
     }
     _progressionTravelActive = false;
     _progressionTargetZone = 0;
+    _progressionSourceZone = 0;
+    _progressionObservedWalkingProgress = false;
     _progressionFinalX = _progressionFinalY = _progressionFinalZ = 0.0f;
     _progressionWaypoints.clear();
     _progressionWaypointIndex = 0;
@@ -4630,7 +4660,6 @@ bool PlayerBotAI::AdvanceProgressionTravel()
     float const dx = _progressionFinalX - me->GetPositionX();
     float const dy = _progressionFinalY - me->GetPositionY();
     float const distance = std::sqrt(dx * dx + dy * dy);
-
     // Explicit arrival (TW-BOTS-002 S1): only the selected hunting anchor
     // on verified usable ground ends the route as success. Entering the
     // destination zone alone never counts as arrival.
@@ -4656,6 +4685,9 @@ bool PlayerBotAI::AdvanceProgressionTravel()
         sLog.outString("[ZoneCitizen][Progression] route arrived guid:%u zone:%u anchor:%.1f/%.1f",
                        me->GetGUIDLow(), me->GetZoneId(),
                        _progressionFinalX, _progressionFinalY);
+        if (!_progressionObservedWalkingProgress)
+            sLog.outString("[ZoneCitizen][MigrationHint] arrival not counted guid:%u reason:no-observed-walking",
+                           me->GetGUIDLow());
         FinishProgressionTravel(true, "progression-arrived");
         return true;
     }
@@ -5070,6 +5102,10 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         {
             if (_progressionTravelActive)
             {
+                // This branch is reached only after the citizen traversed a
+                // progression MovePoint leg. Mark movement before clearing
+                // _travelActive and advancing to the next waypoint.
+                _progressionObservedWalkingProgress = true;
                 _travelActive = false;
                 _travelHuntGuid = 0;
                 _travelNudging = false;

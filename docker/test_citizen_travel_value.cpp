@@ -2,6 +2,7 @@
 // S1). Every check executes the real policy; explicit checks are used
 // instead of assert so the suite also runs under NDEBUG.
 #include "CitizenTravel.h"
+#include "CitizenMigrationHint.h"
 
 #include <cmath>
 #include <cstdio>
@@ -31,6 +32,55 @@ using Companion::CitizenTravel::PathDecision;
 using Companion::CitizenTravel::PathEvidence;
 using Companion::CitizenTravel::PathKind;
 using Companion::CitizenTravel::kArrivalRadiusYards;
+using Companion::CitizenMigrationHint::PreferCandidate;
+using Companion::CitizenMigrationHint::Score;
+using Companion::CitizenMigrationHint::ShouldRecord;
+using Companion::CitizenMigrationHint::kEvidenceMaxAgeSeconds;
+using Companion::CitizenMigrationHint::kEvidenceVersion;
+
+void TestMigrationHintEvidence()
+{
+    uint32_t const now = 10000000;
+    Check(Score(1, now, now, kEvidenceVersion) == 1,
+          "migration hint: one fresh success is a usable bounded hint");
+    Check(Score(100, now, now, kEvidenceVersion) == 5,
+          "migration hint: repeated successes have a strict score cap");
+    Check(Score(5, now - 40u * 24u * 60u * 60u, now, kEvidenceVersion) == 2,
+          "migration hint: older evidence fades before expiry");
+    Check(Score(5, now - kEvidenceMaxAgeSeconds - 1, now, kEvidenceVersion) == 0,
+          "migration hint: expired evidence has no ranking effect");
+    Check(Score(5, now + 1, now, kEvidenceVersion) == 0,
+          "migration hint: future timestamps are rejected");
+    Check(Score(5, now, now, kEvidenceVersion + 1) == 0,
+          "migration hint: old content or policy version is ignored");
+    Check(Score(0, now, now, kEvidenceVersion) == 0,
+          "migration hint: zero successes carry no weight");
+
+    Check(ShouldRecord(true, true, true, 12, 40),
+          "migration hint: verified walked citizen migration records");
+    Check(!ShouldRecord(false, true, true, 12, 40),
+          "migration hint: owned non-citizen travel is excluded");
+    Check(!ShouldRecord(true, false, true, 12, 40),
+          "migration hint: zone entry or failed travel is excluded");
+    Check(!ShouldRecord(true, true, false, 12, 40),
+          "migration hint: restart or relocation at the anchor without walking is excluded");
+    Check(!ShouldRecord(true, true, true, 40, 40),
+          "migration hint: same-zone travel is not migration evidence");
+    Check(!ShouldRecord(true, true, true, 0, 40) &&
+          !ShouldRecord(true, true, true, 12, 0),
+          "migration hint: missing zone identity is rejected");
+
+    Check(PreferCandidate(500.0f, 3, 0, 500.0f, 3, 0, false),
+          "migration ranking: first reachable candidate is accepted");
+    Check(PreferCandidate(400.0f, 9, 0, 500.0f, 1, 5, true),
+          "migration ranking: shorter verified travel remains the primary rank");
+    Check(PreferCandidate(500.0f, 2, 0, 500.0f, 3, 5, true),
+          "migration ranking: level fit remains ahead of shared evidence");
+    Check(PreferCandidate(500.0f, 3, 2, 500.0f, 3, 1, true),
+          "migration ranking: fresh shared success breaks otherwise equal candidates");
+    Check(!PreferCandidate(500.0f, 3, 0, 500.0f, 3, 0, true),
+          "migration ranking: no evidence preserves prior equal-cost behavior");
+}
 
 void TestMapLostOutranksEverything()
 {
@@ -208,6 +258,7 @@ int main()
     TestPathEvidenceRequiresReachableProgress();
     TestRouteResumeSurvivesDestinationZoneEntry();
     TestCandidateCursorRotatesBoundedSearch();
+    TestMigrationHintEvidence();
 
     if (g_failures != 0)
     {

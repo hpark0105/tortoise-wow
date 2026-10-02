@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <ctime>
 
 namespace
 {
@@ -556,9 +557,15 @@ void PlayerBotMgr::Load()
     m_lastOwnedWorldDiagnosticMs = 0;
     m_ownedWorldCursor = 0;
     m_lastWorldIntentSubmitMs = 0;
+    m_citizenMigrationEvidence.clear();
+    m_citizenMigrationEvidenceLoaded = false;
 
     // 2- Configuration
     LoadConfig();
+
+    // Read the small, version-filtered shared hint snapshot during startup;
+    // strategic route selection stays in-memory and never waits on this query.
+    LoadCitizenMigrationEvidence();
 
     // 3- Load usable account ID
     QueryResult *result = LoginDatabase.PQuery("SELECT MAX(id) FROM account");
@@ -667,7 +674,7 @@ void PlayerBotMgr::Load()
         CLASS_WARRIOR, CLASS_ROGUE, CLASS_PRIEST, CLASS_MAGE, CLASS_WARLOCK
     };
     static uint8 const nightElfClasses[] = {
-        CLASS_WARRIOR, CLASS_PALADIN, CLASS_HUNTER, CLASS_ROGUE, CLASS_PRIEST, CLASS_DRUID
+        CLASS_WARRIOR, CLASS_HUNTER, CLASS_ROGUE, CLASS_PRIEST, CLASS_DRUID
     };
     static uint8 const taurenClasses[] = {
         CLASS_WARRIOR, CLASS_HUNTER, CLASS_SHAMAN, CLASS_DRUID
@@ -681,8 +688,10 @@ void PlayerBotMgr::Load()
         {
             std::string const name = std::string(nameStarts[(i / endCount) % startCount]) +
                                      nameEnds[i % endCount];
+            std::string const provisionName = race == RACE_NIGHTELF && i == 0
+                ? "Elydoran" : name;
             uint32 seed = 2166136261u;
-            for (char c : name)
+            for (char c : provisionName)
                 seed = (seed ^ (uint8)std::tolower((unsigned char)c)) * 16777619u;
             auto next = [&seed](uint32 choices) -> uint32
             {
@@ -693,7 +702,7 @@ void PlayerBotMgr::Load()
             };
             uint8 const playerClass = classes[next((uint32)classCount)];
             uint8 const gender = (uint8)next(2);
-            ProvisionPersistentBot(name + "," + std::to_string(race) + "," +
+            ProvisionPersistentBot(provisionName + "," + std::to_string(race) + "," +
                                    std::to_string(playerClass) + "," + std::to_string(gender), true);
         }
     };
@@ -2757,15 +2766,18 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
                                                         Companion::CitizenTravel::BlockedAnchor const* blockedAnchor,
                                                         bool* partial,
                                                         uint32 candidateCursor,
-                                                        uint32* nextCandidateCursor) const
+                                                        uint32* nextCandidateCursor)
 {
     if (!citizen || !citizen->GetMap() || !citizen->GetZoneId())
         return false;
     uint32 const citizenLevel = std::min<uint32>(60, std::max<uint32>(1, citizen->GetLevel()));
     uint32 const productiveMinimum = citizenLevel > 3 ? citizenLevel - 3 : 1;
+    bool const returnToStart = citizenLevel == 1 &&
+        citizen->GetHomeBindMap() == citizen->GetMapId() &&
+        citizen->GetHomeBindAreaId() && citizen->GetZoneId() != citizen->GetHomeBindAreaId();
     uint32 const currentProductiveShare = GetCitizenZoneProductiveSharePercent(
         citizen->GetMapId(), citizen->GetZoneId(), productiveMinimum, citizenLevel);
-    if (currentProductiveShare >= CitizenZoneMinimumProductiveSharePercent)
+    if (!returnToStart && currentProductiveShare >= CitizenZoneMinimumProductiveSharePercent)
         return false;
 
     struct CandidateAnchor
@@ -2773,13 +2785,15 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
         WorldLocation position;
         uint32 zone;
         uint32 levelGap;
+        uint32 migrationHintScore;
         float straightDistanceSq;
     };
     std::vector<CandidateAnchor> candidates;
     for (auto const& item : m_zoneSpawnAnchors)
     {
         if (item.first.first != citizen->GetMapId() ||
-            item.first.second == citizen->GetZoneId() || item.second.empty())
+            item.first.second == citizen->GetZoneId() || item.second.empty() ||
+            (returnToStart && item.first.second != citizen->GetHomeBindAreaId()))
             continue;
         AreaEntry const* candidateArea = AreaEntry::GetById(item.first.second);
         if (!candidateArea ||
@@ -2787,13 +2801,15 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
             (candidateArea->Team == AREATEAM_HORDE && citizen->GetTeam() != HORDE))
             continue;
         uint32 const candidateLevel = GetCitizenZoneDifficulty(item.first.first, item.first.second);
-        if (!candidateLevel ||
+        if (!candidateLevel || (!returnToStart &&
             GetCitizenZoneProductiveSharePercent(item.first.first, item.first.second,
-                productiveMinimum, citizenLevel) < CitizenZoneMinimumProductiveSharePercent)
+                productiveMinimum, citizenLevel) < CitizenZoneMinimumProductiveSharePercent))
             continue;
         std::vector<CandidateAnchor> zoneCandidates;
         uint32 const levelGap = candidateLevel > citizenLevel
             ? candidateLevel - citizenLevel : citizenLevel - candidateLevel;
+        uint32 const migrationHintScore = GetCitizenMigrationHintScore(
+            item.first.first, citizen->GetZoneId(), item.first.second);
         for (WorldLocation const& anchor : item.second)
         {
             float const dx = anchor.x - citizen->GetPositionX();
@@ -2809,7 +2825,8 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
                     float(kCitizenBlockedAnchorRadiusYards * kCitizenBlockedAnchorRadiusYards))
                     continue;
             }
-            zoneCandidates.push_back({anchor, item.first.second, levelGap, distanceSq});
+            zoneCandidates.push_back({anchor, item.first.second, levelGap,
+                                      migrationHintScore, distanceSq});
         }
         if (zoneCandidates.empty())
             continue;
@@ -2838,6 +2855,7 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
     CandidateAnchor const* bestCandidate = nullptr;
     float bestTravelYards = std::numeric_limits<float>::max();
     bool bestPartial = false;
+    uint32 bestHintScore = 0;
     if (partial)
         *partial = false;
     uint32 routeChecks = 0;
@@ -2857,12 +2875,15 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
                 candidateWaypoints, candidatePartial, estimatedYards))
             continue;
         ++reachableRoutes;
-        if (!bestCandidate || estimatedYards < bestTravelYards ||
-            (estimatedYards == bestTravelYards && candidate.levelGap < bestCandidate->levelGap))
+        if (Companion::CitizenMigrationHint::PreferCandidate(
+                estimatedYards, candidate.levelGap, candidate.migrationHintScore,
+                bestTravelYards, bestCandidate ? bestCandidate->levelGap : 0,
+                bestHintScore, bestCandidate != nullptr))
         {
             bestCandidate = &candidate;
             bestTravelYards = estimatedYards;
             bestPartial = candidatePartial;
+            bestHintScore = candidate.migrationHintScore;
             bestWaypoints.swap(candidateWaypoints);
         }
     }
@@ -2888,6 +2909,88 @@ bool PlayerBotMgr::SelectCitizenProgressionDestination(Player const* citizen,
     if (partial)
         *partial = bestPartial;
     return true;
+}
+
+void PlayerBotMgr::LoadCitizenMigrationEvidence()
+{
+    if (m_citizenMigrationEvidenceLoaded)
+        return;
+    m_citizenMigrationEvidenceLoaded = true;
+    QueryResult* result = CharacterDatabase.PQuery(
+        "SELECT map_id, source_zone, destination_zone, source_version, success_count, last_success "
+        "FROM bot_citizen_migration_hint WHERE source_version = %u "
+        "AND last_success >= UNIX_TIMESTAMP() - %u "
+        "ORDER BY last_success DESC LIMIT 4096",
+        (uint32)Companion::CitizenMigrationHint::kEvidenceVersion,
+        Companion::CitizenMigrationHint::kEvidenceMaxAgeSeconds);
+    if (!result)
+        return;
+
+    do
+    {
+        Field* fields = result->Fetch();
+        uint32 const mapId = fields[0].GetUInt32();
+        uint32 const sourceZone = fields[1].GetUInt32();
+        uint32 const destinationZone = fields[2].GetUInt32();
+        if (!sourceZone || !destinationZone || sourceZone == destinationZone)
+            continue;
+        auto const key = std::make_tuple(mapId, sourceZone, destinationZone);
+        CitizenMigrationEvidence& evidence = m_citizenMigrationEvidence[key];
+        evidence.version = fields[3].GetUInt8();
+        evidence.successes = fields[4].GetUInt32();
+        evidence.lastSuccess = fields[5].GetUInt32();
+    } while (result->NextRow());
+    delete result;
+    sLog.outString("[ZoneCitizen][MigrationHint] snapshot loaded edges:%u version:%u max_age_days:90",
+                   (uint32)m_citizenMigrationEvidence.size(),
+                   (uint32)Companion::CitizenMigrationHint::kEvidenceVersion);
+}
+
+uint32 PlayerBotMgr::GetCitizenMigrationHintScore(uint32 mapId, uint32 sourceZone,
+                                                   uint32 destinationZone)
+{
+    LoadCitizenMigrationEvidence();
+    auto const found = m_citizenMigrationEvidence.find(
+        std::make_tuple(mapId, sourceZone, destinationZone));
+    if (found == m_citizenMigrationEvidence.end())
+        return 0;
+    uint32 const now = static_cast<uint32>(std::time(nullptr));
+    return Companion::CitizenMigrationHint::Score(found->second.successes,
+        found->second.lastSuccess, now, found->second.version);
+}
+
+void PlayerBotMgr::RecordCitizenMigrationSuccess(uint32 mapId, uint32 sourceZone,
+                                                  uint32 destinationZone)
+{
+    if (!sourceZone || !destinationZone || sourceZone == destinationZone)
+        return;
+    LoadCitizenMigrationEvidence();
+    uint8 const version = Companion::CitizenMigrationHint::kEvidenceVersion;
+    CharacterDatabase.DirectPExecute(
+        "INSERT INTO bot_citizen_migration_hint "
+        "(map_id, source_zone, destination_zone, source_version, success_count, last_success) "
+        "VALUES (%u, %u, %u, %u, 1, UNIX_TIMESTAMP()) "
+        "ON DUPLICATE KEY UPDATE success_count = "
+        "IF(source_version = VALUES(source_version) AND "
+        "last_success >= UNIX_TIMESTAMP() - %u, LEAST(success_count + 1, %u), 1), "
+        "source_version = VALUES(source_version), last_success = UNIX_TIMESTAMP()",
+        mapId, sourceZone, destinationZone, (uint32)version,
+        Companion::CitizenMigrationHint::kEvidenceMaxAgeSeconds,
+        Companion::CitizenMigrationHint::kMaximumEvidenceScore);
+
+    uint32 const now = static_cast<uint32>(std::time(nullptr));
+    auto const key = std::make_tuple(mapId, sourceZone, destinationZone);
+    CitizenMigrationEvidence& evidence = m_citizenMigrationEvidence[key];
+    evidence.successes = evidence.version == version && evidence.lastSuccess &&
+        now >= evidence.lastSuccess &&
+        now - evidence.lastSuccess <= Companion::CitizenMigrationHint::kEvidenceMaxAgeSeconds
+            ? std::min<uint32>(Companion::CitizenMigrationHint::kMaximumEvidenceScore,
+                               evidence.successes + 1)
+            : 1;
+    evidence.version = version;
+    evidence.lastSuccess = now;
+    sLog.outString("[ZoneCitizen][MigrationHint] success map:%u from:%u to:%u count:%u version:%u",
+                   mapId, sourceZone, destinationZone, evidence.successes, (uint32)version);
 }
 
 bool PlayerBotMgr::BuildCitizenProgressionRoute(

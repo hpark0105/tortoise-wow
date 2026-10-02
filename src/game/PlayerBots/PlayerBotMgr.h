@@ -9,6 +9,7 @@
 #include "Companion/ConversationTransport.h"
 #include "Companion/Personality.h"
 #include "Companion/CitizenTravel.h"
+#include "Companion/CitizenMigrationHint.h"
 
 #include <vector>
 #include <tuple>
@@ -164,7 +165,7 @@ class PlayerBotMgr
                                                  Companion::CitizenTravel::BlockedAnchor const* blockedAnchor = nullptr,
                                                  bool* partial = nullptr,
                                                  uint32 candidateCursor = 0,
-                                                 uint32* nextCandidateCursor = nullptr) const;
+                                                 uint32* nextCandidateCursor = nullptr);
         // Build a bounded navmesh route to a previously selected destination.
         // Partial paths are valid only as advancing intermediate legs; the AI
         // replans from each reached endpoint and still owns final arrival.
@@ -189,6 +190,10 @@ class PlayerBotMgr
         // is world evidence for later route selection, never a movement order.
         void RecordCitizenRouteEdge(Player const* citizen, float fromX, float fromY,
                                     float toX, float toY) const;
+        uint32 GetCitizenMigrationHintScore(uint32 mapId, uint32 sourceZone,
+                                            uint32 destinationZone);
+        void RecordCitizenMigrationSuccess(uint32 mapId, uint32 sourceZone,
+                                           uint32 destinationZone);
         // BL-003 (KAP-558): bounded async encounter-summary persistence.
         Companion::Learning::Store& LearningStore() { return m_learningStore; }
         bool QueueLearningRollback(uint32 charGuid);
@@ -327,6 +332,16 @@ class PlayerBotMgr
             uint32 levelWeight[61] = {};
         };
         std::map<std::pair<uint32, uint32>, CitizenZoneDifficulty> m_zoneSpawnDifficulty;
+        struct CitizenMigrationEvidence
+        {
+            uint32 successes = 0;
+            uint32 lastSuccess = 0;
+            uint8 version = 0;
+        };
+        std::map<std::tuple<uint32, uint32, uint32>, CitizenMigrationEvidence>
+            m_citizenMigrationEvidence;
+        bool m_citizenMigrationEvidenceLoaded = false;
+        void LoadCitizenMigrationEvidence();
         void UpdateZoneWorldPopulation();
         bool confWorldIntentEnabled = false;
         uint32 confWorldIntentIntervalMs = 600000;

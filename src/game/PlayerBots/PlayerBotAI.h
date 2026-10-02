@@ -278,8 +278,10 @@ class PlayerBotAI: public PlayerAI
         bool _progressionTravelActive = false;
         uint32 _progressionRetryMs = 0;
         uint32 _progressionTargetZone = 0;
+        uint32 _progressionSourceZone = 0;
         uint32 _progressionMap = 0;
         float _progressionFinalX = 0.0f, _progressionFinalY = 0.0f, _progressionFinalZ = 0.0f;
+        bool _progressionObservedWalkingProgress = false;
         std::vector<Companion::CitizenTravel::Waypoint> _progressionWaypoints;
         size_t _progressionWaypointIndex = 0;
         bool _progressionRoutePartial = false;

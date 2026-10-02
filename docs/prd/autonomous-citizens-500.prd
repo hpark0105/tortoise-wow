@@ -159,10 +159,19 @@ Use expiring reservations, bounded leases and jittered departures. Respect human
 access to quest targets. Avoid moving all citizens because one area briefly looks
 better. Account for destination reservations when planning travel.
 
-Share route success and hazard observations with timestamp, confidence, source
-version and expiry. One bot's failure cannot permanently blacklist an area for
-the population. Cap personal and shared memories and expire obsolete records.
-Persist coarse evidence rather than unbounded movement samples.
+Share coarse successful progression transitions keyed by map and directed
+source/destination zones. Count only a citizen's observed walking progress
+followed by verified arrival at the selected anchor; zone entry, restart spawn
+near the anchor, emergency relocation, patrol travel and failed journeys do not
+count. Retain the source zone in the progression journal across restart.
+
+Use shared counts only as a final tie-break after faction/access, productive
+prey, anchor safety and that citizen's own path checks pass. The shared hint must
+not change the bounded path-query budget or candidate cursor order. Cap its score,
+expire evidence after 90 days, and ignore it when its source/content policy
+version is stale. Failed journeys remain personal bounded cooldowns and never
+decrement or blacklist a shared transition. Do not store movement coordinates in
+this population-wide evidence.
 
 ### AC-06: Maintenance and continuity (P1)
 
@@ -441,6 +450,20 @@ S0/S1 are in progress; neither slice has final gameplay acceptance.
 
 Private validation captures remain under ignored local/prd-s1/. Do not copy
 raw runtime logs or character snapshots into retrieval or model assignments.
+
+### Shared migration hints (2026-10-01)
+
+The `feature/shared-citizen-migration-hints` slice adds versioned, expiring
+map/source-zone/destination-zone evidence. It is loaded into an in-memory cache
+once and updated on a verified, walked progression arrival. Each citizen still
+passes the existing suitability, personal blocked-anchor and bounded navmesh
+checks. Evidence only breaks ties after estimated travel distance and level fit;
+the candidate cursor and eight-query limit are unchanged. Source zone is stored
+in the durable progression journal so travel can resume across zone entry and
+restart. An arrival after restart without observed walking progress completes
+the citizen's route but does not teach the shared hint. This is fixture-level
+implementation evidence; live progression observations and full-suite gates
+remain separate acceptance work.
 
 ### S1 follow-up (2026-09-28)
 

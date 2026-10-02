@@ -1961,7 +1961,8 @@ void WorldObject::SendObjectMessageToSet(WorldPacket *data, bool self, WorldObje
 
 void WorldObject::SendMovementMessageToSet(WorldPacket data, bool self, WorldObject const* except)
 {
-    if (!IsPlayer() || !sWorld.GetBroadcaster()->IsEnabled())
+    MovementBroadcaster* broadcaster = sWorld.GetBroadcaster();
+    if (!IsPlayer() || !broadcaster || !broadcaster->IsEnabled())
         SendObjectMessageToSet(&data, true, except);
     else
     {
