@@ -7,7 +7,7 @@
 namespace Companion {
 namespace CitizenGearPolicy {
 
-constexpr std::uint8_t kPolicyVersion = 5u;
+constexpr std::uint8_t kPolicyVersion = 6u;
 constexpr std::uint32_t kRollRange = 100u;
 constexpr std::uint32_t kBlueGearPercent = 15u;
 constexpr std::uint32_t kGreenGearPercent = 45u;
@@ -52,6 +52,18 @@ constexpr std::uint32_t FallbackQualityAt(std::uint32_t target, std::uint32_t ra
 constexpr bool IsEligibleEffectiveLevel(std::uint32_t citizenLevel, std::uint32_t effectiveLevel)
 {
     return effectiveLevel <= citizenLevel && citizenLevel - effectiveLevel <= kMaxEffectiveLevelGap;
+}
+
+// Citizens keep the better rarity tier; item level is the tiebreaker only
+// within one tier. In particular, a higher-item-level gray item cannot
+// replace an equipped green or blue item.
+constexpr bool ExistingItemAtLeastAsGood(std::uint32_t existingQuality,
+                                         std::uint32_t existingItemLevel,
+                                         std::uint32_t candidateQuality,
+                                         std::uint32_t candidateItemLevel)
+{
+    return existingQuality > candidateQuality ||
+           (existingQuality == candidateQuality && existingItemLevel >= candidateItemLevel);
 }
 
 } // namespace CitizenGearPolicy

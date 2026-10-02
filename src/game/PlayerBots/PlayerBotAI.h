@@ -412,9 +412,9 @@ class PlayerBotAI: public PlayerAI
         Creature* FindQuestGiver() const;
         Creature* FindQuestObjectiveTarget() const;
         void AutoLearnSpellsForLevel();
-        // Persistent bot gear is restored to full durability at login so
-        // reconnecting citizens and owned companions resume with usable gear.
-        void RepairBotEquipmentAtLogin();
+        // Citizen equipment is restored after login and progression gear rolls;
+        // owned companions retain the login repair behavior.
+        void RepairBotEquipment();
         uint32 SelectOffensiveSpell(Unit* target) const;
         // Independent citizens use this only for a real low-health solo
         // emergency; party healing continues through the declared triage

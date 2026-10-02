@@ -363,9 +363,10 @@ public:
         // an outgrown zone leads to progression travel instead of endless
         // farming of trivial creatures.
         // Independent citizens have no player healer or coordinated party
-        // behind them. A same-level solo target is the highest safe default;
-        // tougher content is reserved for an actual player party.
-        if (u->GetLevel() > level ||
+        // behind them. Permit only a small level advantage so starter-zone
+        // citizens can engage slightly tougher passive prey without opening
+        // the scan to much higher-level threats.
+        if (u->GetLevel() > level + 2 ||
             u->GetLevel() + 3 < level)
             return false;
         return true;
@@ -567,6 +568,8 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
         AutoLearnSpellsForLevel();
         AutoAssignCitizenTalents();
         AutoEquipForLevel();
+        if (IsZoneCitizen())
+            RepairBotEquipment();
         PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
     }
 
@@ -1973,7 +1976,7 @@ void PlayerBotAI::OnPlayerLogin()
     AutoLearnSpellsForLevel();
     AutoAssignCitizenTalents();
     AutoEquipForLevel();
-    RepairBotEquipmentAtLogin();
+    RepairBotEquipment();
     InitQuestState();
     BackfillMirrorQuestMarkers(); // KAP-558 review: legacy in-flight mirrors
     // A login is one authoritative observation of the citizen's current
@@ -1988,6 +1991,8 @@ void PlayerBotAI::OnLevelUp()
     AutoLearnSpellsForLevel();
     AutoAssignCitizenTalents();
     AutoEquipForLevel();
+    if (IsZoneCitizen())
+        RepairBotEquipment();
     PersistCitizenJournal(_progressionTravelActive ? 1 : 0);
 }
 
@@ -2166,7 +2171,7 @@ void PlayerBotAI::RefreshCitizenProgression(bool forceLog)
 // reconnect service. Run after auto-equipping so the whole carried loadout
 // starts at full durability. Preserve the fixture count correction that
 // prevents invalid stack counts on owned-companion equipment.
-void PlayerBotAI::RepairBotEquipmentAtLogin()
+void PlayerBotAI::RepairBotEquipment()
 {
     if (!me || (!IsZoneCitizen() && !IsOwnedCompanion()))
         return;
@@ -2196,7 +2201,7 @@ void PlayerBotAI::RepairBotEquipmentAtLogin()
     me->DurabilityRepairAll(false, 0.0f);
     uint32 const wornAfter = countWornCarriedItems();
     uint32 const restored = wornBefore > wornAfter ? wornBefore - wornAfter : 0;
-    sLog.outString("[BotLogin][Durability] GUID:%u restored:%u remaining:%u",
+    sLog.outString("[BotEquipment][Durability] GUID:%u restored:%u remaining:%u",
                    me->GetGUIDLow(), restored, wornAfter);
 
     if (!IsOwnedCompanion())
@@ -3885,6 +3890,11 @@ void PlayerBotAI::AutoEquipForLevel()
                      existingProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2 ||
                      existingProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF ||
                      existingProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM);
+                if (!requiresShield && !requiresOneHand && IsZoneCitizen() &&
+                    Companion::CitizenGearPolicy::ExistingItemAtLeastAsGood(
+                        existingProto->Quality, existingProto->ItemLevel,
+                        proto->Quality, proto->ItemLevel))
+                    continue;
                 bool const existingValuableUpgrade = existingProto->Quality >= ITEM_QUALITY_UNCOMMON &&
                     existingProto->ItemLevel >= proto->ItemLevel;
                 bool const sameOrBetterQualityAtLevel = existingProto->ItemLevel >= proto->ItemLevel &&
@@ -5046,8 +5056,9 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
                 sPlayerBotMgr.FormCitizenCombatGroup(me, target);
                 UpdateCombatPursuit(target, diff);
                 SetCitizenActivityIntent(2, "nearby-target");
-                sLog.outString("[ZoneCitizen] hunt guid:%u target:%u level:%u",
-                               me->GetGUIDLow(), target->GetGUIDLow(), target->GetLevel());
+                sLog.outString("[ZoneCitizen] hunt guid:%u target:%u citizen-level:%u target-level:%u",
+                               me->GetGUIDLow(), target->GetGUIDLow(),
+                               me->GetLevel(), target->GetLevel());
                 return true;
             }
             if (IsZoneCitizen())

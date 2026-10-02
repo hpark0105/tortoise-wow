@@ -60,6 +60,18 @@ int main()
     Check(!IsEligibleEffectiveLevel(14, 10), "more than three levels below is excluded");
     Check(!IsEligibleEffectiveLevel(14, 15), "above-level gear is excluded");
 
+    using Companion::CitizenGearPolicy::ExistingItemAtLeastAsGood;
+    Check(ExistingItemAtLeastAsGood(2, 8, 1, 14),
+          "equipped green is retained over higher-item-level gray");
+    Check(ExistingItemAtLeastAsGood(3, 5, 2, 14),
+          "equipped blue is retained over higher-item-level green");
+    Check(ExistingItemAtLeastAsGood(2, 14, 2, 13),
+          "same-quality higher-item-level gear is retained");
+    Check(!ExistingItemAtLeastAsGood(1, 10, 2, 8),
+          "higher-quality candidate can replace lower-quality gear");
+    Check(!ExistingItemAtLeastAsGood(2, 10, 2, 11),
+          "same-quality higher-item-level candidate can replace gear");
+
     if (failures)
         return 1;
     std::puts("gear policy tests: ALL OK");
