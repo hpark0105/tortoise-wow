@@ -595,11 +595,16 @@ void PlayerBotAI::UpdateAI(const uint32 diff)
                 vhp = victim->GetHealth();
                 vmax = victim->GetMaxHealth();
             }
-            sLog.outString("[PlayerBot] state GUID:%u map:%u pos:%.1f/%.1f/%.1f combat:%u victim:%u vhp:%u/%u mhp:%u/%u",
+            Group* group = me->GetGroup();
+            uint32 groupId = group ? group->GetId() : 0;
+            uint32 groupLeader = group ? group->GetLeaderGuid().GetCounter() : 0;
+            sLog.outString("[PlayerBot] state GUID:%u map:%u pos:%.1f/%.1f/%.1f combat:%u victim:%u vhp:%u/%u mhp:%u/%u group:%u leader:%u no-hunt-ms:%u tier:%u",
                            me->GetGUIDLow(), me->GetMapId(),
                            me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
                            me->IsInCombat() ? 1 : 0, vguid, vhp, vmax,
-                           me->GetHealth(), me->GetMaxHealth());
+                           me->GetHealth(), me->GetMaxHealth(), groupId, groupLeader,
+                           IsZoneCitizen() ? _noHuntTargetMs : 0,
+                           IsZoneCitizen() ? _noHuntTargetTier : 0);
         }
         else
             _obsTimer -= diff;
@@ -1905,6 +1910,16 @@ void PlayerBotAI::OnPlayerLogin()
         _citizenDeathX = 0.0f;
         _citizenDeathY = 0.0f;
         _citizenDangerZoneUntilMs = 0;
+        // A recovery-first login deliberately keeps the allocator's safety
+        // request pending until the normal reclaim handler makes this bot
+        // alive. Restore the request from the roster entry after login.
+        if (botEntry && botEntry->zoneWorldSafetyRelocation &&
+            botEntry->zoneWorldSafetyExcludeZone)
+        {
+            _citizenSafetyRelocationRequested = true;
+            _citizenDeathMap = botEntry->zoneWorldSafetyExcludeMap;
+            _citizenDeathZone = botEntry->zoneWorldSafetyExcludeZone;
+        }
         QueryResult* danger = CharacterDatabase.PQuery(
             "SELECT map_id,zone_id,cell_x,cell_y,deaths,"
             "safe_until>UNIX_TIMESTAMP(),"
@@ -4984,6 +4999,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         _destinationScanMs = 0;
         _noHuntTargetMs = 0;
         _noHuntTargetTier = 0;
+        _huntAnchorDiagnosticTier = 0;
         _activityNodeCount = 1;
         _activityCurrentNode = 0;
         _activityNodes[0] = ActivityNode();
@@ -5048,6 +5064,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
                                    me->GetGUIDLow(), _noHuntTargetMs);
                 _noHuntTargetMs = 0;
                 _noHuntTargetTier = 0;
+                _huntAnchorDiagnosticTier = 0;
                 _travelActive = false;
                 _travelHuntGuid = 0;
                 _travelNudging = false;
@@ -5213,6 +5230,7 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         _activityHomeZ = me->GetPositionZ();
         _noHuntTargetMs = 0;
         _noHuntTargetTier = 0;
+        _huntAnchorDiagnosticTier = 0;
         sLog.outString("[ZoneCitizen][Hunt] patrol-center-advanced guid:%u zone:%u",
                        me->GetGUIDLow(), me->GetZoneId());
     }
@@ -5248,9 +5266,33 @@ bool PlayerBotAI::UpdateIndependentActivity(uint32 diff)
         float const anchorSearchRadius = _noHuntTargetMs >= kCitizenNoTargetSecondExpansionMs
             ? 2000.0f : patrolRadius;
         WorldLocation anchor;
-        if (sPlayerBotMgr.SelectCitizenHuntAnchor(me->GetMapId(), _activityZone,
-                me->GetLevel(), me->GetPositionX(), me->GetPositionY(),
-                anchorSearchRadius, anchor))
+        bool const reportAnchorProbe = _noHuntTargetTier > _huntAnchorDiagnosticTier;
+        PlayerBotMgr::CitizenHuntAnchorSearchStats anchorStats;
+        bool const foundAnchor = sPlayerBotMgr.SelectCitizenHuntAnchor(
+            me->GetMapId(), _activityZone, me->GetLevel(), me->GetPositionX(),
+            me->GetPositionY(), anchorSearchRadius, anchor,
+            reportAnchorProbe ? &anchorStats : nullptr);
+        if (reportAnchorProbe)
+        {
+            _huntAnchorDiagnosticTier = _noHuntTargetTier;
+            char const* result = foundAnchor ? "selected" :
+                (anchorStats.bucketsVisited == 0
+                    ? (anchorStats.anchorsInHigherBands ? "only-higher-level-buckets" : "empty-level-buckets")
+                    : (anchorStats.anchorsInRange == 0
+                        ? "no-anchor-in-radius"
+                        : "random-sample-missed-in-range"));
+            sLog.outString("[ZoneCitizen][Hunt] anchor-probe guid:%u map:%u zone:%u level:%u tier:%u radius:%u result:%s buckets:%u anchors:%u higher-level-anchors:%u checked:%u in-range:%u too-near:%u too-far:%u samples:%u sample-in-range:%u sample-too-near:%u sample-too-far:%u truncated:%u",
+                           me->GetGUIDLow(), me->GetMapId(), _activityZone,
+                           me->GetLevel(), _noHuntTargetTier,
+                           (uint32)anchorSearchRadius, result,
+                           anchorStats.bucketsVisited, anchorStats.anchorsAvailable,
+                           anchorStats.anchorsInHigherBands, anchorStats.anchorsChecked,
+                           anchorStats.anchorsInRange, anchorStats.anchorsTooNear,
+                           anchorStats.anchorsTooFar, anchorStats.samplesDrawn,
+                           anchorStats.sampledInRange, anchorStats.sampledTooNear,
+                           anchorStats.sampledTooFar, anchorStats.countsTruncated ? 1 : 0);
+        }
+        if (foundAnchor)
         {
             StartActivityTravel(anchor.x, anchor.y, anchor.z, 0);
             SetCitizenActivityIntent(2, "hunting-spawn-anchor");
@@ -7378,6 +7420,42 @@ bool PlayerBotAI::UpdateRecovery(uint32 diff)
         }
         else
             _recoveryReportMs -= diff;
+        return true;
+    }
+    if (IsZoneCitizen() &&
+        !Companion::CitizenRecovery::IsOnCorpseMap(
+            me->GetMapId(), me->GetInstanceId(), corpse->GetMapId(),
+            corpse->GetInstanceId()))
+    {
+        // Older safety relocations may already have separated a ghost from
+        // its corpse. Return the ghost to its own body, then continue through
+        // the normal delay/range/reclaim handler. This recovery movement is
+        // never progression, retreat, or successful travel.
+        if (_recoveryWalkMs <= diff)
+        {
+            _recoveryWalkMs = kRecoveryWalkRetryMs;
+            me->GetMotionMaster()->Clear(true);
+            if (me->TeleportTo(corpse->GetMapId(), corpse->GetPositionX(),
+                               corpse->GetPositionY(), corpse->GetPositionZ(),
+                               corpse->GetOrientation()))
+            {
+                if (_recoveryReportMs <= diff)
+                {
+                    _recoveryReportMs = kRecoveryReportMs;
+                    sLog.outString("[PlayerBot][Recovery] corpse-map-return GUID:%u from:%u/%u to:%u/%u",
+                                   me->GetGUIDLow(), me->GetMapId(),
+                                   me->GetInstanceId(), corpse->GetMapId(),
+                                   corpse->GetInstanceId());
+                }
+            }
+            else
+                sLog.outString("[PlayerBot][Recovery] corpse-map-return-failed GUID:%u from:%u/%u to:%u/%u",
+                               me->GetGUIDLow(), me->GetMapId(),
+                               me->GetInstanceId(), corpse->GetMapId(),
+                               corpse->GetInstanceId());
+        }
+        else
+            _recoveryWalkMs -= diff;
         return true;
     }
     // Mirror the handler's reclaim gate: ghost time plus the standard

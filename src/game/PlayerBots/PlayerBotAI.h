@@ -232,6 +232,9 @@ class PlayerBotAI: public PlayerAI
         // It gradually widens same-zone patrol without bypassing hunt checks.
         uint32 _noHuntTargetMs = 0;
         uint8 _noHuntTargetTier = 0;
+        // Emit one anchor-cache diagnostic when each healthy no-prey tier is
+        // reached; reset with the no-target timer to keep logs bounded.
+        uint8 _huntAnchorDiagnosticTier = 0;
         // Small, session-scoped graph of successfully walked same-zone legs.
         // It is rebuilt after a map/zone change or a party release; no SQL or
         // route files are trusted as movement instructions.

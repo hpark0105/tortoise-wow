@@ -31,6 +31,20 @@ constexpr std::uint32_t kCriticalHealthPercent = 5u;
 // recovers instead. Necessary self-defense is never gated by it.
 constexpr std::uint32_t kHuntReadyHealthPercent = 80u;
 
+// Safety relocation must wait until a dead citizen completes its normal
+// corpse reclaim. Recovery also needs a map/instance match, not just close
+// coordinates, before the corpse can be reclaimed.
+constexpr bool ShouldDeferSafetyRelocation(bool alive)
+{
+    return !alive;
+}
+
+constexpr bool IsOnCorpseMap(std::uint32_t currentMap, std::uint32_t currentInstance,
+                             std::uint32_t corpseMap, std::uint32_t corpseInstance)
+{
+    return currentMap == corpseMap && currentInstance == corpseInstance;
+}
+
 // Danger memory stores the death location as a 40-yard grid cell. A spawn
 // candidate is unsafe when it lies in that cell or within the caller's
 // additional response radius around the cell. Measuring from the rectangle

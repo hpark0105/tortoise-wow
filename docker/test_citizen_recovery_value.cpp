@@ -35,9 +35,11 @@ using Companion::CitizenRecovery::HasDangerAreaEvidence;
 using Companion::CitizenRecovery::ShouldAvoidDangerCell;
 using Companion::CitizenRecovery::DangerCellBufferYards;
 using Companion::CitizenRecovery::IsOutsideDangerCell;
+using Companion::CitizenRecovery::IsOnCorpseMap;
 using Companion::CitizenRecovery::FirstUnsafeRememberedCell;
 using Companion::CitizenRecovery::IsUnsafeForRememberedCell;
 using Companion::CitizenRecovery::RememberedDangerCell;
+using Companion::CitizenRecovery::ShouldDeferSafetyRelocation;
 
 void TestDangerCellGeometry()
 {
@@ -80,6 +82,20 @@ void TestDangerMemoryEvidenceAndExpiry()
           "danger-memory: recent repeated deaths use medium buffer");
     Check(DangerCellBufferYards(false, 3600u) == 40.0f,
           "danger-memory: older repeated deaths use narrow buffer");
+}
+
+void TestCorpseRecoveryPrecedesSafetyRelocation()
+{
+    Check(ShouldDeferSafetyRelocation(false),
+          "corpse recovery: dead citizen defers safety relocation");
+    Check(!ShouldDeferSafetyRelocation(true),
+          "corpse recovery: living citizen may safety-relocate");
+    Check(IsOnCorpseMap(1u, 0u, 1u, 0u),
+          "corpse recovery: matching map and instance are reclaim-compatible");
+    Check(!IsOnCorpseMap(0u, 0u, 1u, 0u),
+          "corpse recovery: coordinates on another map still require return");
+    Check(!IsOnCorpseMap(1u, 1u, 1u, 0u),
+          "corpse recovery: matching map with another instance still requires return");
 }
 
 void TestRetreatHealthThreshold()
@@ -721,6 +737,7 @@ int main()
 {
     TestDangerCellGeometry();
     TestDangerMemoryEvidenceAndExpiry();
+    TestCorpseRecoveryPrecedesSafetyRelocation();
     TestRetreatHealthThreshold();
     TestNoStart();
     TestResetAndRestart();

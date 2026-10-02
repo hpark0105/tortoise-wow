@@ -8,8 +8,9 @@ huge-diff saturation, nonfinite coordinates, and the retry policy's
 failure escalation, cooldown boundary/huge-diff, deferred state, failed
 endpoint exclusion/alternate/expiry, duplicate refresh, bounded memory
 eviction, invalid coordinates, saturation, reset, a three-failed-Progress
-escalation simulation, follower movement versus stall, and recovery priority
-over voluntary group duty. No Docker, no database,
+escalation simulation, follower movement versus stall, recovery priority
+over voluntary group duty, and corpse-map recovery before safety relocation.
+No Docker, no database,
 no game server needed. Skips when no compiler is available.
 """
 import os

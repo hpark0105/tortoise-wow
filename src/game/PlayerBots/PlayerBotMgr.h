@@ -13,6 +13,7 @@
 
 #include <vector>
 #include <tuple>
+#include <set>
 
 class PlayerBotAI;
 class WorldSession;
@@ -176,9 +177,25 @@ class PlayerBotMgr
         // Pick a nearby static spawn anchor whose ordinary creature level
         // range can yield prey suitable for this citizen. The AI still walks
         // there and revalidates live targets before combat.
+        struct CitizenHuntAnchorSearchStats
+        {
+            uint32 bucketsVisited = 0;
+            uint32 anchorsAvailable = 0;
+            uint32 anchorsInHigherBands = 0;
+            uint32 anchorsChecked = 0;
+            uint32 anchorsInRange = 0;
+            uint32 anchorsTooNear = 0;
+            uint32 anchorsTooFar = 0;
+            uint32 samplesDrawn = 0;
+            uint32 sampledInRange = 0;
+            uint32 sampledTooNear = 0;
+            uint32 sampledTooFar = 0;
+            bool countsTruncated = false;
+        };
         bool SelectCitizenHuntAnchor(uint32 mapId, uint32 zoneId, uint32 level,
                                      float fromX, float fromY, float maxDistance,
-                                     WorldLocation& destination) const;
+                                     WorldLocation& destination,
+                                     CitizenHuntAnchorSearchStats* stats = nullptr) const;
         // Creature-spawn difficulty is the authoritative fallback where the
         // client AreaTable has a zero or missing level. It is derived once
         // from ordinary, non-NPC creature spawns when map anchors are built.
@@ -325,6 +342,7 @@ class PlayerBotMgr
         // each map/zone list once rather than scanning the world per login.
         std::map<std::pair<uint32, uint32>, std::vector<WorldLocation>> m_zoneSpawnAnchors;
         std::map<std::tuple<uint32, uint32, uint32>, std::vector<WorldLocation>> m_zoneHuntSpawnAnchors;
+        std::set<uint32> m_zoneSpawnAnchorMapsBuilt;
         struct CitizenZoneDifficulty
         {
             uint32 samples = 0;
@@ -342,6 +360,7 @@ class PlayerBotMgr
             m_citizenMigrationEvidence;
         bool m_citizenMigrationEvidenceLoaded = false;
         void LoadCitizenMigrationEvidence();
+        void BuildCitizenSpawnAnchorCaches();
         void UpdateZoneWorldPopulation();
         bool confWorldIntentEnabled = false;
         uint32 confWorldIntentIntervalMs = 600000;
